@@ -25,7 +25,13 @@ Then open **http://localhost:3000** in your browser.
 To see the app with some invented sample data in it, run `npm run seed` before
 `npm start`. It does nothing if you already have schools in the database.
 
-To use a different port: `PORT=4000 npm start`.
+To use a different port: `PORT=4000 npm start`. In PowerShell on Windows,
+settings go on their own line instead:
+
+```powershell
+$env:PORT = "4000"
+npm start
+```
 
 The app has no login when you run it locally. If you ever want one — because
 you are running it somewhere other people can reach — set `APP_PASSWORD` and
@@ -71,17 +77,33 @@ Two things are different from running it on your laptop:
   needs you to sign in once. Without it the app is wide open, which is fine on
   your own laptop and not fine on the internet.
 
-Once, to set it up:
+First install the Fly command line tool, if you have not already:
+
+```bash
+curl -L https://fly.io/install.sh | sh            # macOS or Linux
+```
+
+```powershell
+pwsh -Command "iwr https://fly.io/install.ps1 -useb | iex"   # Windows
+```
+
+Then, once, to set the app up:
 
 ```bash
 fly auth login
 fly launch --no-deploy --copy-config --name your-app-name --region bom
 fly volumes create assessments_data --region bom --size 1
-fly secrets set APP_PASSWORD='a long password you choose'
+fly secrets set "APP_PASSWORD=a long password you choose"
 ```
+
+Those four run the same in PowerShell. Keep the quotes around the whole
+`APP_PASSWORD=...` argument so a password with spaces stays in one piece.
 
 The app name has to be unique across all of Fly, so pick something specific.
 Keep `--region` the same in both commands; `bom` is Mumbai.
+
+You do not need Docker installed: `fly deploy` builds the image on Fly's own
+builder unless you ask for `--local-only`.
 
 Then, to deploy, and after any change:
 
