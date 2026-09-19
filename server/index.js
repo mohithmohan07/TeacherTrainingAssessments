@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import multer from 'multer';
 import db, { DATA_DIR, UPLOADS_DIR } from './db.js';
+import { installAuth, authEnabled } from './auth.js';
 import schoolsRouter from './routes/schools.js';
 import teachersRouter from './routes/teachers.js';
 import assessmentsRouter from './routes/assessments.js';
@@ -12,8 +13,17 @@ const PORT = Number(process.env.PORT ?? 3000);
 
 const app = express();
 
+// Behind Fly's proxy, so req.ip and req.secure reflect the real client.
+app.set('trust proxy', 1);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Health check for the hosting platform: no session needed, no data exposed.
+app.get('/healthz', (_req, res) => res.json({ ok: true }));
+
+// When APP_PASSWORD is set, everything below this line needs a signed session.
+installAuth(app);
 
 app.use('/uploads', express.static(UPLOADS_DIR, { index: false, maxAge: '1h' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
@@ -50,7 +60,7 @@ app.get('/api/stats', (_req, res) => {
 });
 
 // Anything else that is not an API call is handled by the single-page app.
-app.get(/^\/(?!api\/|uploads\/).*/, (_req, res) => {
+app.get(/^\/(?!api\/|uploads\/|healthz|login|logout).*/, (_req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
@@ -70,5 +80,6 @@ app.use((error, _req, res, _next) => {
 app.listen(PORT, () => {
   console.log(`\n  Teacher Training Assessments`);
   console.log(`  Open http://localhost:${PORT} in your browser`);
-  console.log(`  Data is stored in ${DATA_DIR}\n`);
+  console.log(`  Data is stored in ${DATA_DIR}`);
+  console.log(authEnabled ? '  Password protection is on.\n' : '  Password protection is off (set APP_PASSWORD to turn it on).\n');
 });
