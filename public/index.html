@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Teacher Training Assessments</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>" />
+    <link rel="stylesheet" href="/css/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">TT</span>
+          <span class="brand-text">
+            <strong>Teacher Training</strong>
+            <small>Assessments</small>
+          </span>
+        </div>
+        <nav id="nav" class="nav">
+          <a href="#/dashboard" data-route="dashboard">Dashboard</a>
+          <a href="#/schools" data-route="schools">Schools &amp; teachers</a>
+          <a href="#/assessments" data-route="assessments">Assessments</a>
+        </nav>
+        <p class="sidebar-foot">Runs on your laptop. Data stays in <code>data/</code>.</p>
+      </aside>
+      <main id="view" class="view" aria-live="polite"></main>
+    </div>
+    <div id="toasts" class="toasts" aria-live="assertive"></div>
+    <script type="module" src="/js/app.js"></script>
+  </body>
+</html>

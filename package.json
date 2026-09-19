@@ -1,0 +1,21 @@
+{
+  "name": "teacher-training-assessments",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Manage schools, teachers and teacher training assessment evaluations.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "seed": "node server/seed.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "exceljs": "^4.4.0",
+    "express": "^5.2.1",
+    "multer": "^2.4.0"
+  }
+}
