@@ -59,23 +59,41 @@ any page to see it full size.
 
 JPG, PNG, WEBP, TIFF, GIF and BMP are accepted, up to 25 MB per page.
 
-## Hosting it somewhere other than your laptop
+## Running it on Fly.io
 
-There is no deployment configuration in this repository — set the hosting up
-whichever way suits you. Two things about this app matter wherever it runs:
+The app is deployed to Fly as `teachertrainingassessments`, and `fly.toml` and
+`Dockerfile` in this repository are what the deploy builds from. Three settings
+have to agree with each other, and the app breaks in a confusing way if they
+drift apart:
 
-- **The database and the scans are files on disk.** They live in the folder
-  `DATA_DIR` points at, `data/` by default. Most hosts wipe a machine's own
-  disk on every deploy, so point `DATA_DIR` at storage that survives one, and
-  run a single instance: two instances with separate disks would quietly keep
-  two separate databases.
-- **Set `APP_PASSWORD` if the app is reachable from the internet.** With it
-  set, every page, API call and scanned image needs you to sign in once, and
-  the session lasts 30 days. Without it the app is wide open — fine on your own
-  laptop, not fine on a public URL. Changing the password signs everyone out.
+- **`PORT` in `[env]` and `internal_port` in `[http_service]` must be the same
+  number.** The app listens on `PORT`. If they disagree, Fly forwards traffic
+  to a port with nothing on it and every request returns 502, which looks like
+  the app is broken rather than misrouted.
+- **`DATA_DIR` in `[env]` must be the `destination` of the `[[mounts]]`
+  block.** That is where the SQLite database and the uploaded scans are
+  written. If `DATA_DIR` is unset or points anywhere else, the data goes on the
+  machine's own disk and is wiped on the next deploy, while the volume sits
+  empty.
+- **The app must run on one machine**, because the volume belongs to one
+  machine. Two would quietly keep two separate databases. `fly scale count 1`.
 
-The app listens on `PORT` (3000 by default) and answers `GET /healthz` with
-`{"ok":true}`, which is usually what a host wants for a health check.
+Set the password as a secret, not in `fly.toml` — without it the URL is open to
+anyone who finds it:
+
+```
+fly secrets set "APP_PASSWORD=a long password you choose"
+```
+
+Changing it later signs everyone out. `GET /healthz` answers `{"ok":true}` and
+is what the health check in `fly.toml` uses, so a deploy that cannot serve
+traffic rolls back instead of going live broken.
+
+To take a copy of the database off the volume:
+
+```
+fly ssh sftp get /data/app.db
+```
 
 ## Where your data lives
 
@@ -88,8 +106,7 @@ That folder is **not** committed to git, so nothing about a real school or
 teacher ends up on GitHub. To back your work up, copy the whole `data/` folder.
 To start over, delete it and restart the app.
 
-Wherever else you run it, the same two live under whatever `DATA_DIR` points
-at, never in the repository.
+On Fly the same two live on the volume at `/data`, never in the repository.
 
 Set `DATA_DIR` to keep it somewhere else, for example
 `DATA_DIR=~/Documents/assessments npm start`.
@@ -105,6 +122,8 @@ Plain and deliberately boring, so it keeps working:
   step, so what is in the folder is what runs in the browser.
 
 ```
+Dockerfile          builds the image that Fly runs
+fly.toml            the Fly machine, volume, ports and health check
 server/
   index.js          the Express app and the dashboard stats
   auth.js           the optional password gate (off unless APP_PASSWORD is set)
