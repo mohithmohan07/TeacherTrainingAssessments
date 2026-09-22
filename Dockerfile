@@ -40,5 +40,9 @@ VOLUME /data
 
 # Start the server by default, this can be overwritten at runtime
 EXPOSE 3000
-ENV DATABASE_URL="file:///data/sqlite.db"
+
+# Where the SQLite database and the uploaded scans go. fly.toml sets this too;
+# having it here means the image is correct even if it is deployed another way.
+ENV DATA_DIR="/data"
+
 CMD [ "npm", "run", "start" ]
