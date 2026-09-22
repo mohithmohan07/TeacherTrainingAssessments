@@ -59,71 +59,23 @@ any page to see it full size.
 
 JPG, PNG, WEBP, TIFF, GIF and BMP are accepted, up to 25 MB per page.
 
-## Running it on Fly.io
+## Hosting it somewhere other than your laptop
 
-The repository is set up to deploy to [Fly.io](https://fly.io): `Dockerfile`
-builds the app, and `fly.toml` describes the machine, a persistent volume for
-the data, and a health check.
+There is no deployment configuration in this repository — set the hosting up
+whichever way suits you. Two things about this app matter wherever it runs:
 
-Two things are different from running it on your laptop:
+- **The database and the scans are files on disk.** They live in the folder
+  `DATA_DIR` points at, `data/` by default. Most hosts wipe a machine's own
+  disk on every deploy, so point `DATA_DIR` at storage that survives one, and
+  run a single instance: two instances with separate disks would quietly keep
+  two separate databases.
+- **Set `APP_PASSWORD` if the app is reachable from the internet.** With it
+  set, every page, API call and scanned image needs you to sign in once, and
+  the session lasts 30 days. Without it the app is wide open — fine on your own
+  laptop, not fine on a public URL. Changing the password signs everyone out.
 
-- **The data has to live on a volume.** A Fly machine's own disk is wiped on
-  every deploy, so the SQLite database and the scans are kept on a volume
-  mounted at `/data`, and `DATA_DIR=/data` points the app at it. Because a
-  volume belongs to one machine, the app must run on exactly one machine —
-  `fly scale count 1`. Two machines would quietly keep two separate databases.
-- **The URL is public.** Anyone who has it can reach the app, so set a
-  password: with `APP_PASSWORD` set, every page, API call and scanned image
-  needs you to sign in once. Without it the app is wide open, which is fine on
-  your own laptop and not fine on the internet.
-
-First install the Fly command line tool, if you have not already:
-
-```bash
-curl -L https://fly.io/install.sh | sh            # macOS or Linux
-```
-
-```powershell
-pwsh -Command "iwr https://fly.io/install.ps1 -useb | iex"   # Windows
-```
-
-Then, once, to set the app up:
-
-```bash
-fly auth login
-fly launch --no-deploy --copy-config --name your-app-name --region bom
-fly volumes create assessments_data --region bom --size 1
-fly secrets set "APP_PASSWORD=a long password you choose"
-```
-
-Those four run the same in PowerShell. Keep the quotes around the whole
-`APP_PASSWORD=...` argument so a password with spaces stays in one piece.
-
-The app name has to be unique across all of Fly, so pick something specific.
-Keep `--region` the same in both commands; `bom` is Mumbai.
-
-You do not need Docker installed: `fly deploy` builds the image on Fly's own
-builder unless you ask for `--local-only`.
-
-Then, to deploy, and after any change:
-
-```bash
-fly deploy
-fly scale count 1     # only needed the first time
-fly open
-```
-
-Useful afterwards:
-
-```bash
-fly logs                              # what the app is doing
-fly ssh console                       # a shell on the machine
-fly ssh sftp get /data/app.db         # download a copy of the database
-fly secrets set APP_PASSWORD='new'    # change the password; signs everyone out
-```
-
-Fly snapshots the volume daily by default, but a snapshot is not a backup you
-control — download `app.db` now and then if the records matter.
+The app listens on `PORT` (3000 by default) and answers `GET /healthz` with
+`{"ok":true}`, which is usually what a host wants for a health check.
 
 ## Where your data lives
 
@@ -136,7 +88,8 @@ That folder is **not** committed to git, so nothing about a real school or
 teacher ends up on GitHub. To back your work up, copy the whole `data/` folder.
 To start over, delete it and restart the app.
 
-On Fly the same two live on the volume at `/data`, not in the repository.
+Wherever else you run it, the same two live under whatever `DATA_DIR` points
+at, never in the repository.
 
 Set `DATA_DIR` to keep it somewhere else, for example
 `DATA_DIR=~/Documents/assessments npm start`.
@@ -152,8 +105,6 @@ Plain and deliberately boring, so it keeps working:
   step, so what is in the folder is what runs in the browser.
 
 ```
-Dockerfile          builds the container image for Fly
-fly.toml            the Fly machine, volume and health check
 server/
   index.js          the Express app and the dashboard stats
   auth.js           the optional password gate (off unless APP_PASSWORD is set)
