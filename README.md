@@ -61,39 +61,69 @@ JPG, PNG, WEBP, TIFF, GIF and BMP are accepted, up to 25 MB per page.
 
 ## Running it on Fly.io
 
-The app is deployed to Fly as `teachertrainingassessments`, and `fly.toml` and
-`Dockerfile` in this repository are what the deploy builds from. Three settings
-have to agree with each other, and the app breaks in a confusing way if they
-drift apart:
+The repository is set up to deploy to [Fly.io](https://fly.io): `Dockerfile`
+builds the app, and `fly.toml` describes the machine, a persistent volume for
+the data, and a health check.
 
-- **`PORT` in `[env]` and `internal_port` in `[http_service]` must be the same
-  number.** The app listens on `PORT`. If they disagree, Fly forwards traffic
-  to a port with nothing on it and every request returns 502, which looks like
-  the app is broken rather than misrouted.
-- **`DATA_DIR` in `[env]` must be the `destination` of the `[[mounts]]`
-  block.** That is where the SQLite database and the uploaded scans are
-  written. If `DATA_DIR` is unset or points anywhere else, the data goes on the
-  machine's own disk and is wiped on the next deploy, while the volume sits
-  empty.
-- **The app must run on one machine**, because the volume belongs to one
-  machine. Two would quietly keep two separate databases. `fly scale count 1`.
+Two things are different from running it on your laptop:
 
-Set the password as a secret, not in `fly.toml` — without it the URL is open to
-anyone who finds it:
+- **The data has to live on a volume.** A Fly machine's own disk is wiped on
+  every deploy, so the SQLite database and the scans are kept on a volume
+  mounted at `/data`, and `DATA_DIR=/data` points the app at it. Because a
+  volume belongs to one machine, the app must run on exactly one machine —
+  `fly scale count 1`. Two machines would quietly keep two separate databases.
+- **The URL is public.** Anyone who has it can reach the app, so set a
+  password: with `APP_PASSWORD` set, every page, API call and scanned image
+  needs you to sign in once. Without it the app is wide open, which is fine on
+  your own laptop and not fine on the internet.
 
+First install the Fly command line tool, if you have not already:
+
+```bash
+curl -L https://fly.io/install.sh | sh            # macOS or Linux
 ```
+
+```powershell
+pwsh -Command "iwr https://fly.io/install.ps1 -useb | iex"   # Windows
+```
+
+Then, once, to set the app up:
+
+```bash
+fly auth login
+fly launch --no-deploy --copy-config --name your-app-name --region bom
+fly volumes create assessments_data --region bom --size 1
 fly secrets set "APP_PASSWORD=a long password you choose"
 ```
 
-Changing it later signs everyone out. `GET /healthz` answers `{"ok":true}` and
-is what the health check in `fly.toml` uses, so a deploy that cannot serve
-traffic rolls back instead of going live broken.
+Those four run the same in PowerShell. Keep the quotes around the whole
+`APP_PASSWORD=...` argument so a password with spaces stays in one piece.
 
-To take a copy of the database off the volume:
+The app name has to be unique across all of Fly, so pick something specific.
+Keep `--region` the same in both commands; `bom` is Mumbai.
 
+You do not need Docker installed: `fly deploy` builds the image on Fly's own
+builder unless you ask for `--local-only`.
+
+Then, to deploy, and after any change:
+
+```bash
+fly deploy
+fly scale count 1     # only needed the first time
+fly open
 ```
-fly ssh sftp get /data/app.db
+
+Useful afterwards:
+
+```bash
+fly logs                              # what the app is doing
+fly ssh console                       # a shell on the machine
+fly ssh sftp get /data/app.db         # download a copy of the database
+fly secrets set APP_PASSWORD='new'    # change the password; signs everyone out
 ```
+
+Fly snapshots the volume daily by default, but a snapshot is not a backup you
+control — download `app.db` now and then if the records matter.
 
 ## Where your data lives
 
@@ -106,7 +136,7 @@ That folder is **not** committed to git, so nothing about a real school or
 teacher ends up on GitHub. To back your work up, copy the whole `data/` folder.
 To start over, delete it and restart the app.
 
-On Fly the same two live on the volume at `/data`, never in the repository.
+On Fly the same two live on the volume at `/data`, not in the repository.
 
 Set `DATA_DIR` to keep it somewhere else, for example
 `DATA_DIR=~/Documents/assessments npm start`.
@@ -122,8 +152,8 @@ Plain and deliberately boring, so it keeps working:
   step, so what is in the folder is what runs in the browser.
 
 ```
-Dockerfile          builds the image that Fly runs
-fly.toml            the Fly machine, volume, ports and health check
+Dockerfile          builds the container image for Fly
+fly.toml            the Fly machine, volume and health check
 server/
   index.js          the Express app and the dashboard stats
   auth.js           the optional password gate (off unless APP_PASSWORD is set)

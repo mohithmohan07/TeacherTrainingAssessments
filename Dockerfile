@@ -1,48 +1,33 @@
-# syntax = docker/dockerfile:1
+# Build stage: install production dependencies, with the toolchain that
+# better-sqlite3 needs if no prebuilt binary matches this platform.
+FROM node:22-slim AS build
 
-# Adjust NODE_VERSION as desired
-ARG NODE_VERSION=22.21.1
-FROM node:${NODE_VERSION}-slim AS base
-
-LABEL fly_launch_runtime="Node.js"
-
-# Node.js app lives here
 WORKDIR /app
 
-# Set production environment
-ENV NODE_ENV="production"
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 make g++ ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
-# Throw-away build stage to reduce size of final image
-FROM base AS build
+COPY server ./server
+COPY public ./public
 
-# Install packages needed to build node modules
-RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y build-essential node-gyp pkg-config python-is-python3
+# Runtime stage: just Node and the built app.
+FROM node:22-slim
 
-# Install node modules
-COPY package-lock.json package.json ./
-RUN npm ci
+ENV NODE_ENV=production \
+    PORT=8080 \
+    DATA_DIR=/data
 
-# Copy application code
-COPY . .
+WORKDIR /app
 
-
-# Final stage for app image
-FROM base
-
-# Copy built application
 COPY --from=build /app /app
 
-# Setup sqlite3 on a separate volume
+# The Fly volume is mounted here; this only matters when running without one.
 RUN mkdir -p /data
-VOLUME /data
 
-# Start the server by default, this can be overwritten at runtime
-EXPOSE 3000
+EXPOSE 8080
 
-# Where the SQLite database and the uploaded scans go. fly.toml sets this too;
-# having it here means the image is correct even if it is deployed another way.
-ENV DATA_DIR="/data"
-
-CMD [ "npm", "run", "start" ]
+CMD ["node", "server/index.js"]

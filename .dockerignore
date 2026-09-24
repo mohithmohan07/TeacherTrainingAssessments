@@ -1,5 +1,7 @@
-node_modules/
-data/
+node_modules
+data
+.git
+.gitignore
 *.log
 .DS_Store
 .env
