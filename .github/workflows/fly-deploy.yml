@@ -1,0 +1,62 @@
+# Deploy the app to Fly.io from the repository, so a redeploy never depends on
+# flyctl being installed or runnable on anyone's laptop. The fly.toml and
+# Dockerfile in this repository are what ship, which keeps the deployed config
+# and the committed config from drifting apart.
+#
+# One-time setup, both under Settings -> Secrets and variables -> Actions:
+#
+#   Secret    FLY_API_TOKEN   required. Create it at
+#                             https://fly.io/user/personal_access_tokens
+#   Variable  FLY_APP         optional. The Fly app to deploy to, when its name
+#                             differs from the `app` value in fly.toml.
+#
+# Note that `flyctl deploy` never creates volumes. If the app is rebuilt from
+# scratch, create the volume named in fly.toml's [[mounts]] first, or the
+# machine will come up with nowhere to keep the database and the scans.
+
+name: Deploy to Fly.io
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# The database lives on one volume attached to one machine, so two deploys must
+# never overlap.
+concurrency:
+  group: fly-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the commit being deployed
+        uses: actions/checkout@v4
+
+      - name: Check the Fly API token is set
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          if [ -z "$FLY_API_TOKEN" ]; then
+            echo "::error::FLY_API_TOKEN is not set. Add it under Settings -> Secrets and variables -> Actions -> New repository secret."
+            exit 1
+          fi
+
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP: ${{ vars.FLY_APP }}
+        run: |
+          if [ -n "$FLY_APP" ]; then
+            flyctl deploy --remote-only --app "$FLY_APP"
+          else
+            flyctl deploy --remote-only
+          fi
