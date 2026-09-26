@@ -1,42 +1,40 @@
-# Fly.io configuration for the Teacher Training Assessments app.
+# fly.toml app configuration file generated for teachertrainingassessments on 2026-09-26T10:23:47Z
 #
-# The app keeps its SQLite database and the uploaded scans on a single
-# persistent volume mounted at /data, so it must run on exactly one machine:
-#   fly scale count 1
-# Two machines would each get their own volume and their own separate data.
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-app = "teachertrainingassessments"
-primary_region = "ams"   # Amsterdam — where this app's machine actually runs
+app = 'teachertrainingassessments'
+primary_region = 'ams'
 
 [build]
 
 [env]
-  PORT = "8080"
-  DATA_DIR = "/data"
+  DATA_DIR = '/data'
+  PORT = '8080'
+
+[[mounts]]
+  source = 'assessments_data'
+  destination = '/data'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = "suspend"
+  auto_stop_machines = 'suspend'
   auto_start_machines = true
   min_machines_running = 0
 
   [http_service.concurrency]
-    type = "requests"
+    type = 'requests'
     hard_limit = 50
     soft_limit = 40
 
   [[http_service.checks]]
-    grace_period = "10s"
-    interval = "30s"
-    method = "GET"
-    timeout = "5s"
-    path = "/healthz"
-
-[[mounts]]
-  source = "assessments_data"
-  destination = "/data"
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '10s'
+    method = 'GET'
+    path = '/healthz'
 
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "512mb"
+  size = 'shared-cpu-1x'
+  memory = '512mb'
