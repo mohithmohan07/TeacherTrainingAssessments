@@ -16,7 +16,7 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
   const schools = await schoolsApi.list();
 
   if (!schools.length) {
-    mount(root, 
+    mount(root,
       h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Assessments'))),
       emptyState(
         'Add a school and its teachers first — then you can start an assessment.',
@@ -28,19 +28,18 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
 
   const state = {
     schoolId: query.get('school') ?? String(schools[0].id),
-    teacherId: query.get('teacher') ?? '',
-    teachers: [],
+    roster: [],
     assessments: [],
   };
 
   const container = h('div', {});
 
   async function load() {
-    const [teachers, assessments] = await Promise.all([
-      teachersApi.list({ school_id: state.schoolId }),
-      assessmentsApi.list(state.teacherId ? { teacher_id: state.teacherId } : { school_id: state.schoolId }),
+    const [roster, assessments] = await Promise.all([
+      teachersApi.roster(state.schoolId),
+      assessmentsApi.list({ school_id: state.schoolId }),
     ]);
-    state.teachers = teachers;
+    state.roster = roster;
     state.assessments = assessments;
     draw();
   }
@@ -49,78 +48,23 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
     const schoolSelect = select('school', schools.map((s) => ({ value: String(s.id), label: s.name })), { value: state.schoolId });
     schoolSelect.addEventListener('change', () => {
       state.schoolId = schoolSelect.value;
-      state.teacherId = '';
       load();
     });
 
-    const teacherSelect = select(
-      'teacher',
-      [{ value: '', label: 'All teachers' }, ...state.teachers.map((t) => ({ value: String(t.id), label: t.grade ? `${t.name} — ${t.grade}` : t.name }))],
-      { value: state.teacherId }
-    );
-    teacherSelect.addEventListener('change', () => {
-      state.teacherId = teacherSelect.value;
-      load();
-    });
-
-    const pickerCard = h(
-      'div',
-      { class: 'card' },
-      h('h2', {}, 'Pick a school and teacher'),
-      h('p', { class: 'hint' }, 'Choose the school, then the teacher whose paper you are evaluating.'),
-      h('div', { class: 'form-grid' }, field('School', schoolSelect), field('Teacher', teacherSelect)),
-      state.teachers.length
-        ? null
-        : h('p', { class: 'hint', style: 'margin-top:12px' }, h('a', { href: `#/schools/${state.schoolId}` }, 'This school has no teachers yet — add or import them first.'))
-    );
-
-    const newCard = state.teachers.length ? newAssessmentCard(state, load) : null;
-
-    const listCard = h(
-      'div',
-      { class: 'card' },
-      h('h2', {}, 'Assessments'),
-      state.assessments.length
-        ? h(
-            'div',
-            { class: 'table-wrap' },
-            h(
-              'table',
-              {},
-              h(
-                'thead',
-                {},
-                h('tr', {}, h('th', {}, 'Assessment'), h('th', {}, 'Teacher'), h('th', {}, 'Date'), h('th', {}, 'Pages'), h('th', {}, 'Score'), h('th', {}, 'Status'))
-              ),
-              h(
-                'tbody',
-                {},
-                state.assessments.map((row) =>
-                  h(
-                    'tr',
-                    { style: 'cursor:pointer', onclick: () => window.navigate(`/assessments/${row.id}`) },
-                    h('td', {}, row.title),
-                    h('td', {}, row.teacher_grade ? `${row.teacher_name} — ${row.teacher_grade}` : row.teacher_name),
-                    h('td', {}, formatDate(row.assessment_date) || '—'),
-                    h('td', {}, `${row.question_paper_count} paper · ${row.response_count} response`),
-                    h('td', {}, row.score === null ? '—' : `${row.score}${row.max_score ? ` / ${row.max_score}` : ''}`),
-                    h('td', {}, statusBadge(row.status))
-                  )
-                )
-              )
-            )
-          )
-        : emptyState('No assessments for this selection yet.')
-    );
-
-    mount(container, 
+    mount(container,
       h(
         'div',
         { class: 'page-head' },
-        h('div', {}, h('h1', {}, 'Assessments'), h('p', {}, 'Start an assessment, then upload the scanned question paper and the teacher’s responses.'))
+        h(
+          'div',
+          {},
+          h('h1', {}, 'Assessments'),
+          h('p', {}, 'Upload each teacher’s question paper and response on their row. Evaluating is a separate step.')
+        )
       ),
-      h('div', { class: 'grid-2' }, pickerCard, newCard),
-      listCard
+      h('div', { class: 'card' }, h('div', { class: 'form-grid' }, field('School', schoolSelect))),
+      teacherBoardCard(state, load),
+      historyCard(state)
     );
   }
 
@@ -128,41 +72,178 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
   await load();
 }
 
-function newAssessmentCard(state, reload) {
-  const teacherSelect = select(
-    'teacher_id',
-    state.teachers.map((t) => ({ value: String(t.id), label: t.grade ? `${t.name} — ${t.grade}` : t.name })),
-    { value: state.teacherId || String(state.teachers[0].id), id: 'f-new-teacher' }
-  );
+/* -------------------------------------------------------- the teacher board */
 
-  const form = h(
-    'form',
-    {
-      onsubmit: async (event) => {
-        event.preventDefault();
-        const data = Object.fromEntries(new FormData(form));
-        try {
-          const created = await assessmentsApi.create(data);
-          toast('Assessment created — now upload the scans.', 'success');
-          window.navigate(`/assessments/${created.id}`);
-          await reload();
-        } catch (error) {
-          toast(error.message, 'error');
-        }
-      },
-    },
+function teacherBoardCard(state, reload) {
+  if (!state.roster.length) {
+    return h(
+      'div',
+      { class: 'card' },
+      h('h2', {}, 'Teachers'),
+      emptyState(
+        'This school has no teachers yet.',
+        h('a', { class: 'btn btn-primary', href: `#/schools/${state.schoolId}`, style: 'margin-top:12px' }, 'Add or import teachers')
+      )
+    );
+  }
+
+  return h(
+    'div',
+    { class: 'card' },
+    h('h2', {}, `Teachers (${state.roster.length})`),
+    h('p', { class: 'hint' }, 'Uploading pages only files them against the teacher. Nothing is evaluated until you press Evaluate.'),
     h(
       'div',
-      { class: 'form-grid' },
-      field('Teacher', teacherSelect),
-      field('Date', input('assessment_date', { type: 'date', value: new Date().toISOString().slice(0, 10) })),
-      field('Title', input('title', { placeholder: 'Term 1 classroom observation' }), { span: true, hint: 'Leave blank and the teacher’s name is used.' }),
-      field('Subject', input('subject', { placeholder: 'Mathematics' }))
-    ),
-    h('div', { class: 'form-actions' }, h('button', { class: 'btn btn-primary', type: 'submit' }, 'Start assessment'))
+      { class: 'table-wrap' },
+      h(
+        'table',
+        {},
+        h(
+          'thead',
+          {},
+          h(
+            'tr',
+            {},
+            h('th', {}, 'Teacher'),
+            h('th', {}, 'Question paper'),
+            h('th', {}, 'Teacher’s response'),
+            h('th', {}, 'Status'),
+            h('th', { class: 'right' }, '')
+          )
+        ),
+        h(
+          'tbody',
+          {},
+          state.roster.map((teacher) =>
+            h(
+              'tr',
+              {},
+              h(
+                'td',
+                {},
+                h('strong', {}, teacher.name),
+                [teacher.grade, teacher.subjects].filter(Boolean).length
+                  ? h('div', { class: 'hint' }, [teacher.grade, teacher.subjects].filter(Boolean).join(' · '))
+                  : null
+              ),
+              h('td', {}, scanCell(teacher, 'question_paper', teacher.question_paper_count, reload)),
+              h('td', {}, scanCell(teacher, 'response', teacher.response_count, reload)),
+              h(
+                'td',
+                {},
+                teacher.assessment_id
+                  ? statusBadge(teacher.assessment_status)
+                  : h('span', { class: 'badge draft' }, 'Not started'),
+                teacher.score === null || teacher.score === undefined
+                  ? null
+                  : h('div', { class: 'hint' }, `${teacher.score}${teacher.max_score ? ` / ${teacher.max_score}` : ''}`)
+              ),
+              h('td', { class: 'right' }, evaluateButton(teacher))
+            )
+          )
+        )
+      )
+    )
+  );
+}
+
+// One upload control for one kind of scan, on one teacher's row.
+function scanCell(teacher, kind, count, reload) {
+  const label = count ? `${count} page${count === 1 ? '' : 's'}` : 'None yet';
+  const fileInput = h('input', { type: 'file', accept: 'image/*', multiple: true, style: 'display:none' });
+  const button = h(
+    'button',
+    { class: 'btn btn-sm', type: 'button', onclick: () => fileInput.click() },
+    count ? 'Add pages' : 'Upload'
   );
 
-  return h('div', { class: 'card' }, h('h2', {}, 'Start a new assessment'), h('p', { class: 'hint' }, 'You can upload the scans on the next screen.'), form);
+  fileInput.addEventListener('change', async () => {
+    const chosen = Array.from(fileInput.files ?? []);
+    if (!chosen.length) return;
+
+    const data = new FormData();
+    data.set('kind', kind);
+    for (const file of chosen) data.append('files', file);
+
+    button.disabled = true;
+    button.textContent = 'Uploading…';
+    try {
+      await teachersApi.uploadScans(teacher.id, data);
+      toast(`${chosen.length} page${chosen.length === 1 ? '' : 's'} added for ${teacher.name}.`, 'success');
+      await reload(); // redraws the whole board, so the button state goes with it
+    } catch (error) {
+      toast(error.message, 'error');
+      button.disabled = false;
+      button.textContent = count ? 'Add pages' : 'Upload';
+      fileInput.value = '';
+    }
+  });
+
+  return h('div', { class: 'scan-cell' }, h('span', { class: 'scan-count' }, label), button, fileInput);
+}
+
+// Opens the evaluation screen. If this teacher has no assessment yet, one is
+// created first — uploading is not a prerequisite for evaluating.
+function evaluateButton(teacher) {
+  const button = h(
+    'button',
+    { class: 'btn btn-sm btn-primary', type: 'button' },
+    teacher.assessment_status === 'evaluated' ? 'Review' : 'Evaluate'
+  );
+
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    try {
+      const id = teacher.assessment_id ?? (await teachersApi.currentAssessment(teacher.id)).id;
+      window.navigate(`/assessments/${id}`);
+    } catch (error) {
+      toast(error.message, 'error');
+      button.disabled = false;
+    }
+  });
+
+  return button;
+}
+
+/* ------------------------------------------------------------------- history */
+
+function historyCard(state) {
+  return h(
+    'div',
+    { class: 'card' },
+    h('h2', {}, 'All assessments'),
+    state.assessments.length
+      ? h(
+          'div',
+          { class: 'table-wrap' },
+          h(
+            'table',
+            {},
+            h(
+              'thead',
+              {},
+              h('tr', {}, h('th', {}, 'Assessment'), h('th', {}, 'Teacher'), h('th', {}, 'Date'), h('th', {}, 'Pages'), h('th', {}, 'Score'), h('th', {}, 'Status'))
+            ),
+            h(
+              'tbody',
+              {},
+              state.assessments.map((row) =>
+                h(
+                  'tr',
+                  { style: 'cursor:pointer', onclick: () => window.navigate(`/assessments/${row.id}`) },
+                  h('td', {}, row.title),
+                  h('td', {}, row.teacher_grade ? `${row.teacher_name} — ${row.teacher_grade}` : row.teacher_name),
+                  h('td', {}, formatDate(row.assessment_date) || '—'),
+                  h('td', {}, `${row.question_paper_count} paper · ${row.response_count} response`),
+                  h('td', {}, row.score === null ? '—' : `${row.score}${row.max_score ? ` / ${row.max_score}` : ''}`),
+                  h('td', {}, statusBadge(row.status))
+                )
+              )
+            )
+          )
+        )
+      : emptyState('Nothing has been started for this school yet.')
+  );
 }
 
 /* ---------------------------------------------------------- assessment detail */

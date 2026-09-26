@@ -261,6 +261,11 @@ td.right, th.right { text-align: right; white-space: nowrap; }
 
 /* scan galleries */
 
+/* One teacher's row on the assessments board: page count, then the button. */
+.scan-cell { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.scan-cell .scan-count { color: var(--muted); font-size: 13px; min-width: 62px; }
+.scan-cell .btn[disabled] { opacity: 0.6; cursor: default; }
+
 .scan-group + .scan-group { margin-top: 22px; }
 
 .scan-group-head {
