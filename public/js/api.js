@@ -48,6 +48,12 @@ export const teachersApi = {
   remove: (id) => api.del(`/api/teachers/${id}`),
   templateUrl: (schoolId) => `/api/teachers/template?school_id=${schoolId}`,
   import: (formData) => api.postForm('/api/teachers/import', formData),
+
+  // The assessments board: one row per teacher, with that teacher's current
+  // assessment folded in.
+  roster: (schoolId) => api.get(`/api/teachers/roster?school_id=${schoolId}`),
+  uploadScans: (id, formData) => api.postForm(`/api/teachers/${id}/scans`, formData),
+  currentAssessment: (id) => api.postJson(`/api/teachers/${id}/assessment`, {}),
 };
 
 export const assessmentsApi = {

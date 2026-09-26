@@ -1,12 +1,10 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import express from 'express';
-import db, { UPLOADS_DIR } from '../db.js';
+import db from '../db.js';
 import { uploadScans } from '../uploads.js';
+import { SCAN_KINDS, attachScans, discardUploads, removeStoredFile } from '../scans.js';
 
 const router = express.Router();
 
-const KINDS = new Set(['question_paper', 'response']);
 const STATUSES = new Set(['draft', 'scanned', 'evaluated']);
 
 const selectAssessmentRow = db.prepare(`
@@ -32,11 +30,6 @@ function withFiles(assessment) {
     question_paper_files: files.filter((f) => f.kind === 'question_paper'),
     response_files: files.filter((f) => f.kind === 'response'),
   };
-}
-
-function removeStoredFile(storedName) {
-  if (!storedName) return;
-  fs.rm(path.join(UPLOADS_DIR, storedName), { force: true }, () => {});
 }
 
 function assessmentFields(body) {
@@ -77,7 +70,7 @@ router.get('/', (req, res) => {
          JOIN teachers t ON t.id = a.teacher_id
          JOIN schools  s ON s.id = a.school_id
          ${where}
-         ORDER BY COALESCE(a.assessment_date, a.created_at) DESC, a.id DESC`
+         ORDER BY COALESCE(a.assessment_date, date(a.created_at)) DESC, a.id DESC`
     )
     .all(params);
 
@@ -141,43 +134,18 @@ router.delete('/:id', (req, res) => {
 router.post('/:id/files', uploadScans.array('files', 40), (req, res) => {
   const assessment = selectAssessmentRow.get(req.params.id);
   if (!assessment) {
-    for (const file of req.files ?? []) removeStoredFile(file.filename);
+    discardUploads(req.files);
     return res.status(404).json({ error: 'Assessment not found.' });
   }
 
   const kind = String(req.body.kind ?? '');
-  if (!KINDS.has(kind)) {
-    for (const file of req.files ?? []) removeStoredFile(file.filename);
+  if (!SCAN_KINDS.has(kind)) {
+    discardUploads(req.files);
     return res.status(400).json({ error: 'Say whether these pages are the question paper or the response.' });
   }
   if (!req.files?.length) return res.status(400).json({ error: 'Choose at least one scanned image.' });
 
-  const startAt =
-    db
-      .prepare('SELECT COALESCE(MAX(position), 0) AS max_position FROM assessment_files WHERE assessment_id = ? AND kind = ?')
-      .get(assessment.id, kind).max_position + 1;
-
-  const insert = db.prepare(
-    `INSERT INTO assessment_files (assessment_id, kind, stored_name, original_name, mime_type, size_bytes, position)
-     VALUES (@assessment_id, @kind, @stored_name, @original_name, @mime_type, @size_bytes, @position)`
-  );
-
-  const insertMany = db.transaction((files) => {
-    files.forEach((file, index) => {
-      insert.run({
-        assessment_id: assessment.id,
-        kind,
-        stored_name: file.filename,
-        original_name: file.originalname,
-        mime_type: file.mimetype,
-        size_bytes: file.size,
-        position: startAt + index,
-      });
-    });
-  });
-  insertMany(req.files);
-
-  db.prepare("UPDATE assessments SET updated_at = datetime('now') WHERE id = ?").run(assessment.id);
+  attachScans(assessment.id, kind, req.files);
 
   res.status(201).json(withFiles(selectAssessmentRow.get(assessment.id)));
 });
