@@ -5,8 +5,8 @@
 #   fly scale count 1
 # Two machines would each get their own volume and their own separate data.
 
-app = "teacher-training-assessments"
-primary_region = "bom"   # Mumbai — change to the region nearest you
+app = "teachertrainingassessments"
+primary_region = "ams"   # Amsterdam — where this app's machine actually runs
 
 [build]
 
