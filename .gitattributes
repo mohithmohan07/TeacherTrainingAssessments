@@ -1,0 +1,5 @@
+# The scanner helper runs on Windows. Its launcher is kept with Windows line
+# endings byte for byte (no conversion), because cmd.exe misreads a batch file
+# that has Unix ones.
+scanner-helper/*.cmd -text
+scanner-helper/*.txt -text

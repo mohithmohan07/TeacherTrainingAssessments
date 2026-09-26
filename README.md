@@ -51,9 +51,35 @@ so you can safely re-upload a file you have added a few rows to.
 
 ## Uploading scans
 
-The browser cannot drive your scanner directly, so scan the pages with the
-software already installed on your laptop, save them as images, and then drag
-those files onto the assessment — or click to pick them. You can add several
+Each teacher's row on the **Assessments** page has an Upload button for the
+question paper and one for the response. They either scan straight from the
+scanner or upload image files.
+
+### Scanning straight from the scanner
+
+A web page cannot reach a scanner by itself, so a small helper runs on the
+laptop the scanner is plugged into and does it for the page. It is in the
+`scanner-helper` folder, and the app offers it as a download (**Download the
+scanner helper** on the Assessments page).
+
+1. Extract the zip and double-click **Start scanner helper**. The first time,
+   it fetches a private copy of the official 32-bit Python from nuget.org and
+   checks its SHA-256 before using it; the scanner's TWAIN driver (PaperStream
+   IP for the Fujitsu SP-1130N) is 32-bit, so the helper has to be too.
+2. On the Assessments page, press **Connect scanner** once. Chrome and Edge
+   may ask whether the site can reach apps on this device; choose Allow.
+3. The row buttons now read **Scan**. Put the pages in the feeder and press
+   Scan: every page in the feeder is scanned and filed against that teacher.
+   **Both sides** scans both sides of each sheet and drops blank backs.
+
+The helper listens on `127.0.0.1:17645` only, answers only this app's pages,
+and keeps a copy of every scan under `Documents\Assessment scans`, so a failed
+upload never loses pages. See `scanner-helper/README.txt` for its settings.
+
+### Uploading image files
+
+Without the helper, the buttons read **Upload** and take image files instead,
+and on an assessment's own page you can drag files onto it. You can add several
 pages at once, to the question paper and to the response separately, and click
 any page to see it full size.
 

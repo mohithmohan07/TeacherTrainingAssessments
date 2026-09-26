@@ -266,6 +266,20 @@ td.right, th.right { text-align: right; white-space: nowrap; }
 .scan-cell .scan-count { color: var(--muted); font-size: 13px; min-width: 62px; }
 .scan-cell .btn[disabled] { opacity: 0.6; cursor: default; }
 
+/* The strip above the board that connects the Scan buttons to the scanner. */
+.scanner-panel {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px;
+  padding: 11px 14px; margin-bottom: 14px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface-2); font-size: 14px;
+}
+.scanner-panel.ready { background: var(--ok-soft); border-color: #bfe0cf; }
+.scanner-panel.attention { background: var(--warn-soft); border-color: #eed9b0; }
+.scanner-panel .grow { flex: 1 1 340px; min-width: 0; }
+.scanner-panel select { width: auto; padding: 3px 8px; font-size: 13px; }
+.scanner-panel label.inline { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }
+.scanner-panel a, .scanner-panel .btn-link { font-size: 13px; white-space: nowrap; }
+
 .scan-group + .scan-group { margin-top: 22px; }
 
 .scan-group-head {
