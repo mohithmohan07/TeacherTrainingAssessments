@@ -7,6 +7,7 @@ import { installAuth, authEnabled } from './auth.js';
 import schoolsRouter from './routes/schools.js';
 import teachersRouter from './routes/teachers.js';
 import assessmentsRouter from './routes/assessments.js';
+import { sendHelperZip } from './helper-download.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 3000);
@@ -31,6 +32,9 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use('/api/schools', schoolsRouter);
 app.use('/api/teachers', teachersRouter);
 app.use('/api/assessments', assessmentsRouter);
+
+// The scanner helper, for the laptop the scanner is plugged into.
+app.get('/downloads/scanner-helper.zip', sendHelperZip);
 
 // Numbers for the dashboard.
 app.get('/api/stats', (_req, res) => {

@@ -13,6 +13,7 @@ RUN npm ci --omit=dev
 
 COPY server ./server
 COPY public ./public
+COPY scanner-helper ./scanner-helper
 
 # Runtime stage: just Node and the built app.
 FROM node:22-slim

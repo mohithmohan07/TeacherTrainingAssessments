@@ -3,6 +3,12 @@ import {
   formatDate, formatBytes, emptyState, openLightbox,
 } from '../ui.js';
 import { schoolsApi, teachersApi, assessmentsApi } from '../api.js';
+import {
+  scanner, scanPages, connectScanner, stopScanning, checkScannerOnce, selectScanner, selectedScanner,
+  scanBothSides, setScanBothSides, HELPER_DOWNLOAD_URL,
+} from '../scanner.js';
+
+const KIND_NAMES = { question_paper: 'question paper', response: 'response' };
 
 const STATUS_OPTIONS = [
   { value: 'draft', label: 'Draft' },
@@ -63,18 +69,26 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
         )
       ),
       h('div', { class: 'card' }, h('div', { class: 'form-grid' }, field('School', schoolSelect))),
-      teacherBoardCard(state, load),
+      teacherBoardCard(state, load, draw),
       historyCard(state)
     );
   }
 
+  // Looks for the scanner helper if scanning was turned on in an earlier visit.
+  // Started before the first draw so the board opens saying it is checking.
+  const scannerCheck = checkScannerOnce();
+
   mount(root, container);
   await load();
+
+  scannerCheck.then((changed) => {
+    if (changed && container.isConnected && !scanner.busy) draw();
+  });
 }
 
 /* -------------------------------------------------------- the teacher board */
 
-function teacherBoardCard(state, reload) {
+function teacherBoardCard(state, reload, redraw) {
   if (!state.roster.length) {
     return h(
       'div',
@@ -92,6 +106,7 @@ function teacherBoardCard(state, reload) {
     { class: 'card' },
     h('h2', {}, `Teachers (${state.roster.length})`),
     h('p', { class: 'hint' }, 'Uploading pages only files them against the teacher. Nothing is evaluated until you press Evaluate.'),
+    scannerPanel(redraw),
     h(
       'div',
       { class: 'table-wrap' },
@@ -126,8 +141,8 @@ function teacherBoardCard(state, reload) {
                   ? h('div', { class: 'hint' }, [teacher.grade, teacher.subjects].filter(Boolean).join(' · '))
                   : null
               ),
-              h('td', {}, scanCell(teacher, 'question_paper', teacher.question_paper_count, reload)),
-              h('td', {}, scanCell(teacher, 'response', teacher.response_count, reload)),
+              h('td', {}, scanCell(teacher, 'question_paper', teacher.question_paper_count, reload, redraw)),
+              h('td', {}, scanCell(teacher, 'response', teacher.response_count, reload, redraw)),
               h(
                 'td',
                 {},
@@ -147,39 +162,156 @@ function teacherBoardCard(state, reload) {
   );
 }
 
-// One upload control for one kind of scan, on one teacher's row.
-function scanCell(teacher, kind, count, reload) {
+// One upload control for one kind of scan, on one teacher's row. With the
+// scanner connected the button scans; otherwise it picks image files.
+function scanCell(teacher, kind, count, reload, redraw) {
   const label = count ? `${count} page${count === 1 ? '' : 's'}` : 'None yet';
+  const scanning = scanner.status === 'ready';
+  const idleLabel = scanning ? (count ? 'Scan more' : 'Scan') : count ? 'Add pages' : 'Upload';
   const fileInput = h('input', { type: 'file', accept: 'image/*', multiple: true, style: 'display:none' });
-  const button = h(
-    'button',
-    { class: 'btn btn-sm', type: 'button', onclick: () => fileInput.click() },
-    count ? 'Add pages' : 'Upload'
-  );
+  const button = h('button', { class: 'btn btn-sm', type: 'button' }, idleLabel);
 
-  fileInput.addEventListener('change', async () => {
-    const chosen = Array.from(fileInput.files ?? []);
-    if (!chosen.length) return;
+  const settle = () => {
+    button.disabled = false;
+    button.textContent = idleLabel;
+    fileInput.value = '';
+  };
 
+  const upload = async (files, { scanned = false, warning = '' } = {}) => {
     const data = new FormData();
     data.set('kind', kind);
-    for (const file of chosen) data.append('files', file);
+    for (const file of files) data.append('files', file);
 
-    button.disabled = true;
     button.textContent = 'Uploading…';
     try {
       await teachersApi.uploadScans(teacher.id, data);
-      toast(`${chosen.length} page${chosen.length === 1 ? '' : 's'} added for ${teacher.name}.`, 'success');
+      const pages = `${files.length} page${files.length === 1 ? '' : 's'}`;
+      toast(`${pages} ${scanned ? 'scanned' : 'added'} for ${teacher.name}.`, 'success');
+      if (warning) toast(warning, 'error');
       await reload(); // redraws the whole board, so the button state goes with it
     } catch (error) {
-      toast(error.message, 'error');
-      button.disabled = false;
-      button.textContent = count ? 'Add pages' : 'Upload';
-      fileInput.value = '';
+      const kept = scanned && scanner.folder ? ` The scanned pages are also saved on this laptop in ${scanner.folder}.` : '';
+      toast(`${error.message}${kept}`, 'error');
+      settle();
     }
+  };
+
+  button.addEventListener('click', async () => {
+    if (!scanning) {
+      fileInput.click();
+      return;
+    }
+    button.disabled = true;
+    button.textContent = 'Scanning…';
+    let scan;
+    try {
+      scan = await scanPages({ label: `${teacher.name} - ${KIND_NAMES[kind]}` });
+    } catch (error) {
+      toast(error.message, 'error');
+      settle();
+      if (error.helperGone) redraw();
+      return;
+    }
+    await upload(scan.files, { scanned: true, warning: scan.warning });
+  });
+
+  fileInput.addEventListener('change', () => {
+    const chosen = Array.from(fileInput.files ?? []);
+    if (!chosen.length) return;
+    button.disabled = true;
+    upload(chosen);
   });
 
   return h('div', { class: 'scan-cell' }, h('span', { class: 'scan-count' }, label), button, fileInput);
+}
+
+// The strip above the board that connects the Scan buttons to the scanner
+// helper on this laptop, and says what to do when it cannot be reached.
+function scannerPanel(redraw) {
+  const connect = async (event) => {
+    event.currentTarget.disabled = true;
+    const status = await connectScanner();
+    redraw();
+    if (status === 'ready') toast(`Scanner ready: ${selectedScanner().name}.`, 'success');
+  };
+  const connectButton = (label) => h('button', { class: 'btn btn-sm btn-primary', type: 'button', onclick: connect }, label);
+  const download = h('a', { href: HELPER_DOWNLOAD_URL, download: '' }, 'Download the scanner helper');
+  const useFiles = h(
+    'button',
+    { class: 'btn-link', type: 'button', onclick: () => { stopScanning(); redraw(); } },
+    'Use image files instead'
+  );
+  const panel = (tone, ...children) => h('div', { class: `scanner-panel${tone ? ` ${tone}` : ''}` }, ...children);
+  const text = (...children) => h('div', { class: 'grow' }, ...children);
+
+  switch (scanner.status) {
+    case 'checking':
+      return panel('', text('Looking for the scanner helper on this laptop…'));
+
+    case 'ready': {
+      const current = selectedScanner();
+      const choice = scanner.scanners.length > 1
+        ? select('scanner', scanner.scanners.map((item) => ({ value: item.id, label: item.name })), { value: current.id, id: 'scanner-choice' })
+        : h('strong', {}, current.name);
+      if (choice.tagName === 'SELECT') choice.addEventListener('change', () => selectScanner(choice.value));
+
+      const bothSides = h('input', { type: 'checkbox', checked: scanBothSides() });
+      bothSides.addEventListener('change', () => setScanBothSides(bothSides.checked));
+
+      return panel(
+        'ready',
+        text(h('strong', {}, 'Scanner ready: '), choice, '. Put the pages in the feeder, then press Scan on the teacher’s row.'),
+        h('label', { class: 'inline' }, bothSides, 'Both sides'),
+        useFiles
+      );
+    }
+
+    case 'missing':
+      return panel(
+        'attention',
+        text(
+          h('strong', {}, 'The scanner helper isn’t running on this laptop, '),
+          'so the buttons upload image files for now. Double-click “Start scanner helper”, then press Check again.'
+        ),
+        connectButton('Check again'),
+        download,
+        useFiles
+      );
+
+    case 'blocked':
+      return panel(
+        'attention',
+        text(
+          h('strong', {}, 'Your browser is blocking this page from reaching the scanner helper. '),
+          'Click the icon at the left end of the address bar, allow this site to reach apps on this device, then press Check again.'
+        ),
+        connectButton('Check again'),
+        useFiles
+      );
+
+    case 'no-scanner':
+      return panel(
+        'attention',
+        text(
+          h('strong', {}, 'The scanner helper is running, but it can’t find the scanner. '),
+          'Check the scanner is plugged in and switched on, then press Check again.',
+          scanner.message ? h('div', { class: 'hint' }, scanner.message) : null
+        ),
+        connectButton('Check again'),
+        useFiles
+      );
+
+    default:
+      return panel(
+        '',
+        text(
+          h('strong', {}, 'Scan straight from the scanner. '),
+          'Start the scanner helper on this laptop, then press Connect. The first time, your browser may ask to let this site reach apps on this device: choose Allow.'
+        ),
+        connectButton('Connect scanner'),
+        download
+      );
+  }
 }
 
 // Opens the evaluation screen. If this teacher has no assessment yet, one is
@@ -258,7 +390,7 @@ export async function renderAssessmentDetail(root, id) {
   };
 
   function draw() {
-    mount(container, 
+    mount(container,
       h('div', { class: 'breadcrumb' }, h('a', { href: `#/assessments?school=${assessment.school_id}` }, '← All assessments')),
       h(
         'div',
@@ -293,8 +425,12 @@ export async function renderAssessmentDetail(root, id) {
     );
   }
 
+  const scannerCheck = checkScannerOnce();
   draw();
   mount(root, container);
+  scannerCheck.then((changed) => {
+    if (changed && container.isConnected && !scanner.busy) draw();
+  });
 }
 
 function scansCard(assessment, refresh) {
@@ -302,7 +438,13 @@ function scansCard(assessment, refresh) {
     'div',
     { class: 'card' },
     h('h2', {}, 'Scanned pages'),
-    h('p', { class: 'hint' }, 'Scan the pages on your laptop, then drop the image files here. You can add several at once.'),
+    h(
+      'p',
+      { class: 'hint' },
+      scanner.status === 'ready'
+        ? 'Press Scan pages to feed them straight from the scanner, or drop image files here. You can add several at once.'
+        : 'Scan the pages on your laptop, then drop the image files here. You can add several at once.'
+    ),
     scanGroup(assessment, 'question_paper', 'Question paper', assessment.question_paper_files, refresh),
     scanGroup(assessment, 'response', 'Teacher’s response', assessment.response_files, refresh)
   );
@@ -329,6 +471,24 @@ function scanGroup(assessment, kind, label, files, refresh) {
   };
 
   fileInput.addEventListener('change', () => upload(fileInput.files));
+
+  const scanButton = scanner.status === 'ready'
+    ? h('button', { class: 'btn btn-sm', type: 'button' }, 'Scan pages')
+    : null;
+  scanButton?.addEventListener('click', async () => {
+    scanButton.disabled = true;
+    scanButton.textContent = 'Scanning…';
+    let scan;
+    try {
+      scan = await scanPages({ label: `${assessment.teacher_name} - ${KIND_NAMES[kind]}` });
+    } catch (error) {
+      toast(error.message, 'error');
+      await refresh();
+      return;
+    }
+    if (scan.warning) toast(scan.warning, 'error');
+    await upload(scan.files);
+  });
 
   const dropzoneLabel = h('span', {}, 'Drop scanned images here, or click to choose files');
 
@@ -394,7 +554,7 @@ function scanGroup(assessment, kind, label, files, refresh) {
   return h(
     'div',
     { class: 'scan-group' },
-    h('div', { class: 'scan-group-head' }, h('h3', {}, `${label} (${files.length})`)),
+    h('div', { class: 'scan-group-head' }, h('h3', {}, `${label} (${files.length})`), scanButton),
     thumbs,
     h('div', { style: 'height:12px' }),
     dropzone
