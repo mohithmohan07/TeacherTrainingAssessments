@@ -198,6 +198,7 @@ TWTY_INT16, TWTY_INT32, TWTY_UINT16, TWTY_BOOL, TWTY_FIX32 = 1, 2, 4, 6, 7
 CAP_XFERCOUNT = 0x0001
 ICAP_PIXELTYPE, ICAP_XFERMECH = 0x0101, 0x0103
 CAP_FEEDERENABLED, CAP_FEEDERLOADED, CAP_AUTOFEED, CAP_INDICATORS = 0x1002, 0x1003, 0x1007, 0x100b
+CAP_DEVICEONLINE = 0x100f
 CAP_DUPLEXENABLED = 0x1013
 ICAP_XRESOLUTION, ICAP_YRESOLUTION = 0x1118, 0x1119
 ICAP_AUTODISCARDBLANKPAGES = 0x1134
@@ -212,7 +213,8 @@ TWAS_AUTO = 1
 CONDITIONS = {
     3: ('offline', 'The scanner driver could not be opened. Check the scanner is plugged in and switched on.'),
     4: ('busy', 'The scanner is in use by another program, such as PaperStream Capture. Close it and try again.'),
-    5: ('offline', 'The scanner is not responding. Check it is plugged in and switched on, then try again.'),
+    # TWCC_OPERATIONERROR: the driver hit a problem and has already shown its own message.
+    5: ('driver-error', 'The scanner driver reported a problem and may have shown a message about it on this laptop. Check the scanner, then try again.'),
     20: ('jam', 'The paper jammed. Clear the scanner, put the pages back in the feeder and try again.'),
     21: ('double-feed', 'Two pages went through together. Put the pages back in the feeder and try again.'),
     23: ('offline', 'The scanner is not responding. Check it is plugged in and switched on, then try again.'),
@@ -484,6 +486,10 @@ class TwainScanner:
 
         loaded = self._get(source, CAP_FEEDERLOADED)
         if loaded is not None and loaded & 0xFFFF == 0:
+            # A scanner that is switched off or unplugged can look empty too.
+            online = self._get(source, CAP_DEVICEONLINE)
+            if online is not None and online & 0xFFFF == 0:
+                raise ScanError(CONDITIONS[23][0], CONDITIONS[23][1], 503)
             raise ScanError('no-paper', CONDITIONS[29][1])
 
         ui = TW_USERINTERFACE(0, 0, self.hwnd)
@@ -491,6 +497,12 @@ class TwainScanner:
             raise self._fail('start scanning', source)
         try:
             return self._pump(source, page_path)
+        except BaseException:
+            # Pages the driver has ready but nobody took (the wait ran out, say)
+            # must be dropped first: a driver with pages pending refuses to be
+            # disabled or closed, and would then refuse every later scan.
+            self._dsm(source, DG_CONTROL, DAT_PENDINGXFERS, MSG_RESET, ctypes.byref(TW_PENDINGXFERS()))
+            raise
         finally:
             self._dsm(source, DG_CONTROL, DAT_USERINTERFACE, MSG_DISABLEDS, ctypes.byref(ui))
 
