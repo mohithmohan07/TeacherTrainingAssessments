@@ -50,10 +50,25 @@ export const teachersApi = {
   import: (formData) => api.postForm('/api/teachers/import', formData),
 
   // The assessments board: one row per teacher, with that teacher's current
-  // assessment folded in.
-  roster: (schoolId) => api.get(`/api/teachers/roster?school_id=${schoolId}`),
+  // sitting in the test and their results so far folded in.
+  roster: (schoolId, testId) => api.get(`/api/teachers/roster?${new URLSearchParams({ school_id: schoolId, ...(testId ? { test_id: testId } : {}) })}`),
   uploadScans: (id, formData) => api.postForm(`/api/teachers/${id}/scans`, formData),
-  currentAssessment: (id) => api.postJson(`/api/teachers/${id}/assessment`, {}),
+  currentAssessment: (id, testId) => api.postJson(`/api/teachers/${id}/assessment`, { test_id: testId }),
+  profile: (id) => api.get(`/api/teachers/${id}/profile`),
+};
+
+export const testsApi = {
+  list: (schoolId) => api.get(`/api/tests?school_id=${schoolId}`),
+  create: (body) => api.postJson('/api/tests', body),
+  rename: (id, name) => api.putJson(`/api/tests/${id}`, { name }),
+  remove: (id) => api.del(`/api/tests/${id}`),
+};
+
+export const reportsApi = {
+  teacher: (teacherId, testId) => api.get(`/api/reports/teacher?teacher_id=${teacherId}&test_id=${testId}`),
+  buildTeacher: (teacherId, testId) => api.postJson('/api/reports/teacher', { teacher_id: teacherId, test_id: testId }),
+  school: (schoolId, testId) => api.get(`/api/reports/school?school_id=${schoolId}&test_id=${testId}`),
+  buildSchool: (schoolId, testId) => api.postJson('/api/reports/school', { school_id: schoolId, test_id: testId }),
 };
 
 export const assessmentsApi = {
@@ -62,6 +77,7 @@ export const assessmentsApi = {
   create: (body) => api.postJson('/api/assessments', body),
   update: (id, body) => api.putJson(`/api/assessments/${id}`, body),
   evaluate: (id) => api.postJson(`/api/assessments/${id}/evaluate`, {}),
+  saveMarks: (id, marks) => api.putJson(`/api/assessments/${id}/marks`, { marks }),
   remove: (id) => api.del(`/api/assessments/${id}`),
   uploadFiles: (id, formData) => api.postForm(`/api/assessments/${id}/files`, formData),
   removeFile: (id, fileId) => api.del(`/api/assessments/${id}/files/${fileId}`),

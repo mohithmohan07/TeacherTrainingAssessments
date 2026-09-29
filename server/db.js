@@ -92,6 +92,41 @@ db.exec(`
     paper       TEXT NOT NULL,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
   );
+
+  -- A test is one round of the assessment at a school, such as a pre-training
+  -- and a post-training test. Each teacher's sittings belong to one test, and
+  -- a teacher can sit its sections on different dates.
+  CREATE TABLE IF NOT EXISTS tests (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    school_id  INTEGER NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_tests_school ON tests(school_id);
+
+  -- Reports written by OpenAI from the marks. kind 'teacher' holds both the
+  -- teacher's own report and the management report on that teacher; kind
+  -- 'school' is the management report on all of a school's teachers.
+  -- \`basis\` fingerprints the results a report was written from, so the page
+  -- can tell when newer marks have arrived since.
+  CREATE TABLE IF NOT EXISTS reports (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL CHECK (kind IN ('teacher', 'school')),
+    school_id  INTEGER NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    test_id    INTEGER NOT NULL REFERENCES tests(id) ON DELETE CASCADE,
+    teacher_id INTEGER REFERENCES teachers(id) ON DELETE CASCADE,
+    status     TEXT NOT NULL DEFAULT 'none',
+    content    TEXT,
+    basis      TEXT,
+    error      TEXT,
+    model      TEXT,
+    written_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_reports_test ON reports(test_id, kind, teacher_id);
 `);
 
 // Columns added after the first release. SQLite has no ADD COLUMN IF NOT
@@ -109,10 +144,30 @@ addColumn('assessments', 'ai_error', 'TEXT');
 addColumn('assessments', 'ai_model', 'TEXT');
 addColumn('assessments', 'ai_evaluated_at', 'TEXT');
 
-// A marking that was running when the server stopped will never finish.
+// Which test a sitting belongs to.
+addColumn('assessments', 'test_id', 'INTEGER REFERENCES tests(id) ON DELETE CASCADE');
+
+// Sittings from before tests existed go into a "Test 1" for their school.
+db.transaction(() => {
+  const schools = db.prepare('SELECT DISTINCT school_id FROM assessments WHERE test_id IS NULL').all();
+  for (const { school_id: schoolId } of schools) {
+    let test = db.prepare('SELECT id FROM tests WHERE school_id = ? ORDER BY id LIMIT 1').get(schoolId);
+    if (!test) {
+      const info = db.prepare("INSERT INTO tests (school_id, name) VALUES (?, 'Test 1')").run(schoolId);
+      test = { id: info.lastInsertRowid };
+    }
+    db.prepare('UPDATE assessments SET test_id = ? WHERE school_id = ? AND test_id IS NULL').run(test.id, schoolId);
+  }
+})();
+
+// A marking or a report that was running when the server stopped will never finish.
 db.prepare(
   `UPDATE assessments SET ai_status = 'failed', ai_error = 'The server restarted while this was being marked. Press Evaluate to try again.'
     WHERE ai_status = 'running'`
+).run();
+db.prepare(
+  `UPDATE reports SET status = 'failed', error = 'The server restarted while this report was being written. Press Build report to try again.'
+    WHERE status = 'running'`
 ).run();
 
 export default db;

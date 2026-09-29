@@ -2,7 +2,8 @@ import express from 'express';
 import db from '../db.js';
 import { uploadScans } from '../uploads.js';
 import { SCAN_KINDS, attachScans, discardUploads, removeStoredFile } from '../scans.js';
-import { startEvaluation } from '../evaluate.js';
+import { normalise, startEvaluation } from '../evaluate.js';
+import { sittingSections, testFor, unansweredSections } from '../results.js';
 
 const router = express.Router();
 
@@ -10,12 +11,13 @@ const STATUSES = new Set(['draft', 'scanned', 'evaluated']);
 
 const selectAssessmentRow = db.prepare(`
   SELECT a.*, t.name AS teacher_name, t.grade AS teacher_grade, t.subjects AS teacher_subjects,
-         s.name AS school_name,
+         s.name AS school_name, ts.name AS test_name,
          (SELECT COUNT(*) FROM assessment_files f WHERE f.assessment_id = a.id AND f.kind = 'question_paper') AS question_paper_count,
          (SELECT COUNT(*) FROM assessment_files f WHERE f.assessment_id = a.id AND f.kind = 'response')       AS response_count
     FROM assessments a
     JOIN teachers t ON t.id = a.teacher_id
     JOIN schools  s ON s.id = a.school_id
+    LEFT JOIN tests ts ON ts.id = a.test_id
    WHERE a.id = ?
 `);
 
@@ -26,12 +28,22 @@ const selectFiles = db.prepare(
 function withFiles(assessment) {
   if (!assessment) return assessment;
   const files = selectFiles.all(assessment.id);
+  const aiResult = assessment.ai_result ? JSON.parse(assessment.ai_result) : null;
   return {
     ...assessment,
-    ai_result: assessment.ai_result ? JSON.parse(assessment.ai_result) : null,
+    ai_result: aiResult,
+    sections: sectionSummary(aiResult),
+    unanswered_sections: aiResult ? unansweredSections(aiResult) : [],
     question_paper_files: files.filter((f) => f.kind === 'question_paper'),
     response_files: files.filter((f) => f.kind === 'response'),
   };
+}
+
+// Each section's marks, percentage and grade in one sitting.
+function sectionSummary(aiResult) {
+  return aiResult
+    ? sittingSections(aiResult).map(({ key, name, awarded, max, percent, grade, grade_label }) => ({ key, name, awarded, max, percent, grade, grade_label }))
+    : [];
 }
 
 function assessmentFields(body) {
@@ -48,7 +60,7 @@ function assessmentFields(body) {
   };
 }
 
-// GET /api/assessments?school_id=1&teacher_id=2
+// GET /api/assessments?school_id=1&teacher_id=2&test_id=3
 router.get('/', (req, res) => {
   const clauses = [];
   const params = {};
@@ -60,6 +72,10 @@ router.get('/', (req, res) => {
   if (req.query.teacher_id) {
     clauses.push('a.teacher_id = @teacher_id');
     params.teacher_id = Number(req.query.teacher_id);
+  }
+  if (req.query.test_id) {
+    clauses.push('a.test_id = @test_id');
+    params.test_id = Number(req.query.test_id);
   }
 
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
@@ -74,7 +90,8 @@ router.get('/', (req, res) => {
          ${where}
          ORDER BY COALESCE(a.assessment_date, date(a.created_at)) DESC, a.id DESC`
     )
-    .all(params);
+    .all(params)
+    .map(({ ai_result: aiResult, ...row }) => ({ ...row, sections: sectionSummary(aiResult ? JSON.parse(aiResult) : null) }));
 
   res.json(rows);
 });
@@ -94,12 +111,13 @@ router.post('/', (req, res) => {
     fields.title = `Assessment - ${teacher.name}`;
   }
 
+  const test = testFor(teacher.school_id, req.body.test_id);
   const info = db
     .prepare(
-      `INSERT INTO assessments (school_id, teacher_id, title, assessment_date, subject, status, notes, score, max_score)
-       VALUES (@school_id, @teacher_id, @title, @assessment_date, @subject, @status, @notes, @score, @max_score)`
+      `INSERT INTO assessments (school_id, teacher_id, test_id, title, assessment_date, subject, status, notes, score, max_score)
+       VALUES (@school_id, @teacher_id, @test_id, @title, @assessment_date, @subject, @status, @notes, @score, @max_score)`
     )
-    .run({ ...fields, school_id: teacher.school_id, teacher_id: teacher.id });
+    .run({ ...fields, school_id: teacher.school_id, teacher_id: teacher.id, test_id: test.id });
 
   res.status(201).json(withFiles(selectAssessmentRow.get(info.lastInsertRowid)));
 });
@@ -131,6 +149,39 @@ router.post('/:id/evaluate', (req, res) => {
   if (problem) return res.status(400).json({ error: problem });
 
   res.status(202).json(withFiles(selectAssessmentRow.get(assessment.id)));
+});
+
+// Correct the marks OpenAI gave: one number per question row, in order.
+// Section percentages, grades and the reports follow the corrected marks.
+router.put('/:id/marks', (req, res) => {
+  const assessment = selectAssessmentRow.get(req.params.id);
+  if (!assessment) return res.status(404).json({ error: 'Assessment not found.' });
+  if (!assessment.ai_result) return res.status(400).json({ error: 'This sitting has not been marked yet.' });
+  if (assessment.ai_status === 'running') {
+    return res.status(400).json({ error: 'OpenAI is marking this again. Wait for it to finish, then correct the marks.' });
+  }
+  const result = JSON.parse(assessment.ai_result);
+  const marks = Array.isArray(req.body.marks) ? req.body.marks : [];
+  if (marks.length !== result.questions.length) return res.status(400).json({ error: 'The marks do not match the questions. Reload the page and try again.' });
+
+  const bad = marks.findIndex((mark, i) => {
+    const n = Number(mark);
+    return String(mark).trim() === '' || !Number.isFinite(n) || n < 0 || n > result.questions[i].max_marks;
+  });
+  if (bad !== -1) {
+    const q = result.questions[bad];
+    return res.status(400).json({ error: `Question ${q.question} needs a mark from 0 to ${q.max_marks}.` });
+  }
+
+  const updated = normalise({
+    ...result,
+    questions: result.questions.map((q, i) => ({ ...q, marks_awarded: Number(marks[i]) })),
+  });
+  db.prepare(
+    `UPDATE assessments SET ai_result = ?, score = ?, max_score = ?, updated_at = datetime('now') WHERE id = ?`
+  ).run(JSON.stringify(updated), updated.total_score, updated.max_score, assessment.id);
+
+  res.json(withFiles(selectAssessmentRow.get(assessment.id)));
 });
 
 router.delete('/:id', (req, res) => {

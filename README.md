@@ -8,8 +8,11 @@ on your machine.
   assessments for now; the real content is still to be decided.
 - **Schools & teachers** — add each school with its logo and contact details,
   then add its teachers one at a time or import a whole list from Excel.
-- **Assessments** — pick a school and a teacher, then upload the scanned
-  question paper and the teacher's responses, and record the evaluation.
+- **Assessments** — pick a school and a test, then scan or upload each
+  teacher's question paper and response on their row and press Evaluate.
+  Each section is graded on its own, and reports are written from the marks.
+- **Teacher profiles** — click a teacher's name to see every test they have
+  sat, section by section, and how each section has moved between tests.
 
 ## Running it
 
@@ -95,13 +98,74 @@ feedback. Papers and answers can be in any language (English, Hindi, Kannada,
 Sanskrit and so on); the feedback is in English. The assessment page shows the
 marking while it runs, then the total, a score per section, the marks and
 feedback for each part with what the teacher wrote, and strengths and areas to
-improve. The score is filled in and the assessment marked Evaluated; you can
-still correct the score by hand, or press **Evaluate again**.
+improve. The assessment is marked Evaluated; you can correct any question's
+marks in the Marks column, or press **Evaluate again**.
 
 It needs the `OPENAI_API_KEY` secret on the server (on Fly:
 `fly secrets set OPENAI_API_KEY=... -a teachertrainingassessments`). The model
 is `gpt-6-luna` unless `OPENAI_MODEL` says otherwise. OpenAI reads JPG, PNG,
 WEBP and GIF pages only, which covers everything the scanner helper produces.
+
+## Tests, sections and grades
+
+A **test** is one round of the assessment at a school, such as a
+pre-training and a post-training test. Pick it at the top of the Assessments
+page, or press **New test** to start another. A school always has at least one.
+
+Teachers can sit any of the three sections (A, B and C), all at once or on
+different dates. Each time a teacher's pages are scanned after their last
+evaluation, a new sitting opens in the same test, and its sections are added
+to what the teacher already has. If the whole paper is scanned but the teacher
+answered only some sections, the sections with nothing written are treated as
+not sat, rather than graded 0. If a section is marked twice, the latest
+marking counts.
+
+There is no overall percentage. Each section is graded on its own:
+
+| Grade | Label      | Section percentage |
+|-------|------------|--------------------|
+| A     | Exemplary  | 85% and above      |
+| B     | Proficient | 70% to 84%         |
+| C     | Developing | 50% to 69%         |
+| D     | Beginning  | below 50%          |
+
+The bands are in `server/results.js`.
+
+## Reports
+
+Every Evaluate that finishes also has OpenAI write (or rewrite) two reports on
+that teacher for the test, from the marks and the examiner's feedback:
+
+- **For the teacher**: warm and practical. What went well in each section,
+  next steps they can try in their own classroom, and small practice ideas. It
+  takes the realities of teaching into account and never criticises.
+- **For management**: factual. The evidence behind each section's result,
+  strengths and gaps, responsibilities the evidence supports, recommended
+  support, and the potential identifier.
+
+Open them with **Report** on the teacher's row or from their profile; each
+prints on its own. If marks are corrected or more sections are evaluated
+afterwards, the page says so and **Rebuild report** brings it up to date.
+
+The **potential identifier** is worked out from the section grades by fixed
+rules, so every teacher is judged the same way:
+
+- **Mentor potential**: exemplary (A) in every section sat.
+- **Strong performer**: proficient or better (A or B) in every section sat.
+- **Strength in …**: A or B in some sections, still developing in others.
+- **Developing steadily**: C in every section sat.
+- **Priority for support**: D in a section, with no A or B anywhere.
+
+It always says how many of the three sections it rests on.
+
+At the end, **Management report** under the board builds the report on all of
+the school's teachers in the test: section averages and grade counts, every
+teacher's sections and potential, who could mentor and who needs support, which
+colleagues could support each other in a section, and OpenAI's analysis and
+recommendations for the school's training plan.
+
+Reports are in English and use the same `OPENAI_API_KEY` and `OPENAI_MODEL` as
+marking.
 
 ## Running it on Fly.io
 
@@ -202,10 +266,15 @@ server/
   index.js          the Express app and the dashboard stats
   auth.js           the optional password gate (off unless APP_PASSWORD is set)
   db.js             database connection and schema
+  openai.js         the one OpenAI request, shared by marking and reports
+  evaluate.js       marking the scans with OpenAI
+  results.js        section results, grades and the potential identifier
+  reports.js        writing the teacher, management and school reports
+  generator.js      writing question papers with Gemini
   excel.js          the import template, and reading a filled-in one back
   uploads.js        file upload rules (types and size limits)
   seed.js           optional sample data
-  routes/           schools, teachers, assessments
+  routes/           schools, teachers, tests, assessments, reports, generator
 public/
   index.html        the single page
   css/styles.css

@@ -2,24 +2,16 @@
 // question paper and the teacher's scanned response to the model, which reads
 // both and marks every question. It runs in the background: the request that
 // starts it returns straight away and the page polls the assessment until the
-// marking is done or has failed.
+// marking is done or has failed. Once it is done, the teacher's reports for
+// the test are rebuilt (reports.js).
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import db, { UPLOADS_DIR } from './db.js';
-
-// OPENAI_BASE_URL follows the OpenAI SDKs' convention, for a proxy or a test server.
-const OPENAI_URL = `${(process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '')}/responses`;
-export const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-6-luna';
+import { OPENAI_MODEL, friendly, openaiConfigured, requestJson } from './openai.js';
+import { queueTeacherReports } from './reports.js';
 
 // Types the OpenAI API accepts as image input. The scanner helper saves JPEG.
 const OPENAI_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
-
-// Marking a handful of handwritten pages can take a while; give up after this.
-const TIMEOUT_MS = 5 * 60 * 1000;
-
-export function openaiConfigured() {
-  return Boolean(process.env.OPENAI_API_KEY);
-}
 
 const INSTRUCTIONS = `You are an experienced examiner marking a teacher training assessment.
 
@@ -28,7 +20,7 @@ You are given scanned pages in two groups: first the QUESTION PAPER, then the TE
 The paper and the answers may be in English or any Indian language, in any script: for example Hindi, Marathi, Sanskrit, Kannada, Tamil, Telugu, Malayalam, Bengali, Assamese, Urdu or Kashmiri (Urdu and Kashmiri are written right to left). Read everything in the language it is written in, and never take marks off for the language an answer is written in.
 
 Mark the response against the question paper:
-- Work through every question on the question paper in order, including questions the teacher did not answer (award 0 for those).
+- Work through every question on the question paper in order, including questions the teacher did not answer (award 0 for those). The teacher may have sat only some sections of the paper on this date: still list every question of every section, with an empty teacher_answer where nothing was written.
 - Questions usually have lettered parts (A, B, C, D) with the marks for each part printed beside it in brackets, for example "(3)". Mark every part as its own row, numbered like "1A", "1B", with those printed marks as max_marks. A question without lettered parts is one row, numbered like "4", out of the marks printed for it (for example "[Total Marks: 10]"). If no marks are printed at all, use 1 and say so in the feedback.
 - Give each row the section it is in, written in English as "Section A", "Section B" and so on, even when the paper names it in another language (for example खंड 'ख' is Section B). If the paper has no sections, use an empty string.
 - In teacher_answer, write down what the teacher wrote for that row, in the language and script they wrote it in, copied faithfully including mistakes. If it is long, give the first 500 characters or so and end with "…". Write [illegible] for words you cannot read, and use an empty string if the teacher did not answer.
@@ -123,15 +115,15 @@ async function evaluate(assessmentId, paper, response) {
     ...(await Promise.all(response.map(imageInput))),
   ];
 
-  const body = {
-    model: OPENAI_MODEL,
+  const marks = await requestJson({
     instructions: INSTRUCTIONS,
-    input: [{ role: 'user', content }],
-    text: { format: { type: 'json_schema', name: 'assessment_marks', schema: RESULT_SCHEMA, strict: true } },
-    store: false,
-  };
-
-  const result = normalise(parseMarks(await callOpenAI(body)));
+    content,
+    name: 'assessment_marks',
+    schema: RESULT_SCHEMA,
+    task: 'mark this',
+    retry: 'Press Evaluate to try again.',
+  });
+  const result = normalise(marks);
   if (!result.questions.length) {
     throw friendly('OpenAI found no questions to mark. Check the question paper pages are readable and the right way up, then press Evaluate again.');
   }
@@ -142,67 +134,17 @@ async function evaluate(assessmentId, paper, response) {
     score: result.total_score,
     max_score: result.max_score,
   });
+
+  // The teacher's reports for this test are rewritten to take in the new
+  // sections. Pressing Evaluate is what asked for this, so it is not a
+  // marking that started on its own.
+  const saved = selectAssessment.get(assessmentId);
+  if (saved.test_id) queueTeacherReports(saved.teacher_id, saved.test_id);
 }
 
 async function imageInput(file) {
   const data = await fs.readFile(path.join(UPLOADS_DIR, file.stored_name));
   return { type: 'input_image', image_url: `data:${file.mime_type};base64,${data.toString('base64')}`, detail: 'high' };
-}
-
-async function callOpenAI(body) {
-  let res;
-  try {
-    res = await fetch(OPENAI_URL, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-  } catch (error) {
-    throw friendly(
-      error.name === 'TimeoutError'
-        ? 'OpenAI took more than five minutes to mark this. Press Evaluate to try again.'
-        : `Could not reach OpenAI: ${error.message}`
-    );
-  }
-
-  const payload = await res.json().catch(() => null);
-  if (!res.ok) {
-    const detail = payload?.error?.message ?? `HTTP ${res.status}`;
-    if (res.status === 401) throw friendly(`OpenAI rejected the API key in OPENAI_API_KEY (${detail}).`);
-    if (res.status === 429) throw friendly(`OpenAI refused the request: rate limit or no credit left on the account (${detail}).`);
-    throw friendly(`OpenAI returned an error: ${detail}`);
-  }
-
-  if (payload.status && payload.status !== 'completed') {
-    const reason = payload.incomplete_details?.reason;
-    throw friendly(`OpenAI stopped before finishing the marking${reason ? ` (${reason})` : ''}. Press Evaluate to try again.`);
-  }
-
-  const parts = (payload.output ?? [])
-    .filter((item) => item.type === 'message')
-    .flatMap((item) => item.content ?? []);
-  const refusal = parts.find((part) => part.type === 'refusal');
-  if (refusal) throw friendly(`OpenAI declined to mark this: ${refusal.refusal}`);
-  const text = parts.filter((part) => part.type === 'output_text').map((part) => part.text).join('');
-  if (!text) throw friendly('OpenAI sent back no marks. Press Evaluate to try again.');
-  return text;
-}
-
-function parseMarks(text) {
-  let marks = null;
-  try {
-    marks = JSON.parse(text);
-  } catch {
-    // reported below
-  }
-  if (!marks || typeof marks !== 'object') {
-    throw friendly('OpenAI sent back marks that were cut off or garbled. Press Evaluate to try again.');
-  }
-  return marks;
 }
 
 // Totals are added up here rather than taken from the model, and marks are
@@ -229,10 +171,4 @@ export function normalise(raw) {
     strengths: (raw.strengths ?? []).map(String),
     areas_to_improve: (raw.areas_to_improve ?? []).map(String),
   };
-}
-
-function friendly(message) {
-  const error = new Error(message);
-  error.userMessage = message;
-  return error;
 }

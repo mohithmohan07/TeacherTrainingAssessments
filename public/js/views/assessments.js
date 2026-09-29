@@ -1,8 +1,8 @@
 import {
   h, mount, field, input, textarea, select, toast, confirmAction, statusBadge,
-  formatDate, formatBytes, emptyState, openLightbox,
+  formatDate, formatBytes, emptyState, openLightbox, sectionChip,
 } from '../ui.js';
-import { schoolsApi, teachersApi, assessmentsApi } from '../api.js';
+import { schoolsApi, teachersApi, assessmentsApi, testsApi } from '../api.js';
 import {
   scanner, scanPages, connectScanner, stopScanning, checkScannerOnce, selectScanner, selectedScanner,
   scanBothSides, setScanBothSides, HELPER_DOWNLOAD_URL,
@@ -34,6 +34,8 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
 
   const state = {
     schoolId: query.get('school') ?? String(schools[0].id),
+    testId: query.get('test') ?? null,
+    tests: [],
     roster: [],
     assessments: [],
   };
@@ -41,21 +43,62 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
   const container = h('div', {});
 
   async function load() {
+    state.tests = await testsApi.list(state.schoolId);
+    if (!state.tests.some((t) => String(t.id) === String(state.testId))) state.testId = String(state.tests[0].id);
     const [roster, assessments] = await Promise.all([
-      teachersApi.roster(state.schoolId),
-      assessmentsApi.list({ school_id: state.schoolId }),
+      teachersApi.roster(state.schoolId, state.testId),
+      assessmentsApi.list({ school_id: state.schoolId, test_id: state.testId }),
     ]);
-    state.roster = roster;
+    state.roster = roster.teachers;
     state.assessments = assessments;
     draw();
   }
+
+  const newTest = async () => {
+    const name = window.prompt('Name the new test, for example "Post-training test, March 2027":');
+    if (!name?.trim()) return;
+    try {
+      const test = await testsApi.create({ school_id: state.schoolId, name: name.trim() });
+      state.testId = String(test.id);
+      toast(`Created ${test.name}. Scans on the board now go under it.`, 'success');
+      await load();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  };
+
+  const renameTest = async () => {
+    const current = state.tests.find((t) => String(t.id) === state.testId);
+    const name = window.prompt('Rename this test:', current?.name ?? '');
+    if (!name?.trim() || name.trim() === current?.name) return;
+    try {
+      await testsApi.rename(state.testId, name.trim());
+      await load();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  };
 
   function draw() {
     const schoolSelect = select('school', schools.map((s) => ({ value: String(s.id), label: s.name })), { value: state.schoolId });
     schoolSelect.addEventListener('change', () => {
       state.schoolId = schoolSelect.value;
+      state.testId = null;
       load();
     });
+
+    const testSelect = select('test', state.tests.map((t) => ({ value: String(t.id), label: t.name })), { value: state.testId });
+    testSelect.addEventListener('change', () => {
+      state.testId = testSelect.value;
+      load();
+    });
+    const testControls = h(
+      'div',
+      { class: 'test-picker' },
+      testSelect,
+      h('button', { class: 'btn btn-sm', type: 'button', onclick: renameTest }, 'Rename'),
+      h('button', { class: 'btn btn-sm', type: 'button', onclick: newTest }, 'New test')
+    );
 
     mount(container,
       h(
@@ -65,11 +108,21 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
           'div',
           {},
           h('h1', {}, 'Assessments'),
-          h('p', {}, 'Upload each teacher’s question paper and response on their row, then press Evaluate to have OpenAI mark it.')
+          h('p', {}, 'Upload each teacher’s question paper and response on their row, then press Evaluate to have OpenAI mark it. Sections sat on different dates add up under the same test.')
         )
       ),
-      h('div', { class: 'card' }, h('div', { class: 'form-grid' }, field('School', schoolSelect))),
+      h(
+        'div',
+        { class: 'card' },
+        h(
+          'div',
+          { class: 'form-grid' },
+          field('School', schoolSelect),
+          field('Test', testControls, { hint: 'Each test is one round, such as a pre-training and a post-training test.' })
+        )
+      ),
       teacherBoardCard(state, load, draw),
+      schoolReportCard(state),
       historyCard(state)
     );
   }
@@ -123,6 +176,7 @@ function teacherBoardCard(state, reload, redraw) {
             h('th', {}, 'Question paper'),
             h('th', {}, 'Teacher’s response'),
             h('th', {}, 'Status'),
+            h('th', {}, 'Sections so far'),
             h('th', { class: 'right' }, '')
           )
         ),
@@ -136,13 +190,13 @@ function teacherBoardCard(state, reload, redraw) {
               h(
                 'td',
                 {},
-                h('strong', {}, teacher.name),
+                h('a', { class: 'teacher-link', href: `#/teachers/${teacher.id}` }, teacher.name),
                 [teacher.grade, teacher.subjects].filter(Boolean).length
                   ? h('div', { class: 'hint' }, [teacher.grade, teacher.subjects].filter(Boolean).join(' · '))
                   : null
               ),
-              h('td', {}, scanCell(teacher, 'question_paper', teacher.question_paper_count, reload, redraw)),
-              h('td', {}, scanCell(teacher, 'response', teacher.response_count, reload, redraw)),
+              h('td', {}, scanCell(state, teacher, 'question_paper', teacher.question_paper_count, reload, redraw)),
+              h('td', {}, scanCell(state, teacher, 'response', teacher.response_count, reload, redraw)),
               h(
                 'td',
                 {},
@@ -150,12 +204,25 @@ function teacherBoardCard(state, reload, redraw) {
                   ? h('span', { class: 'badge running' }, 'Marking…')
                   : teacher.assessment_id
                     ? statusBadge(teacher.assessment_status)
-                    : h('span', { class: 'badge draft' }, 'Not started'),
-                teacher.score === null || teacher.score === undefined
-                  ? null
-                  : h('div', { class: 'hint' }, `${teacher.score}${teacher.max_score ? ` / ${teacher.max_score}` : ''}`)
+                    : h('span', { class: 'badge draft' }, 'Not started')
               ),
-              h('td', { class: 'right' }, evaluateButton(teacher))
+              h(
+                'td',
+                {},
+                teacher.sections.length
+                  ? h('div', { class: 'chips' }, teacher.sections.map((section) => sectionChip(section, { short: true })))
+                  : h('span', { class: 'hint' }, '—')
+              ),
+              h(
+                'td',
+                { class: 'right' },
+                h(
+                  'div',
+                  { class: 'row-actions' },
+                  evaluateButton(state, teacher),
+                  teacher.sections.length ? reportButton(state, teacher) : null
+                )
+              )
             )
           )
         )
@@ -166,7 +233,7 @@ function teacherBoardCard(state, reload, redraw) {
 
 // One upload control for one kind of scan, on one teacher's row. With the
 // scanner connected the button scans; otherwise it picks image files.
-function scanCell(teacher, kind, count, reload, redraw) {
+function scanCell(state, teacher, kind, count, reload, redraw) {
   const label = count ? `${count} page${count === 1 ? '' : 's'}` : 'None yet';
   const scanning = scanner.status === 'ready';
   const idleLabel = scanning ? (count ? 'Scan more' : 'Scan') : count ? 'Add pages' : 'Upload';
@@ -182,6 +249,7 @@ function scanCell(teacher, kind, count, reload, redraw) {
   const upload = async (files, { scanned = false, warning = '' } = {}) => {
     const data = new FormData();
     data.set('kind', kind);
+    data.set('test_id', state.testId);
     for (const file of files) data.append('files', file);
 
     button.textContent = 'Uploading…';
@@ -319,7 +387,7 @@ function scannerPanel(redraw) {
 // Evaluate marks the teacher's scans with OpenAI, then opens the evaluation
 // screen, which shows the marking as it finishes. Without both sets of scans it
 // just opens the screen. If this teacher has no assessment yet, one is created.
-function evaluateButton(teacher) {
+function evaluateButton(state, teacher) {
   const evaluated = teacher.assessment_status === 'evaluated';
   const running = teacher.ai_status === 'running';
   const button = h(
@@ -331,7 +399,7 @@ function evaluateButton(teacher) {
   button.addEventListener('click', async () => {
     button.disabled = true;
     try {
-      const id = teacher.assessment_id ?? (await teachersApi.currentAssessment(teacher.id)).id;
+      const id = teacher.assessment_id ?? (await teachersApi.currentAssessment(teacher.id, state.testId)).id;
       const ready = teacher.question_paper_count > 0 && teacher.response_count > 0;
       if (!evaluated && !running && ready) {
         try {
@@ -350,13 +418,61 @@ function evaluateButton(teacher) {
   return button;
 }
 
+// Opens the teacher's reports for this test. They are written by OpenAI after
+// each Evaluate, so the label says where they stand.
+function reportButton(state, teacher) {
+  const labels = { running: 'Writing report…', failed: 'Report failed', stale: 'Report (update)', done: 'Report', none: 'Report' };
+  return h(
+    'a',
+    { class: `btn btn-sm${teacher.report_status === 'failed' ? ' btn-danger' : ''}`, href: `#/teachers/${teacher.id}/report/${state.testId}` },
+    labels[teacher.report_status] ?? 'Report'
+  );
+}
+
+// The management report on all of the school's teachers, offered at the end.
+function schoolReportCard(state) {
+  const assessed = state.roster.filter((t) => t.sections.length).length;
+  if (!state.roster.length) return null;
+  return h(
+    'div',
+    { class: 'card' },
+    h(
+      'div',
+      { class: 'scan-group-head' },
+      h(
+        'div',
+        {},
+        h('h2', { style: 'margin:0' }, 'Report on all teachers'),
+        h(
+          'p',
+          { class: 'hint', style: 'margin:4px 0 0' },
+          assessed
+            ? `${assessed} of ${state.roster.length} teachers have results in this test. When you have evaluated everyone you want in it, build the management report on all of them.`
+            : 'Once teachers have been evaluated, build a management report on all of them here.'
+        )
+      ),
+      h(
+        'a',
+        {
+          class: `btn ${assessed ? 'btn-primary' : ''}`,
+          href: `#/schools/${state.schoolId}/report/${state.testId}`,
+          'aria-disabled': assessed ? null : 'true',
+          onclick: assessed ? null : (event) => event.preventDefault(),
+          style: assessed ? null : 'opacity:.55;cursor:not-allowed',
+        },
+        'Management report'
+      )
+    )
+  );
+}
+
 /* ------------------------------------------------------------------- history */
 
 function historyCard(state) {
   return h(
     'div',
     { class: 'card' },
-    h('h2', {}, 'All assessments'),
+    h('h2', {}, 'All sittings in this test'),
     state.assessments.length
       ? h(
           'div',
@@ -367,7 +483,7 @@ function historyCard(state) {
             h(
               'thead',
               {},
-              h('tr', {}, h('th', {}, 'Assessment'), h('th', {}, 'Teacher'), h('th', {}, 'Date'), h('th', {}, 'Pages'), h('th', {}, 'Score'), h('th', {}, 'Status'))
+              h('tr', {}, h('th', {}, 'Sitting'), h('th', {}, 'Teacher'), h('th', {}, 'Date'), h('th', {}, 'Pages'), h('th', {}, 'Sections'), h('th', {}, 'Status'))
             ),
             h(
               'tbody',
@@ -380,14 +496,22 @@ function historyCard(state) {
                   h('td', {}, row.teacher_grade ? `${row.teacher_name} — ${row.teacher_grade}` : row.teacher_name),
                   h('td', {}, formatDate(row.assessment_date) || '—'),
                   h('td', {}, `${row.question_paper_count} paper · ${row.response_count} response`),
-                  h('td', {}, row.score === null ? '—' : `${row.score}${row.max_score ? ` / ${row.max_score}` : ''}`),
+                  h(
+                    'td',
+                    {},
+                    row.sections.length
+                      ? h('div', { class: 'chips' }, row.sections.map((section) => sectionChip(section, { short: true })))
+                      : row.score === null
+                        ? '—'
+                        : `${row.score}${row.max_score ? ` / ${row.max_score}` : ''}`
+                  ),
                   h('td', {}, statusBadge(row.status))
                 )
               )
             )
           )
         )
-      : emptyState('Nothing has been started for this school yet.')
+      : emptyState('Nothing has been scanned for this test yet.')
   );
 }
 
@@ -420,7 +544,10 @@ export async function renderAssessmentDetail(root, id) {
       if (latest.ai_status !== 'running') {
         assessment = latest;
         draw();
-        if (latest.ai_status === 'done') toast(`Marked: ${latest.score} / ${latest.max_score}.`, 'success');
+        if (latest.ai_status === 'done') {
+          const marked = latest.sections.map((s) => `${s.name} ${s.percent}%`).join(', ');
+          toast(`Marked${marked ? `: ${marked}` : ''}. The teacher’s reports are being written.`, 'success');
+        }
         else toast('The marking did not finish. See the evaluation for why.', 'error');
         break;
       }
@@ -441,7 +568,13 @@ export async function renderAssessmentDetail(root, id) {
 
   function draw() {
     mount(container,
-      h('div', { class: 'breadcrumb' }, h('a', { href: `#/assessments?school=${assessment.school_id}` }, '← All assessments')),
+      h(
+        'div',
+        { class: 'breadcrumb' },
+        h('a', { href: `#/assessments?school=${assessment.school_id}${assessment.test_id ? `&test=${assessment.test_id}` : ''}` }, '← Assessments'),
+        ' · ',
+        h('a', { href: `#/teachers/${assessment.teacher_id}` }, `${assessment.teacher_name}’s profile`)
+      ),
       h(
         'div',
         { class: 'page-head' },
@@ -449,7 +582,7 @@ export async function renderAssessmentDetail(root, id) {
           'div',
           {},
           h('h1', {}, assessment.title),
-          h('p', {}, `${assessment.teacher_name}${assessment.teacher_grade ? ` — ${assessment.teacher_grade}` : ''} · ${assessment.school_name}${assessment.assessment_date ? ` · ${formatDate(assessment.assessment_date)}` : ''}`)
+          h('p', {}, `${assessment.teacher_name}${assessment.teacher_grade ? ` — ${assessment.teacher_grade}` : ''} · ${assessment.school_name}${assessment.test_name ? ` · ${assessment.test_name}` : ''}${assessment.assessment_date ? ` · ${formatDate(assessment.assessment_date)}` : ''}`)
         ),
         h(
           'div',
@@ -471,7 +604,10 @@ export async function renderAssessmentDetail(root, id) {
         )
       ),
       scansCard(assessment, refresh),
-      markingCard(assessment, runEvaluation),
+      markingCard(assessment, runEvaluation, (updated) => {
+        assessment = updated;
+        draw();
+      }),
       detailsCard(assessment, refresh)
     );
   }
@@ -615,7 +751,7 @@ function scanGroup(assessment, kind, label, files, refresh) {
 
 // The OpenAI marking: a button to run it, its progress, and the marks it gave
 // question by question, grouped by section.
-function markingCard(assessment, runEvaluation) {
+function markingCard(assessment, runEvaluation, onSaved) {
   const hasScans = assessment.question_paper_files.length > 0 && assessment.response_files.length > 0;
   const running = assessment.ai_status === 'running';
   const result = assessment.ai_result;
@@ -626,7 +762,7 @@ function markingCard(assessment, runEvaluation) {
     running ? 'Marking…' : result ? 'Evaluate again' : 'Evaluate'
   );
   button.addEventListener('click', () => {
-    if (result && !confirmAction('Mark this again with OpenAI? The new marks replace the current score.')) return;
+    if (result && !confirmAction('Mark this again with OpenAI? The new marks replace the current ones, including any you corrected.')) return;
     button.disabled = true;
     button.textContent = 'Starting…';
     runEvaluation();
@@ -648,32 +784,48 @@ function markingCard(assessment, runEvaluation) {
     { class: 'card' },
     h('div', { class: 'scan-group-head' }, h('h2', { style: 'margin:0' }, 'Marking'), button),
     body ?? null,
-    result ? markingResult(assessment, result) : null
+    result ? markingResult(assessment, result, onSaved) : null
   );
 }
 
-function markingResult(assessment, result) {
-  const sections = [];
-  for (const q of result.questions) {
-    let group = sections.find((s) => s.name === q.section);
-    if (!group) sections.push((group = { name: q.section, questions: [], awarded: 0, max: 0 }));
-    group.questions.push(q);
-    group.awarded += q.marks_awarded;
-    group.max += q.max_marks;
-  }
-  const round = (n) => Math.round(n * 100) / 100;
+// Each section is graded on its own; there is no overall percentage. Every
+// question's marks can be corrected, and the section grades and reports follow.
+function markingResult(assessment, result, onSaved) {
   const list = (title, items) =>
     items.length ? h('div', {}, h('h3', {}, title), h('ul', {}, items.map((item) => h('li', {}, item)))) : null;
+
+  const markInputs = result.questions.map((q) =>
+    h('input', { type: 'number', class: 'mark-input', min: 0, max: q.max_marks, step: 0.5, value: q.marks_awarded, 'aria-label': `Marks for ${q.question}` })
+  );
+  const saveButton = h('button', { class: 'btn btn-sm btn-primary', type: 'button', style: 'display:none' }, 'Save corrected marks');
+  const changed = () => markInputs.some((el, i) => Number(el.value) !== result.questions[i].marks_awarded);
+  for (const el of markInputs) el.addEventListener('input', () => { saveButton.style.display = changed() ? '' : 'none'; });
+  saveButton.addEventListener('click', async () => {
+    saveButton.disabled = true;
+    try {
+      const updated = await assessmentsApi.saveMarks(assessment.id, markInputs.map((el) => el.value));
+      toast('Marks saved. Rebuild the teacher’s report to take them in.', 'success');
+      onSaved(updated);
+    } catch (error) {
+      toast(error.message, 'error');
+      saveButton.disabled = false;
+    }
+  });
 
   return h(
     'div',
     { class: 'marking-result' },
-    h(
-      'div',
-      { class: 'marking-total' },
-      h('strong', {}, `${result.total_score} / ${result.max_score}`),
-      sections.filter((s) => s.name).map((s) => h('span', { class: 'badge' }, `${s.name}: ${round(s.awarded)} / ${round(s.max)}`))
-    ),
+    h('div', { class: 'marking-total chips' }, assessment.sections.map((section) => sectionChip(section))),
+    h('p', { class: 'hint' }, assessment.sections.map((s) => `${s.name}: ${s.awarded} / ${s.max}${s.grade_label ? ` (${s.grade_label})` : ''}`).join(' · ')),
+    assessment.unanswered_sections.length
+      ? h(
+          'p',
+          { class: 'notice' },
+          assessment.sections.length
+            ? `Nothing was written for ${assessment.unanswered_sections.join(' or ')} in this response, so it is treated as not sat and left out of the results. When the teacher sits it, scan it on their row and press Evaluate; it is added to this test.`
+            : 'OpenAI found nothing written in any section of this response, so nothing is graded. Check that the response pages are the teacher’s answer sheets, then press Evaluate again.'
+        )
+      : null,
     result.summary ? h('p', {}, result.summary) : null,
     h(
       'div',
@@ -685,13 +837,13 @@ function markingResult(assessment, result) {
         h(
           'tbody',
           {},
-          result.questions.map((q) =>
+          result.questions.map((q, i) =>
             h(
               'tr',
               {},
               h('td', {}, q.section || '—'),
               h('td', {}, q.question),
-              h('td', { style: 'white-space:nowrap' }, `${q.marks_awarded} / ${q.max_marks}`),
+              h('td', { style: 'white-space:nowrap' }, markInputs[i], ` / ${q.max_marks}`),
               h(
                 'td',
                 {},
@@ -705,11 +857,17 @@ function markingResult(assessment, result) {
         )
       )
     ),
+    h('div', { class: 'form-actions', style: 'margin-top:10px' }, saveButton),
     h('div', { class: 'marking-lists' }, list('Strengths', result.strengths), list('Areas to improve', result.areas_to_improve)),
     h(
       'p',
       { class: 'hint' },
-      `Marked by OpenAI (${assessment.ai_model})${assessment.ai_evaluated_at ? ` on ${formatDate(assessment.ai_evaluated_at.slice(0, 10))}` : ''}. You can correct the score below if you disagree.`
+      `Marked by OpenAI (${assessment.ai_model})${assessment.ai_evaluated_at ? ` on ${formatDate(assessment.ai_evaluated_at.slice(0, 10))}` : ''}. If you disagree with a mark, change it in the Marks column and save.`
+    ),
+    h(
+      'p',
+      {},
+      h('a', { class: 'btn btn-sm', href: `#/teachers/${assessment.teacher_id}/report/${assessment.test_id}` }, 'Open the teacher’s reports')
     )
   );
 }
@@ -737,12 +895,14 @@ function detailsCard(assessment, refresh) {
       field('Date', input('assessment_date', { type: 'date', value: assessment.assessment_date ?? '' })),
       field('Subject', input('subject', { value: assessment.subject })),
       field('Status', select('status', STATUS_OPTIONS, { value: assessment.status })),
-      field('Score', input('score', { type: 'number', value: assessment.score ?? '' })),
-      field('Out of', input('max_score', { type: 'number', value: assessment.max_score ?? '' })),
+      // With OpenAI's marks, scores come from the questions above. Without
+      // them, a score can still be entered by hand.
+      assessment.ai_result ? h('input', { type: 'hidden', name: 'score', value: assessment.score ?? '' }) : field('Score', input('score', { type: 'number', value: assessment.score ?? '' })),
+      assessment.ai_result ? h('input', { type: 'hidden', name: 'max_score', value: assessment.max_score ?? '' }) : field('Out of', input('max_score', { type: 'number', value: assessment.max_score ?? '' })),
       field('Evaluation notes', textarea('notes', { value: assessment.notes, placeholder: 'What stood out, what to work on…' }), { span: true })
     ),
     h('div', { class: 'form-actions' }, h('button', { class: 'btn btn-primary', type: 'submit' }, 'Save assessment'))
   );
 
-  return h('div', { class: 'card' }, h('h2', {}, 'Details and score'), form);
+  return h('div', { class: 'card' }, h('h2', {}, assessment.ai_result ? 'Details' : 'Details and score'), form);
 }
