@@ -1,7 +1,7 @@
 import express from 'express';
 import db from '../db.js';
 import { GEMINI_MODEL, geminiConfigured, GeminiError } from '../gemini.js';
-import { generatePaper, readRequest } from '../generator.js';
+import { generatePaper, presentPaper, readRequest } from '../generator.js';
 import { LANGUAGES } from '../languages.js';
 import { LEVELS, SECTION_KEYS, TEACHER_TYPES, sectionFormats, sectionMarks } from '../paper-formats.js';
 
@@ -16,7 +16,7 @@ function toPaper(row) {
     total_marks: row.total_marks,
     created_at: row.created_at,
     request: JSON.parse(row.request),
-    paper: JSON.parse(row.paper),
+    paper: presentPaper(JSON.parse(row.paper)),
   };
 }
 
@@ -35,11 +35,10 @@ router.get('/config', (_req, res) => {
 });
 
 router.get('/', (_req, res) => {
-  res.json(
-    db
-      .prepare('SELECT id, title, subject, grade, total_marks, created_at FROM generated_papers ORDER BY id DESC LIMIT 200')
-      .all()
-  );
+  const rows = db
+    .prepare('SELECT id, title, subject, grade, request, created_at FROM generated_papers ORDER BY id DESC LIMIT 200')
+    .all();
+  res.json(rows.map(({ request, ...row }) => ({ ...row, sections: JSON.parse(request).sections ?? [] })));
 });
 
 router.get('/:id', (req, res) => {

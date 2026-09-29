@@ -372,6 +372,7 @@ td.right, th.right { text-align: right; white-space: nowrap; }
   padding: 36px 44px; max-width: 860px;
   font-family: "Noto Serif", var(--indic-fonts), Georgia, serif; font-size: 15px; line-height: 1.6;
 }
+.paper-sheet + .paper-sheet { margin-top: 24px; }
 
 /* Urdu reads best in Nastaliq, which needs extra line height; Kashmiri's
    vowel marks are better covered by Naskh. */
@@ -407,6 +408,7 @@ td.right, th.right { text-align: right; white-space: nowrap; }
   .view { padding: 0; max-width: none; }
   body { background: #fff; }
   .paper-sheet { border: none; box-shadow: none; padding: 0; max-width: none; }
+  .paper-sheet + .paper-sheet { margin-top: 0; break-before: page; }
   .q-answer { background: none; }
 }
 

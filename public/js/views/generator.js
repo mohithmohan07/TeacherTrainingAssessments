@@ -117,7 +117,7 @@ export async function renderGenerator(root) {
           h(
             'table',
             {},
-            h('thead', {}, h('tr', {}, h('th', {}, 'Paper'), h('th', {}, 'Subject'), h('th', {}, 'Classes'), h('th', { class: 'right' }, 'Marks'), h('th', {}, 'Created'))),
+            h('thead', {}, h('tr', {}, h('th', {}, 'Paper'), h('th', {}, 'Subject'), h('th', {}, 'Classes'), h('th', {}, 'Sections'), h('th', {}, 'Created'))),
             h(
               'tbody',
               {},
@@ -128,7 +128,7 @@ export async function renderGenerator(root) {
                   h('td', {}, paper.title),
                   h('td', {}, paper.subject || '—'),
                   h('td', {}, paper.grade || '—'),
-                  h('td', { class: 'right' }, paper.total_marks),
+                  h('td', {}, paper.sections.join(', ')),
                   h('td', {}, formatDate(paper.created_at))
                 )
               )
@@ -211,10 +211,13 @@ export async function renderGeneratedPaper(root, id) {
   const { paper } = record;
   let showAnswers = false;
 
-  const sheet = h('article', { class: 'paper-sheet', lang: paper.lang, dir: paper.rtl ? 'rtl' : null });
-  const draw = () =>
-    mount(
-      sheet,
+  // Each section is its own one-hour paper with its own heading, as in the
+  // programme's papers, and starts on a new page when printed.
+  const sheets = h('div', { class: 'paper-sheets' });
+  const renderSheet = (section) =>
+    h(
+      'article',
+      { class: 'paper-sheet', lang: paper.lang, dir: paper.rtl ? 'rtl' : null },
       h(
         'header',
         { class: 'paper-head' },
@@ -226,23 +229,22 @@ export async function renderGeneratedPaper(root, id) {
               h('span', { lang: 'en', dir: 'ltr' }, paper.school_name)
             )
           : null,
-        h('h2', {}, paper.title),
+        h('h2', {}, section.title),
         h(
           'p',
           { class: 'paper-meta' },
-          h('span', {}, `${paper.labels.total_marks}: ${paper.total_marks}`),
-          h('span', {}, `${paper.labels.time}: ${paper.labels.duration}`)
+          h('span', {}, `${paper.labels.total_marks}: ${section.marks}`),
+          h('span', {}, `${paper.labels.time}: ${paper.labels.one_hour}`)
         )
       ),
-      paper.sections.map((section) =>
-        h(
-          'section',
-          { class: 'paper-section' },
-          h('h3', {}, `${section.heading} (${section.marks} ${paper.labels.marks})`),
-          section.questions.map((question) => renderQuestion(question, paper, showAnswers))
-        )
+      h(
+        'section',
+        { class: 'paper-section' },
+        h('h3', {}, `${section.heading} (${section.marks} ${paper.labels.marks})`),
+        section.questions.map((question) => renderQuestion(question, paper, showAnswers))
       )
     );
+  const draw = () => mount(sheets, paper.sections.map(renderSheet));
   draw();
 
   const answersButton = h('button', { class: 'btn' }, 'Show answer key');
@@ -269,10 +271,15 @@ export async function renderGeneratedPaper(root, id) {
     h(
       'div',
       { class: 'page-head no-print' },
-      h('div', {}, h('h1', {}, [record.subject, paper.level].filter(Boolean).join(', ')), h('p', {}, `Generated ${formatDate(record.created_at)} in ${paper.language}. Print it with or without the answer key.`)),
+      h(
+        'div',
+        {},
+        h('h1', {}, [record.subject, paper.level].filter(Boolean).join(', ')),
+        h('p', {}, `Generated ${formatDate(record.created_at)} in ${paper.language}. Each section prints as its own one-hour paper, with or without the answer key.`)
+      ),
       h('div', { class: 'page-actions' }, answersButton, h('button', { class: 'btn btn-primary', onclick: () => window.print() }, 'Print'), h('button', { class: 'btn btn-danger', onclick: remove }, 'Delete'))
     ),
     paper.shortfall?.length ? h('div', { class: 'notice no-print' }, `Gemini left gaps in this paper: ${paper.shortfall.join('; ')}. Generate it again for a complete paper.`) : null,
-    sheet
+    sheets
   );
 }
