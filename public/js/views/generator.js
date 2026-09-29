@@ -1,41 +1,51 @@
 import { h, mount, toast, confirmAction, formatDate, field, input, textarea, select, emptyState } from '../ui.js';
-import { generatorApi } from '../api.js';
+import { generatorApi, schoolsApi } from '../api.js';
 
-const FOCUS_LABELS = {
-  both: 'Subject knowledge and teaching practice',
-  subject: 'Subject knowledge',
-  pedagogy: 'Teaching practice',
-};
+// Suggestions only: any language Gemini writes can be typed in.
+const LANGUAGES = ['English', 'Hindi', 'Kannada', 'Sanskrit', 'Tamil', 'Telugu', 'Malayalam', 'Marathi', 'Bengali', 'Gujarati', 'Urdu', 'Konkani', 'Tulu', 'French', 'German'];
+const BOARDS = ['CBSE', 'ICSE', 'Karnataka State', 'Karnataka Pre-University'];
+const LEVELS = ['Primary', 'Middle School', 'High School', 'Senior Secondary', 'Pre-University'];
 
-function sectionRow(section, types, onChange) {
-  const cell = (control) => h('td', {}, control);
-  const name = h('input', { type: 'text', value: section.name, maxlength: 4, style: 'width:56px' });
-  const title = h('input', { type: 'text', value: section.title });
-  const type = select('type', Object.entries(types).map(([value, label]) => ({ value, label: label.split(' (')[0] })), { value: section.type, id: '' });
-  const count = h('input', { type: 'number', min: 0, max: 30, value: section.count, style: 'width:80px' });
-  const marks = h('input', { type: 'number', min: 0.5, max: 100, step: 0.5, value: section.marks, style: 'width:80px' });
-
-  const row = h('tr', {}, cell(name), cell(title), cell(type), cell(count), cell(marks));
-  row.read = () => ({ name: name.value, title: title.value, type: type.value, count: count.value, marks: marks.value });
-  for (const control of [name, title, type, count, marks]) control.addEventListener('input', onChange);
-  return row;
+function datalist(id, values) {
+  return h('datalist', { id }, values.map((value) => h('option', { value })));
 }
 
 export async function renderGenerator(root) {
-  const [config, papers] = await Promise.all([generatorApi.config(), generatorApi.list()]);
+  const [config, papers, schools] = await Promise.all([generatorApi.config(), generatorApi.list(), schoolsApi.list()]);
 
-  const totalLine = h('p', { class: 'hint', style: 'margin:10px 0 0' });
-  const rows = [];
-  const updateTotal = () => {
-    const total = rows.reduce((sum, row) => {
-      const { count, marks } = row.read();
-      return sum + (Number(count) || 0) * (Number(marks) || 0);
-    }, 0);
-    const questions = rows.reduce((sum, row) => sum + (Number(row.read().count) || 0), 0);
-    totalLine.textContent = `${questions} questions, ${total} marks in total.`;
+  const teacherType = select(
+    'teacher_type',
+    Object.entries(config.teacher_types).map(([value, label]) => ({ value, label })),
+    { value: 'subject' }
+  );
+
+  // One checkbox per section; the headings change with the teacher type.
+  const sectionBoxes = h('div', { class: 'section-picks' });
+  const drawSections = () => {
+    const checked = new Set([...sectionBoxes.querySelectorAll('input:checked')].map((box) => box.value));
+    const first = !sectionBoxes.childElementCount;
+    mount(
+      sectionBoxes,
+      config.sections[teacherType.value].map((section) =>
+        h(
+          'label',
+          { class: 'section-pick' },
+          h('input', { type: 'checkbox', name: 'sections', value: section.key, checked: first || checked.has(section.key) }),
+          h('span', {}, h('strong', {}, section.heading), h('small', {}, ` · ${section.marks} marks, 1 hour`))
+        )
+      ),
+      h('p', { class: 'hint', style: 'margin:4px 0 0' }, 'Section C will be added once there is a sample paper for it.')
+    );
   };
-  for (const section of config.sections) rows.push(sectionRow(section, config.question_types, updateTotal));
-  updateTotal();
+  teacherType.addEventListener('change', drawSections);
+  drawSections();
+
+  const school = select('school_name', [{ value: '', label: 'No school name on the paper' }, ...schools.map((s) => ({ value: s.name, label: s.name }))]);
+  const withList = (control, list) => {
+    control.setAttribute('list', list);
+    control.setAttribute('autocomplete', 'off');
+    return control;
+  };
 
   const form = h(
     'form',
@@ -43,28 +53,26 @@ export async function renderGenerator(root) {
     h(
       'div',
       { class: 'form-grid' },
-      field('Subject', input('subject', { placeholder: 'e.g. Mathematics', required: true })),
-      field('Grade the teachers teach', input('grade', { placeholder: 'e.g. Grade 6' })),
-      field(
-        'Focus',
-        select('focus', config.focus_options.map((value) => ({ value, label: FOCUS_LABELS[value] ?? value })), { value: 'both' })
-      ),
-      field('Paper title', input('title', { placeholder: 'Left blank, Gemini suggests one' })),
-      field('Topics', textarea('topics', { placeholder: 'One topic per line, e.g.\nFractions and decimals\nRatio and proportion' }), { span: true }),
-      field('Anything else Gemini should know', textarea('instructions', { placeholder: 'Optional, e.g. use examples from everyday Indian life' }), { span: true })
+      field('Subject', input('subject', { placeholder: 'e.g. Biology, Hindi, Music', required: true })),
+      field('Teacher', teacherType),
+      field('Language of the paper', withList(input('language', { value: 'English' }), 'gen-languages'), {
+        hint: 'Pick one or type any other language.',
+      }),
+      field('School on the paper', school),
+      field('Board', withList(input('board', { placeholder: 'e.g. ICSE' }), 'gen-boards')),
+      field('Level', withList(input('level', { placeholder: 'e.g. High School' }), 'gen-levels')),
+      field('Classes taught', input('grade', { placeholder: 'e.g. Classes IX-X' })),
+      field('Topics', textarea('topics', { placeholder: 'Optional. One per line, e.g.\nOsmosis and plasmolysis\nMendelian genetics' }), {
+        span: true,
+        hint: 'Left blank, Gemini picks commonly misunderstood topics from the syllabus.',
+      }),
+      field('Anything else Gemini should know', textarea('instructions', { placeholder: 'Optional' }), { span: true })
     ),
-    h('h3', { style: 'margin:22px 0 8px;font-size:15px' }, 'Sections'),
-    h(
-      'div',
-      { class: 'table-wrap' },
-      h(
-        'table',
-        { class: 'sections-table' },
-        h('thead', {}, h('tr', {}, h('th', {}, 'Section'), h('th', {}, 'Title'), h('th', {}, 'Question type'), h('th', {}, 'Questions'), h('th', {}, 'Marks each'))),
-        h('tbody', {}, rows)
-      )
-    ),
-    totalLine
+    h('h3', { style: 'margin:20px 0 8px;font-size:15px' }, 'Sections'),
+    sectionBoxes,
+    datalist('gen-languages', LANGUAGES),
+    datalist('gen-boards', BOARDS),
+    datalist('gen-levels', LEVELS)
   );
 
   const button = h('button', { type: 'submit', class: 'btn btn-primary', disabled: !config.configured }, 'Generate paper');
@@ -73,11 +81,16 @@ export async function renderGenerator(root) {
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const data = Object.fromEntries(new FormData(form));
+    const data = new FormData(form);
+    const body = { ...Object.fromEntries(data), sections: data.getAll('sections') };
+    if (!body.sections.length) {
+      toast('Tick at least one section.', 'error');
+      return;
+    }
     button.disabled = true;
-    status.textContent = 'Gemini is writing the paper. This can take up to a minute…';
+    status.textContent = 'Gemini is writing the paper. This can take a minute or two…';
     try {
-      const paper = await generatorApi.generate({ ...data, sections: rows.map((row) => row.read()) });
+      const paper = await generatorApi.generate(body);
       toast('Paper generated.', 'success');
       window.navigate(`/generator/${paper.id}`);
     } catch (error) {
@@ -107,7 +120,7 @@ export async function renderGenerator(root) {
           h(
             'table',
             {},
-            h('thead', {}, h('tr', {}, h('th', {}, 'Paper'), h('th', {}, 'Subject'), h('th', {}, 'Grade'), h('th', { class: 'right' }, 'Marks'), h('th', {}, 'Created'))),
+            h('thead', {}, h('tr', {}, h('th', {}, 'Paper'), h('th', {}, 'Subject'), h('th', {}, 'Classes'), h('th', { class: 'right' }, 'Marks'), h('th', {}, 'Created'))),
             h(
               'tbody',
               {},
@@ -133,32 +146,43 @@ export async function renderGenerator(root) {
     h(
       'div',
       { class: 'page-head' },
-      h('div', {}, h('h1', {}, 'Assessment generator'), h('p', {}, 'Write a new assessment paper with Gemini, laid out in Sections A, B and C.'))
+      h('div', {}, h('h1', {}, 'Assessment generator'), h('p', {}, `Write a new teacher assessment paper with Gemini (${config.model}), in the same layout as the programme's papers.`))
     ),
     notice,
-    h('div', { class: 'card' }, h('h2', {}, 'New paper'), h('p', { class: 'hint' }, 'Describe what the paper should cover and how each section is laid out.'), form),
+    h('div', { class: 'card' }, h('h2', {}, 'New paper'), h('p', { class: 'hint' }, 'Each section has four case-study questions worth 35 marks, with a model answer and marking points for every part.'), form),
     history
   );
 }
 
-function renderQuestion(question, showAnswers) {
-  const letters = 'abcdef';
+function renderPart(part, question, paper, showAnswers) {
   return h(
     'li',
-    { class: 'paper-question', value: question.number },
-    h('div', { class: 'q-line' }, h('span', { class: 'q-text' }, question.text), h('span', { class: 'q-marks' }, `[${question.marks}]`)),
-    question.options.length
-      ? h('ol', { class: 'q-options' }, question.options.map((option, index) => h('li', {}, h('span', { class: 'sr-letter' }, `(${letters[index]}) `), option)))
-      : null,
+    { class: 'paper-part' },
+    h(
+      'div',
+      { class: 'q-line' },
+      h('span', {}, h('span', { class: 'part-label' }, `${part.label}. `), part.text),
+      question.components ? null : h('span', { class: 'q-marks' }, `(${part.marks})`)
+    ),
     showAnswers
       ? h(
           'div',
           { class: 'q-answer' },
-          h('strong', {}, 'Answer: '),
-          question.answer,
-          question.marking_points.length ? h('ul', {}, question.marking_points.map((point) => h('li', {}, point))) : null
+          h('div', {}, h('strong', {}, `[${part.marks}] `), part.model_answer),
+          part.marking_points.length ? h('ul', {}, part.marking_points.map((point) => h('li', {}, point))) : null
         )
       : null
+  );
+}
+
+function renderQuestion(question, paper, showAnswers) {
+  const heading = [`Q${question.number}.`, question.title].filter(Boolean).join(' ');
+  return h(
+    'div',
+    { class: 'paper-question' },
+    h('div', { class: 'q-head' }, h('strong', {}, heading), ` [${paper.labels.total_marks}: ${question.marks}]`),
+    h('p', { class: 'q-scenario' }, question.scenario),
+    h('ol', { class: `q-parts${question.components ? ' components' : ''}` }, question.parts.map((part) => renderPart(part, question, paper, showAnswers)))
   );
 }
 
@@ -167,28 +191,30 @@ export async function renderGeneratedPaper(root, id) {
   const { paper } = record;
   let showAnswers = false;
 
-  const sheet = h('article', { class: 'paper-sheet' });
+  const sheet = h('article', { class: 'paper-sheet', lang: paper.language === 'English' ? 'en' : null });
   const draw = () =>
     mount(
       sheet,
-      h('header', { class: 'paper-head' }, h('h2', {}, paper.title), h('p', {}, [record.subject, record.grade].filter(Boolean).join(' · '), ` · Total marks: ${paper.total_marks}`)),
-      paper.instructions ? h('p', { class: 'paper-instructions' }, paper.instructions) : null,
-      paper.sections
-        .filter((section) => section.questions.length)
-        .map((section) =>
-          h(
-            'section',
-            { class: 'paper-section' },
-            h(
-              'h3',
-              {},
-              `Section ${section.name}: ${section.title}`,
-              h('span', { class: 'q-marks' }, `${section.questions.length} × ${section.marks_each} = ${section.questions.length * section.marks_each} marks`)
-            ),
-            section.instructions ? h('p', { class: 'paper-instructions' }, section.instructions) : null,
-            h('ol', { class: 'paper-questions', start: section.questions[0].number }, section.questions.map((question) => renderQuestion(question, showAnswers)))
-          )
+      h(
+        'header',
+        { class: 'paper-head' },
+        paper.school_name ? h('div', { class: 'paper-school' }, paper.school_name) : null,
+        h('h2', {}, paper.title),
+        h(
+          'p',
+          { class: 'paper-meta' },
+          h('span', {}, `${paper.labels.total_marks}: ${paper.total_marks}`),
+          h('span', {}, `${paper.labels.time}: ${paper.labels.duration}`)
         )
+      ),
+      paper.sections.map((section) =>
+        h(
+          'section',
+          { class: 'paper-section' },
+          h('h3', {}, `${section.heading} (${section.marks} ${paper.labels.marks})`),
+          section.questions.map((question) => renderQuestion(question, paper, showAnswers))
+        )
+      )
     );
   draw();
 
@@ -216,10 +242,10 @@ export async function renderGeneratedPaper(root, id) {
     h(
       'div',
       { class: 'page-head no-print' },
-      h('div', {}, h('h1', {}, paper.title), h('p', {}, `Generated ${formatDate(record.created_at)}. Print it with or without the answer key.`)),
+      h('div', {}, h('h1', {}, record.subject), h('p', {}, `Generated ${formatDate(record.created_at)} in ${paper.language}. Print it with or without the answer key.`)),
       h('div', { class: 'page-actions' }, answersButton, h('button', { class: 'btn btn-primary', onclick: () => window.print() }, 'Print'), h('button', { class: 'btn btn-danger', onclick: remove }, 'Delete'))
     ),
-    paper.shortfall?.length ? h('div', { class: 'notice no-print' }, `Gemini wrote fewer questions than asked: ${paper.shortfall.join('; ')}.`) : null,
+    paper.shortfall?.length ? h('div', { class: 'notice no-print' }, `Gemini left gaps in this paper: ${paper.shortfall.join('; ')}. Generate it again for a complete paper.`) : null,
     sheet
   );
 }

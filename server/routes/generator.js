@@ -1,7 +1,8 @@
 import express from 'express';
 import db from '../db.js';
-import { geminiConfigured, GeminiError } from '../gemini.js';
-import { DEFAULT_SECTIONS, FOCUS_OPTIONS, QUESTION_TYPES, generatePaper, readRequest } from '../generator.js';
+import { GEMINI_MODEL, geminiConfigured, GeminiError } from '../gemini.js';
+import { generatePaper, readRequest } from '../generator.js';
+import { TEACHER_TYPES, sectionFormats, sectionMarks } from '../paper-formats.js';
 
 const router = express.Router();
 
@@ -20,11 +21,13 @@ function toPaper(row) {
 
 // What the Generator page needs before it can show its form.
 router.get('/config', (_req, res) => {
+  const describe = (teacherType) =>
+    sectionFormats(teacherType, ['A', 'B']).map((format) => ({ key: format.key, heading: format.heading, marks: sectionMarks(format) }));
   res.json({
     configured: geminiConfigured(),
-    sections: DEFAULT_SECTIONS,
-    question_types: QUESTION_TYPES,
-    focus_options: Object.keys(FOCUS_OPTIONS),
+    model: GEMINI_MODEL,
+    teacher_types: TEACHER_TYPES,
+    sections: { subject: describe('subject'), specialist: describe('specialist') },
   });
 });
 
@@ -54,7 +57,7 @@ router.post('/', async (req, res, next) => {
     return next(error);
   }
 
-  if (!paper.sections.some((section) => section.questions.length)) {
+  if (!paper.sections.some((section) => section.questions.some((question) => question.scenario))) {
     return res.status(502).json({ error: 'Gemini returned a paper with no questions. Please try again.' });
   }
 
