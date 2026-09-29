@@ -2,6 +2,7 @@ import express from 'express';
 import db from '../db.js';
 import { uploadScans } from '../uploads.js';
 import { SCAN_KINDS, attachScans, discardUploads, removeStoredFile } from '../scans.js';
+import { startEvaluation } from '../evaluate.js';
 
 const router = express.Router();
 
@@ -27,6 +28,7 @@ function withFiles(assessment) {
   const files = selectFiles.all(assessment.id);
   return {
     ...assessment,
+    ai_result: assessment.ai_result ? JSON.parse(assessment.ai_result) : null,
     question_paper_files: files.filter((f) => f.kind === 'question_paper'),
     response_files: files.filter((f) => f.kind === 'response'),
   };
@@ -117,6 +119,18 @@ router.put('/:id', (req, res) => {
   ).run({ ...fields, id: assessment.id });
 
   res.json(withFiles(selectAssessmentRow.get(assessment.id)));
+});
+
+// Mark the scanned response with OpenAI. Starts the marking and returns at
+// once; the page polls GET /:id until ai_status is 'done' or 'failed'.
+router.post('/:id/evaluate', (req, res) => {
+  const assessment = selectAssessmentRow.get(req.params.id);
+  if (!assessment) return res.status(404).json({ error: 'Assessment not found.' });
+
+  const problem = startEvaluation(assessment.id);
+  if (problem) return res.status(400).json({ error: problem });
+
+  res.status(202).json(withFiles(selectAssessmentRow.get(assessment.id)));
 });
 
 router.delete('/:id', (req, res) => {

@@ -206,6 +206,7 @@ td.right, th.right { text-align: right; white-space: nowrap; }
 .badge.draft { background: var(--surface-2); color: var(--muted); }
 .badge.scanned { background: var(--warn-soft); color: var(--warn); }
 .badge.evaluated { background: var(--ok-soft); color: var(--ok); }
+.badge.running { background: var(--accent-soft); color: var(--accent); }
 
 .empty {
   padding: 34px 20px;
@@ -358,3 +359,19 @@ td.right, th.right { text-align: right; white-space: nowrap; }
   .sidebar-foot { display: none; }
   .view { padding: 20px 16px 48px; }
 }
+
+/* ---------- OpenAI marking ---------- */
+
+.marking-state { display: flex; align-items: center; gap: 10px; margin-top: 14px; padding: 12px 14px; border-radius: var(--radius); background: var(--accent-soft); font-size: 14px; }
+.marking-state.error { background: var(--danger-soft); color: var(--danger); }
+.spinner { flex: none; width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.marking-result { margin-top: 14px; }
+.marking-total { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.marking-total strong { font-size: 22px; margin-right: 6px; }
+.marking-lists { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.marking-lists h3 { font-size: 14px; margin: 14px 0 4px; }
+.marking-lists ul { margin: 0; padding-left: 20px; }
+.teacher-answer { margin-top: 6px; font-size: 13px; }
+.teacher-answer summary { cursor: pointer; color: var(--muted); }
+.teacher-answer div { margin-top: 4px; padding: 8px 10px; border-radius: 8px; background: var(--surface-2); white-space: pre-wrap; }

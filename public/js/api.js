@@ -61,6 +61,7 @@ export const assessmentsApi = {
   get: (id) => api.get(`/api/assessments/${id}`),
   create: (body) => api.postJson('/api/assessments', body),
   update: (id, body) => api.putJson(`/api/assessments/${id}`, body),
+  evaluate: (id) => api.postJson(`/api/assessments/${id}/evaluate`, {}),
   remove: (id) => api.del(`/api/assessments/${id}`),
   uploadFiles: (id, formData) => api.postForm(`/api/assessments/${id}/files`, formData),
   removeFile: (id, fileId) => api.del(`/api/assessments/${id}/files/${fileId}`),

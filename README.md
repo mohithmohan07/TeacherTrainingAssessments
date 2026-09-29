@@ -85,6 +85,24 @@ any page to see it full size.
 
 JPG, PNG, WEBP, TIFF, GIF and BMP are accepted, up to 25 MB per page.
 
+## Marking with OpenAI
+
+Uploading or scanning never marks anything. When a teacher has both a question
+paper and a response, press **Evaluate** on their row: the app sends the pages
+to the OpenAI API, which reads the paper and the teacher's handwriting, marks
+every part of every question against the marks printed on the paper, and writes
+feedback. Papers and answers can be in any language (English, Hindi, Kannada,
+Sanskrit and so on); the feedback is in English. The assessment page shows the
+marking while it runs, then the total, a score per section, the marks and
+feedback for each part with what the teacher wrote, and strengths and areas to
+improve. The score is filled in and the assessment marked Evaluated; you can
+still correct the score by hand, or press **Evaluate again**.
+
+It needs the `OPENAI_API_KEY` secret on the server (on Fly:
+`fly secrets set OPENAI_API_KEY=... -a teachertrainingassessments`). The model
+is `gpt-6-luna` unless `OPENAI_MODEL` says otherwise. OpenAI reads JPG, PNG,
+WEBP and GIF pages only, which covers everything the scanner helper produces.
+
 ## Running it on Fly.io
 
 The repository is set up to deploy to [Fly.io](https://fly.io): `Dockerfile`

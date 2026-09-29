@@ -81,4 +81,25 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_files_assessment ON assessment_files(assessment_id, kind, position);
 `);
 
+// Columns added after the first release. SQLite has no ADD COLUMN IF NOT
+// EXISTS, so each one is added only when the table does not have it yet.
+function addColumn(table, column, definition) {
+  const exists = db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+  if (!exists) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
+// The OpenAI marking of an assessment: whether it is running, what it found
+// (a JSON breakdown per question), and why it failed if it did.
+addColumn('assessments', 'ai_status', "TEXT NOT NULL DEFAULT 'none'");
+addColumn('assessments', 'ai_result', 'TEXT');
+addColumn('assessments', 'ai_error', 'TEXT');
+addColumn('assessments', 'ai_model', 'TEXT');
+addColumn('assessments', 'ai_evaluated_at', 'TEXT');
+
+// A marking that was running when the server stopped will never finish.
+db.prepare(
+  `UPDATE assessments SET ai_status = 'failed', ai_error = 'The server restarted while this was being marked. Press Evaluate to try again.'
+    WHERE ai_status = 'running'`
+).run();
+
 export default db;

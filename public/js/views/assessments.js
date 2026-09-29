@@ -65,7 +65,7 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
           'div',
           {},
           h('h1', {}, 'Assessments'),
-          h('p', {}, 'Upload each teacher’s question paper and response on their row. Evaluating is a separate step.')
+          h('p', {}, 'Upload each teacher’s question paper and response on their row, then press Evaluate to have OpenAI mark it.')
         )
       ),
       h('div', { class: 'card' }, h('div', { class: 'form-grid' }, field('School', schoolSelect))),
@@ -105,7 +105,7 @@ function teacherBoardCard(state, reload, redraw) {
     'div',
     { class: 'card' },
     h('h2', {}, `Teachers (${state.roster.length})`),
-    h('p', { class: 'hint' }, 'Uploading pages only files them against the teacher. Nothing is evaluated until you press Evaluate.'),
+    h('p', { class: 'hint' }, 'Uploading pages only files them against the teacher. Nothing is marked until you press Evaluate.'),
     scannerPanel(redraw),
     h(
       'div',
@@ -146,9 +146,11 @@ function teacherBoardCard(state, reload, redraw) {
               h(
                 'td',
                 {},
-                teacher.assessment_id
-                  ? statusBadge(teacher.assessment_status)
-                  : h('span', { class: 'badge draft' }, 'Not started'),
+                teacher.ai_status === 'running'
+                  ? h('span', { class: 'badge running' }, 'Marking…')
+                  : teacher.assessment_id
+                    ? statusBadge(teacher.assessment_status)
+                    : h('span', { class: 'badge draft' }, 'Not started'),
                 teacher.score === null || teacher.score === undefined
                   ? null
                   : h('div', { class: 'hint' }, `${teacher.score}${teacher.max_score ? ` / ${teacher.max_score}` : ''}`)
@@ -314,19 +316,30 @@ function scannerPanel(redraw) {
   }
 }
 
-// Opens the evaluation screen. If this teacher has no assessment yet, one is
-// created first — uploading is not a prerequisite for evaluating.
+// Evaluate marks the teacher's scans with OpenAI, then opens the evaluation
+// screen, which shows the marking as it finishes. Without both sets of scans it
+// just opens the screen. If this teacher has no assessment yet, one is created.
 function evaluateButton(teacher) {
+  const evaluated = teacher.assessment_status === 'evaluated';
+  const running = teacher.ai_status === 'running';
   const button = h(
     'button',
     { class: 'btn btn-sm btn-primary', type: 'button' },
-    teacher.assessment_status === 'evaluated' ? 'Review' : 'Evaluate'
+    running ? 'Marking…' : evaluated ? 'Review' : 'Evaluate'
   );
 
   button.addEventListener('click', async () => {
     button.disabled = true;
     try {
       const id = teacher.assessment_id ?? (await teachersApi.currentAssessment(teacher.id)).id;
+      const ready = teacher.question_paper_count > 0 && teacher.response_count > 0;
+      if (!evaluated && !running && ready) {
+        try {
+          await assessmentsApi.evaluate(id);
+        } catch (error) {
+          toast(error.message, 'error');
+        }
+      }
       window.navigate(`/assessments/${id}`);
     } catch (error) {
       toast(error.message, 'error');
@@ -389,6 +402,43 @@ export async function renderAssessmentDetail(root, id) {
     draw();
   };
 
+  // While OpenAI is marking, check back every few seconds. The screen is only
+  // redrawn once the marking has finished, so nothing typed meanwhile is lost.
+  let polling = false;
+  const watchMarking = async () => {
+    if (polling || assessment.ai_status !== 'running') return;
+    polling = true;
+    while (container.isConnected) {
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      if (!container.isConnected) break;
+      let latest;
+      try {
+        latest = await assessmentsApi.get(id);
+      } catch {
+        continue; // a dropped request is retried on the next round
+      }
+      if (latest.ai_status !== 'running') {
+        assessment = latest;
+        draw();
+        if (latest.ai_status === 'done') toast(`Marked: ${latest.score} / ${latest.max_score}.`, 'success');
+        else toast('The marking did not finish. See the evaluation for why.', 'error');
+        break;
+      }
+    }
+    polling = false;
+  };
+
+  const runEvaluation = async () => {
+    try {
+      assessment = await assessmentsApi.evaluate(assessment.id);
+      draw();
+      watchMarking();
+    } catch (error) {
+      toast(error.message, 'error');
+      await refresh();
+    }
+  };
+
   function draw() {
     mount(container,
       h('div', { class: 'breadcrumb' }, h('a', { href: `#/assessments?school=${assessment.school_id}` }, '← All assessments')),
@@ -421,6 +471,7 @@ export async function renderAssessmentDetail(root, id) {
         )
       ),
       scansCard(assessment, refresh),
+      markingCard(assessment, runEvaluation),
       detailsCard(assessment, refresh)
     );
   }
@@ -428,6 +479,7 @@ export async function renderAssessmentDetail(root, id) {
   const scannerCheck = checkScannerOnce();
   draw();
   mount(root, container);
+  watchMarking();
   scannerCheck.then((changed) => {
     if (changed && container.isConnected && !scanner.busy) draw();
   });
@@ -561,6 +613,107 @@ function scanGroup(assessment, kind, label, files, refresh) {
   );
 }
 
+// The OpenAI marking: a button to run it, its progress, and the marks it gave
+// question by question, grouped by section.
+function markingCard(assessment, runEvaluation) {
+  const hasScans = assessment.question_paper_files.length > 0 && assessment.response_files.length > 0;
+  const running = assessment.ai_status === 'running';
+  const result = assessment.ai_result;
+
+  const button = h(
+    'button',
+    { class: `btn ${result ? '' : 'btn-primary'}`, type: 'button', disabled: running || !hasScans },
+    running ? 'Marking…' : result ? 'Evaluate again' : 'Evaluate'
+  );
+  button.addEventListener('click', () => {
+    if (result && !confirmAction('Mark this again with OpenAI? The new marks replace the current score.')) return;
+    button.disabled = true;
+    button.textContent = 'Starting…';
+    runEvaluation();
+  });
+
+  let body;
+  if (running) {
+    body = h('div', { class: 'marking-state' }, h('span', { class: 'spinner' }), 'OpenAI is reading the scans and marking each question. This usually takes a minute or two; you can leave this page and come back.');
+  } else if (assessment.ai_status === 'failed') {
+    body = h('div', { class: 'marking-state error' }, assessment.ai_error || 'The marking did not finish.');
+  } else if (!hasScans) {
+    body = h('p', { class: 'hint' }, 'Scan or upload the question paper and the teacher’s response above, then press Evaluate.');
+  } else if (!result) {
+    body = h('p', { class: 'hint' }, 'Press Evaluate to have OpenAI mark the teacher’s response against the question paper.');
+  }
+
+  return h(
+    'div',
+    { class: 'card' },
+    h('div', { class: 'scan-group-head' }, h('h2', { style: 'margin:0' }, 'Marking'), button),
+    body ?? null,
+    result ? markingResult(assessment, result) : null
+  );
+}
+
+function markingResult(assessment, result) {
+  const sections = [];
+  for (const q of result.questions) {
+    let group = sections.find((s) => s.name === q.section);
+    if (!group) sections.push((group = { name: q.section, questions: [], awarded: 0, max: 0 }));
+    group.questions.push(q);
+    group.awarded += q.marks_awarded;
+    group.max += q.max_marks;
+  }
+  const round = (n) => Math.round(n * 100) / 100;
+  const list = (title, items) =>
+    items.length ? h('div', {}, h('h3', {}, title), h('ul', {}, items.map((item) => h('li', {}, item)))) : null;
+
+  return h(
+    'div',
+    { class: 'marking-result' },
+    h(
+      'div',
+      { class: 'marking-total' },
+      h('strong', {}, `${result.total_score} / ${result.max_score}`),
+      sections.filter((s) => s.name).map((s) => h('span', { class: 'badge' }, `${s.name}: ${round(s.awarded)} / ${round(s.max)}`))
+    ),
+    result.summary ? h('p', {}, result.summary) : null,
+    h(
+      'div',
+      { class: 'table-wrap' },
+      h(
+        'table',
+        {},
+        h('thead', {}, h('tr', {}, h('th', {}, 'Section'), h('th', {}, 'Question'), h('th', {}, 'Marks'), h('th', {}, 'Feedback'))),
+        h(
+          'tbody',
+          {},
+          result.questions.map((q) =>
+            h(
+              'tr',
+              {},
+              h('td', {}, q.section || '—'),
+              h('td', {}, q.question),
+              h('td', { style: 'white-space:nowrap' }, `${q.marks_awarded} / ${q.max_marks}`),
+              h(
+                'td',
+                {},
+                q.feedback,
+                q.teacher_answer
+                  ? h('details', { class: 'teacher-answer' }, h('summary', {}, 'What the teacher wrote'), h('div', { dir: 'auto' }, q.teacher_answer))
+                  : null
+              )
+            )
+          )
+        )
+      )
+    ),
+    h('div', { class: 'marking-lists' }, list('Strengths', result.strengths), list('Areas to improve', result.areas_to_improve)),
+    h(
+      'p',
+      { class: 'hint' },
+      `Marked by OpenAI (${assessment.ai_model})${assessment.ai_evaluated_at ? ` on ${formatDate(assessment.ai_evaluated_at.slice(0, 10))}` : ''}. You can correct the score below if you disagree.`
+    )
+  );
+}
+
 function detailsCard(assessment, refresh) {
   const form = h(
     'form',
@@ -591,5 +744,5 @@ function detailsCard(assessment, refresh) {
     h('div', { class: 'form-actions' }, h('button', { class: 'btn btn-primary', type: 'submit' }, 'Save assessment'))
   );
 
-  return h('div', { class: 'card' }, h('h2', {}, 'Evaluation'), form);
+  return h('div', { class: 'card' }, h('h2', {}, 'Details and score'), form);
 }

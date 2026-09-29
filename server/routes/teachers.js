@@ -33,6 +33,7 @@ const rosterSql = `
          a.id     AS assessment_id,
          a.title  AS assessment_title,
          a.status AS assessment_status,
+         a.ai_status,
          a.assessment_date,
          a.score,
          a.max_score,
