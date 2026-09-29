@@ -91,6 +91,7 @@ export const generatorApi = {
   remove: (id) => api.del(`/api/generator/${id}`),
 };
 
-export const statsApi = {
-  get: () => api.get('/api/stats'),
+export const dashboardApi = {
+  get: () => api.get('/api/dashboard'),
+  school: (schoolId, testId) => api.get(`/api/dashboard/school?school_id=${schoolId}&test_id=${testId}`),
 };

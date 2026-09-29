@@ -4,8 +4,11 @@ A small web app for running teacher training assessments. It runs on your own
 laptop: there is no cloud account, no login, and everything is stored in a file
 on your machine.
 
-- **Dashboard** — the screen it opens on. A few counts and the latest
-  assessments for now; the real content is still to be decided.
+- **Dashboard** — the screen it opens on. For each school, in its newest test
+  (or another picked on the card): who is waiting (nothing uploaded, scanned
+  but not evaluated, marking failed, report not built), how many teachers sat
+  each section and their grades in it, and the potential identifier counts,
+  with names linking to teacher profiles. Grades only, per section.
 - **Schools & teachers** — add each school with its logo and contact details,
   then add its teachers one at a time or import a whole list from Excel.
 - **Assessments** — pick a school and a test, then scan or upload each
@@ -263,7 +266,7 @@ Plain and deliberately boring, so it keeps working:
 Dockerfile          builds the container image for Fly
 fly.toml            the Fly machine, volume and health check
 server/
-  index.js          the Express app and the dashboard stats
+  index.js          the Express app
   auth.js           the optional password gate (off unless APP_PASSWORD is set)
   db.js             database connection and schema
   openai.js         the one OpenAI request, shared by marking and reports
@@ -274,7 +277,7 @@ server/
   excel.js          the import template, and reading a filled-in one back
   uploads.js        file upload rules (types and size limits)
   seed.js           optional sample data
-  routes/           schools, teachers, tests, assessments, reports, generator
+  routes/           schools, teachers, tests, assessments, reports, dashboard, generator
 public/
   index.html        the single page
   css/styles.css
