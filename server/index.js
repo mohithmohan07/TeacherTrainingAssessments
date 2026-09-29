@@ -29,6 +29,8 @@ installAuth(app);
 
 app.use('/uploads', express.static(UPLOADS_DIR, { index: false, maxAge: '1h' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
+// Noto fonts for every script the generator writes in, from the @fontsource packages.
+app.use('/fonts', express.static(path.join(__dirname, '..', 'node_modules', '@fontsource'), { index: false, maxAge: '30d' }));
 
 app.use('/api/schools', schoolsRouter);
 app.use('/api/teachers', teachersRouter);

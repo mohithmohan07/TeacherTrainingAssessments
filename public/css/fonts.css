@@ -1,0 +1,30 @@
+/* Noto fonts for every script the generator writes in, served from the
+   @fontsource packages at /fonts. Each file only downloads when a page
+   actually shows characters from its script. */
+
+@import url('/fonts/noto-serif/400.css');
+@import url('/fonts/noto-serif/700.css');
+@import url('/fonts/noto-serif-devanagari/400.css');
+@import url('/fonts/noto-serif-devanagari/700.css');
+@import url('/fonts/noto-serif-bengali/400.css');
+@import url('/fonts/noto-serif-bengali/700.css');
+@import url('/fonts/noto-serif-kannada/400.css');
+@import url('/fonts/noto-serif-kannada/700.css');
+@import url('/fonts/noto-serif-tamil/400.css');
+@import url('/fonts/noto-serif-tamil/700.css');
+@import url('/fonts/noto-serif-telugu/400.css');
+@import url('/fonts/noto-serif-telugu/700.css');
+@import url('/fonts/noto-serif-malayalam/400.css');
+@import url('/fonts/noto-serif-malayalam/700.css');
+@import url('/fonts/noto-serif-gujarati/400.css');
+@import url('/fonts/noto-serif-gujarati/700.css');
+@import url('/fonts/noto-serif-gurmukhi/400.css');
+@import url('/fonts/noto-serif-gurmukhi/700.css');
+@import url('/fonts/noto-serif-oriya/400.css');
+@import url('/fonts/noto-serif-oriya/700.css');
+@import url('/fonts/noto-nastaliq-urdu/400.css');
+@import url('/fonts/noto-nastaliq-urdu/700.css');
+@import url('/fonts/noto-naskh-arabic/400.css');
+@import url('/fonts/noto-naskh-arabic/700.css');
+@import url('/fonts/noto-sans-ol-chiki/400.css');
+@import url('/fonts/noto-sans-ol-chiki/700.css');

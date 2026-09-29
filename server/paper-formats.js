@@ -174,3 +174,38 @@ export function firstQuestionNumber(formats, index, teacherType) {
 export function partLabel(question, index) {
   return question.components ? String(index + 1) : String.fromCharCode(65 + index);
 }
+
+// The school levels papers are written for. `guidance` tells Gemini who the
+// teacher's learners are, so scenarios, content depth and psychology fit.
+export const LEVELS = {
+  'pre-primary': {
+    name: 'Pre-Primary',
+    classes: 'Nursery, LKG and UKG',
+    guidance:
+      'Learners are 3 to 6 years old. Teaching is play-based and multi-sensory: early literacy and numeracy readiness, oral language, fine and gross motor skills, rhymes, stories and routines. Psychology questions are about early childhood: separation anxiety, attachment, tantrums, attention span, toilet and snack routines, learning through play. Subject knowledge means the early-years concept behind an activity (phonemic awareness, number sense, sorting and patterns), not textbook content.',
+  },
+  primary: {
+    name: 'Primary',
+    classes: 'Classes 1 to 5',
+    guidance:
+      'Learners are 6 to 11 years old. Teaching is concrete and activity-based, building foundational literacy and numeracy. Psychology questions are about middle childhood: confidence, peer comparison, reading or maths anxiety, attention, home-school habits.',
+  },
+  'middle-school': {
+    name: 'Middle School',
+    classes: 'Classes 6 to 8',
+    guidance:
+      'Learners are 11 to 14 years old, moving from concrete to abstract thinking. Subject content becomes more formal. Psychology questions are about early adolescence: identity, peer pressure, self-consciousness, motivation dips, screen habits.',
+  },
+  secondary: {
+    name: 'Secondary',
+    classes: 'Classes 9 and 10',
+    guidance:
+      'Learners are 14 to 16 years old and preparing for board examinations. Subject questions go to board-syllabus depth, including numerical, practical and application work. Psychology questions are about adolescence: exam stress, perfectionism, comparison, fear of failure, parental expectations.',
+  },
+  'senior-secondary': {
+    name: 'Senior Secondary / PU',
+    classes: 'Classes 11 and 12, I and II PUC',
+    guidance:
+      'Learners are 16 to 18 years old in a specialised stream, preparing for board and entrance examinations. Subject questions must test the teacher at a rigorous, higher-secondary or pre-university level, with data, derivations, practicals or code where the subject has them. Psychology questions are about late adolescence: career and entrance pressure, burnout, autonomy, coaching-class overload.',
+  },
+};

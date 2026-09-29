@@ -1,8 +1,11 @@
 // Writes teacher assessment papers with Gemini in the programme's layout (see
 // paper-formats.js): builds the prompt, and holds what comes back to that layout.
 
+import db from './db.js';
 import { generateJson } from './gemini.js';
+import { findLanguage } from './languages.js';
 import {
+  LEVELS,
   SECTION_MINUTES,
   TEACHER_TYPES,
   firstQuestionNumber,
@@ -19,10 +22,13 @@ function clean(value, max = 500) {
 // Turns whatever the form sent into a request the generator can trust.
 export function readRequest(body = {}) {
   const requested = Array.isArray(body.sections) ? body.sections.map(String) : ['A', 'B'];
+  const school = body.school_id ? db.prepare('SELECT id, name, logo_path FROM schools WHERE id = ?').get(body.school_id) : null;
   const request = {
-    school_name: clean(body.school_name, 200),
+    school_id: school?.id ?? null,
+    school_name: school?.name ?? '',
+    school_logo: school?.logo_path ?? null,
     board: clean(body.board, 80),
-    level: clean(body.level, 80),
+    level: Object.hasOwn(LEVELS, body.level) ? body.level : '',
     grade: clean(body.grade, 80),
     subject: clean(body.subject, 120),
     teacher_type: Object.hasOwn(TEACHER_TYPES, body.teacher_type) ? body.teacher_type : 'subject',
@@ -33,6 +39,7 @@ export function readRequest(body = {}) {
   };
 
   const problems = [];
+  if (!request.level) problems.push('a school level');
   if (!request.subject) problems.push('a subject');
   if (!request.sections.length) problems.push('at least one section');
   return { request, problems };
@@ -53,9 +60,10 @@ function describeSection(format, start) {
 }
 
 function buildPrompt(request, formats) {
+  const level = LEVELS[request.level];
   const context = [
     request.board && `Board: ${request.board}`,
-    request.level && `School level: ${request.level}`,
+    `School level: ${level.name} (${level.classes}). ${level.guidance}`,
     request.grade && `Classes the teacher teaches: ${request.grade}`,
     `Subject: ${request.subject}`,
     `Teacher type: ${TEACHER_TYPES[request.teacher_type]}`,
@@ -66,6 +74,8 @@ function buildPrompt(request, formats) {
 
   const sections = formats.map((format, index) => describeSection(format, firstQuestionNumber(formats, index, request.teacher_type)));
   const english = /^english$/i.test(request.language);
+  const language = findLanguage(request.language);
+  const script = language && language.script !== 'Latin' ? ` in the ${language.script} script` : '';
 
   return [
     'You write written assessment papers for a teacher training programme in Indian schools.',
@@ -80,13 +90,14 @@ function buildPrompt(request, formats) {
     '- Each "scenario" is one paragraph of 3 to 6 sentences with concrete detail for this subject and these classes: the grade, the activity or topic, what learners say or do. Give learners Indian first names where a learner is named.',
     '- Each part is one or two sentences starting with a command word (Explain, Analyse, Describe, Design, Propose, Outline, State, How would you...). Where it helps, add examples in brackets, such as "(e.g. exit cards or think-pair-share)".',
     '- Parts must fit the scenario they belong to, and no two questions may test the same idea.',
+    '- Hold every question to the standard of a demanding professional examination: specific, realistic situations with names, numbers, quoted learner errors or observed behaviour, and parts that need analysis and planning rather than recall. A generic question that could fit any subject or level is not good enough.',
     '- For the formal report question, the scenario describes the trend and ends by asking for a formal, structured report to the Principal; each part is one heading of that report with a one-line description of what it must contain.',
     '- For every part, write a model answer a strong teacher would give and the marking points an evaluator should look for, one point per item, adding up to the part\'s marks.',
     english
       ? '- Write everything in clear, simple English.'
-      : `- Write the whole paper in ${request.language}, including the title, section headings, question titles, scenarios, parts, model answers, marking points and the labels. Use natural ${request.language} as a teacher of that language would write it, not a word-for-word translation. Keep the question numbers as Q1, Q2 and the part letters as A, B, C, D.`,
+      : `- Write the whole paper in ${request.language}${script}, including the title, section headings, question titles, scenarios, parts, model answers, marking points and the labels. Use natural ${request.language} as a teacher of that language would write it, not a word-for-word translation. Keep the question numbers as Q1, Q2 and the part letters as A, B, C, D.`,
     '- Each section\'s "heading" is its heading as written above (without the marks), and "key" is its letter.',
-    '- "title" is the examination title line, e.g. "<Board> <Level> Division - <Subject> Teacher Assessment Examination".',
+    `- "title" is the examination title line, e.g. "${[request.board, level.name].filter(Boolean).join(' ')} Division - ${request.subject} Teacher Assessment Examination".`,
     `- "labels" gives the words for "Total Marks", "Time" and "Marks", and "duration" says "${formats.length === 1 ? '1 Hour' : `${formats.length} Hours`}", all in the paper's language.`,
     request.instructions ? `\nExtra instructions from the trainer:\n${request.instructions}` : null,
   ]
@@ -202,7 +213,11 @@ export function normalizePaper(raw, request, formats) {
   return {
     title: clean(raw?.title, 300) || `${request.subject} Teacher Assessment Examination`,
     school_name: request.school_name,
+    school_logo: request.school_logo,
+    level: LEVELS[request.level].name,
     language: request.language,
+    lang: findLanguage(request.language)?.code ?? null,
+    rtl: Boolean(findLanguage(request.language)?.rtl),
     labels: {
       total_marks: (!english && clean(labels.total_marks, 60)) || 'Total Marks',
       time: (!english && clean(labels.time, 60)) || 'Time',

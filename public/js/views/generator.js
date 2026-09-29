@@ -1,10 +1,7 @@
 import { h, mount, toast, confirmAction, formatDate, field, input, textarea, select, emptyState } from '../ui.js';
 import { generatorApi, schoolsApi } from '../api.js';
 
-// Suggestions only: any language Gemini writes can be typed in.
-const LANGUAGES = ['English', 'Hindi', 'Kannada', 'Sanskrit', 'Tamil', 'Telugu', 'Malayalam', 'Marathi', 'Bengali', 'Gujarati', 'Urdu', 'Konkani', 'Tulu', 'French', 'German'];
 const BOARDS = ['CBSE', 'ICSE', 'Karnataka State', 'Karnataka Pre-University'];
-const LEVELS = ['Primary', 'Middle School', 'High School', 'Senior Secondary', 'Pre-University'];
 
 function datalist(id, values) {
   return h('datalist', { id }, values.map((value) => h('option', { value })));
@@ -40,7 +37,9 @@ export async function renderGenerator(root) {
   teacherType.addEventListener('change', drawSections);
   drawSections();
 
-  const school = select('school_name', [{ value: '', label: 'No school name on the paper' }, ...schools.map((s) => ({ value: s.name, label: s.name }))]);
+  const school = select('school_id', [{ value: '', label: 'No school on the paper' }, ...schools.map((s) => ({ value: String(s.id), label: s.name }))]);
+  const level = select('level', [{ value: '', label: 'Choose a level' }, ...config.levels]);
+  level.required = true;
   const withList = (control, list) => {
     control.setAttribute('list', list);
     control.setAttribute('autocomplete', 'off');
@@ -55,12 +54,12 @@ export async function renderGenerator(root) {
       { class: 'form-grid' },
       field('Subject', input('subject', { placeholder: 'e.g. Biology, Hindi, Music', required: true })),
       field('Teacher', teacherType),
+      field('Level', level),
       field('Language of the paper', withList(input('language', { value: 'English' }), 'gen-languages'), {
         hint: 'Pick one or type any other language.',
       }),
-      field('School on the paper', school),
+      field('School on the paper', school, { hint: 'Its name and logo go at the top.' }),
       field('Board', withList(input('board', { placeholder: 'e.g. ICSE' }), 'gen-boards')),
-      field('Level', withList(input('level', { placeholder: 'e.g. High School' }), 'gen-levels')),
       field('Classes taught', input('grade', { placeholder: 'e.g. Classes IX-X' })),
       field('Topics', textarea('topics', { placeholder: 'Optional. One per line, e.g.\nOsmosis and plasmolysis\nMendelian genetics' }), {
         span: true,
@@ -70,9 +69,8 @@ export async function renderGenerator(root) {
     ),
     h('h3', { style: 'margin:20px 0 8px;font-size:15px' }, 'Sections'),
     sectionBoxes,
-    datalist('gen-languages', LANGUAGES),
-    datalist('gen-boards', BOARDS),
-    datalist('gen-levels', LEVELS)
+    datalist('gen-languages', config.languages),
+    datalist('gen-boards', BOARDS)
   );
 
   const button = h('button', { type: 'submit', class: 'btn btn-primary', disabled: !config.configured }, 'Generate paper');
@@ -191,14 +189,21 @@ export async function renderGeneratedPaper(root, id) {
   const { paper } = record;
   let showAnswers = false;
 
-  const sheet = h('article', { class: 'paper-sheet', lang: paper.language === 'English' ? 'en' : null });
+  const sheet = h('article', { class: 'paper-sheet', lang: paper.lang, dir: paper.rtl ? 'rtl' : null });
   const draw = () =>
     mount(
       sheet,
       h(
         'header',
         { class: 'paper-head' },
-        paper.school_name ? h('div', { class: 'paper-school' }, paper.school_name) : null,
+        paper.school_name
+          ? h(
+              'div',
+              { class: 'paper-school' },
+              paper.school_logo ? h('img', { src: `/uploads/${paper.school_logo}`, alt: '' }) : null,
+              h('span', { lang: 'en', dir: 'ltr' }, paper.school_name)
+            )
+          : null,
         h('h2', {}, paper.title),
         h(
           'p',

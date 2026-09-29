@@ -2,7 +2,8 @@ import express from 'express';
 import db from '../db.js';
 import { GEMINI_MODEL, geminiConfigured, GeminiError } from '../gemini.js';
 import { generatePaper, readRequest } from '../generator.js';
-import { TEACHER_TYPES, sectionFormats, sectionMarks } from '../paper-formats.js';
+import { LANGUAGES } from '../languages.js';
+import { LEVELS, TEACHER_TYPES, sectionFormats, sectionMarks } from '../paper-formats.js';
 
 const router = express.Router();
 
@@ -27,6 +28,8 @@ router.get('/config', (_req, res) => {
     configured: geminiConfigured(),
     model: GEMINI_MODEL,
     teacher_types: TEACHER_TYPES,
+    levels: Object.entries(LEVELS).map(([value, level]) => ({ value, label: `${level.name} (${level.classes})` })),
+    languages: LANGUAGES.map((language) => language.name),
     sections: { subject: describe('subject'), specialist: describe('specialist') },
   });
 });
