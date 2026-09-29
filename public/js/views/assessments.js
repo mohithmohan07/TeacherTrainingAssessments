@@ -697,7 +697,7 @@ function markingResult(assessment, result) {
                 {},
                 q.feedback,
                 q.teacher_answer
-                  ? h('details', { class: 'teacher-answer' }, h('summary', {}, 'What the teacher wrote'), h('div', {}, q.teacher_answer))
+                  ? h('details', { class: 'teacher-answer' }, h('summary', {}, 'What the teacher wrote'), h('div', { dir: 'auto' }, q.teacher_answer))
                   : null
               )
             )
