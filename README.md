@@ -98,7 +98,7 @@ still correct the score by hand, or press **Evaluate again**.
 
 It needs the `OPENAI_API_KEY` secret on the server (on Fly:
 `fly secrets set OPENAI_API_KEY=... -a teachertrainingassessments`). The model
-is `gpt-6-sol` unless `OPENAI_MODEL` says otherwise. OpenAI reads JPG, PNG,
+is `gpt-6-luna` unless `OPENAI_MODEL` says otherwise. OpenAI reads JPG, PNG,
 WEBP and GIF pages only, which covers everything the scanner helper produces.
 
 ## Running it on Fly.io

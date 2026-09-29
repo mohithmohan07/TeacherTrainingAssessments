@@ -9,7 +9,7 @@ import db, { UPLOADS_DIR } from './db.js';
 
 // OPENAI_BASE_URL follows the OpenAI SDKs' convention, for a proxy or a test server.
 const OPENAI_URL = `${(process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '')}/responses`;
-export const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-6-sol';
+export const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-6-luna';
 
 // Types the OpenAI API accepts as image input. The scanner helper saves JPEG.
 const OPENAI_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
