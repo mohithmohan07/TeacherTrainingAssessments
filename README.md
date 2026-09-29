@@ -89,10 +89,12 @@ JPG, PNG, WEBP, TIFF, GIF and BMP are accepted, up to 25 MB per page.
 
 Uploading or scanning never marks anything. When a teacher has both a question
 paper and a response, press **Evaluate** on their row: the app sends the pages
-to the OpenAI API, which reads the paper, marks every question against it
-(using the sections and marks printed on the paper), and writes feedback. The
-assessment page shows the marking while it runs, then the total, a score per
-section, the marks and feedback for each question, and strengths and areas to
+to the OpenAI API, which reads the paper and the teacher's handwriting, marks
+every part of every question against the marks printed on the paper, and writes
+feedback. Papers and answers can be in any language (English, Hindi, Kannada,
+Sanskrit and so on); the feedback is in English. The assessment page shows the
+marking while it runs, then the total, a score per section, the marks and
+feedback for each part with what the teacher wrote, and strengths and areas to
 improve. The score is filled in and the assessment marked Evaluated; you can
 still correct the score by hand, or press **Evaluate again**.
 

@@ -23,17 +23,20 @@ export function openaiConfigured() {
 
 const INSTRUCTIONS = `You are an experienced examiner marking a teacher training assessment.
 
-You are given scanned pages in two groups: first the QUESTION PAPER, then the TEACHER'S RESPONSE (the answers the teacher wrote, usually by hand).
+You are given scanned pages in two groups: first the QUESTION PAPER, then the TEACHER'S RESPONSE (the answers the teacher wrote on separate sheets, usually by hand).
+
+The paper and the answers may be in English, Hindi, Kannada, Sanskrit or any other language, in any script. Read everything in the language it is written in, and never take marks off for the language an answer is written in.
 
 Mark the response against the question paper:
 - Work through every question on the question paper in order, including questions the teacher did not answer (award 0 for those).
-- Use the section headings printed on the paper (for example "Section A", "Section B", "Section C"). If the paper has no sections, use an empty string.
-- Use the marks printed on the paper for each question as max_marks. If a question shows no marks, use the marks implied by its section's instructions; if there is nothing to go on, use 1 and say so in the feedback.
+- Questions usually have lettered parts (A, B, C, D) with the marks for each part printed beside it in brackets, for example "(3)". Mark every part as its own row, numbered like "1A", "1B", with those printed marks as max_marks. A question without lettered parts is one row, numbered like "4", out of the marks printed for it (for example "[Total Marks: 10]"). If no marks are printed at all, use 1 and say so in the feedback.
+- Give each row the section it is in, written in English as "Section A", "Section B" and so on, even when the paper names it in another language (for example खंड 'ख' is Section B). If the paper has no sections, use an empty string.
+- In teacher_answer, write down what the teacher wrote for that row, in the language they wrote it in, copied faithfully including mistakes. If it is long, give the first 500 characters or so and end with "…". Write [illegible] for words you cannot read, and use an empty string if the teacher did not answer.
 - For multiple-choice or one-word questions, award full marks for the correct answer and 0 otherwise.
 - For written answers, award marks for each correct and relevant point, the way a fair examiner following a marking scheme would. Partial marks are allowed in steps of 0.5. Never award more than max_marks.
 - If handwriting is illegible, mark only what you can read and say what you could not read in the feedback.
 - Keep feedback short and specific: what was right, what was missing.
-- Write the summary, strengths and areas to improve for the teacher's trainer, in plain English.`;
+- Write the feedback, summary, strengths and areas to improve in English, for the teacher's trainer.`;
 
 const RESULT_SCHEMA = {
   type: 'object',
@@ -45,10 +48,11 @@ const RESULT_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['section', 'question', 'max_marks', 'marks_awarded', 'feedback'],
+        required: ['section', 'question', 'teacher_answer', 'max_marks', 'marks_awarded', 'feedback'],
         properties: {
-          section: { type: 'string', description: 'Section heading from the paper, e.g. "Section A", or "".' },
-          question: { type: 'string', description: 'Question number as printed, e.g. "1", "2(b)".' },
+          section: { type: 'string', description: 'Section in English, e.g. "Section A", or "".' },
+          question: { type: 'string', description: 'Question and part as printed, e.g. "1A", "2B", "4".' },
+          teacher_answer: { type: 'string', description: 'What the teacher wrote, in their own language, or "".' },
           max_marks: { type: 'number' },
           marks_awarded: { type: 'number' },
           feedback: { type: 'string' },
@@ -127,7 +131,10 @@ async function evaluate(assessmentId, paper, response) {
     store: false,
   };
 
-  const result = normalise(JSON.parse(await callOpenAI(body)));
+  const result = normalise(parseMarks(await callOpenAI(body)));
+  if (!result.questions.length) {
+    throw friendly('OpenAI found no questions to mark. Check the question paper pages are readable and the right way up, then press Evaluate again.');
+  }
   saveResult.run({
     id: assessmentId,
     result: JSON.stringify(result),
@@ -185,6 +192,19 @@ async function callOpenAI(body) {
   return text;
 }
 
+function parseMarks(text) {
+  let marks = null;
+  try {
+    marks = JSON.parse(text);
+  } catch {
+    // reported below
+  }
+  if (!marks || typeof marks !== 'object') {
+    throw friendly('OpenAI sent back marks that were cut off or garbled. Press Evaluate to try again.');
+  }
+  return marks;
+}
+
 // Totals are added up here rather than taken from the model, and marks are
 // kept within each question's maximum.
 export function normalise(raw) {
@@ -194,6 +214,7 @@ export function normalise(raw) {
     return {
       section: String(q.section ?? '').trim(),
       question: String(q.question ?? '').trim(),
+      teacher_answer: String(q.teacher_answer ?? '').trim(),
       max_marks: max,
       marks_awarded: awarded,
       feedback: String(q.feedback ?? '').trim(),

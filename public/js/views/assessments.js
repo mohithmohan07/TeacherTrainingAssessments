@@ -692,7 +692,14 @@ function markingResult(assessment, result) {
               h('td', {}, q.section || '—'),
               h('td', {}, q.question),
               h('td', { style: 'white-space:nowrap' }, `${q.marks_awarded} / ${q.max_marks}`),
-              h('td', {}, q.feedback)
+              h(
+                'td',
+                {},
+                q.feedback,
+                q.teacher_answer
+                  ? h('details', { class: 'teacher-answer' }, h('summary', {}, 'What the teacher wrote'), h('div', {}, q.teacher_answer))
+                  : null
+              )
             )
           )
         )

@@ -372,3 +372,6 @@ td.right, th.right { text-align: right; white-space: nowrap; }
 .marking-lists { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
 .marking-lists h3 { font-size: 14px; margin: 14px 0 4px; }
 .marking-lists ul { margin: 0; padding-left: 20px; }
+.teacher-answer { margin-top: 6px; font-size: 13px; }
+.teacher-answer summary { cursor: pointer; color: var(--muted); }
+.teacher-answer div { margin-top: 4px; padding: 8px 10px; border-radius: 8px; background: var(--surface-2); white-space: pre-wrap; }
