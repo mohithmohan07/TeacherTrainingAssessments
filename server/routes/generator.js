@@ -3,7 +3,7 @@ import db from '../db.js';
 import { GEMINI_MODEL, geminiConfigured, GeminiError } from '../gemini.js';
 import { generatePaper, readRequest } from '../generator.js';
 import { LANGUAGES } from '../languages.js';
-import { LEVELS, TEACHER_TYPES, sectionFormats, sectionMarks } from '../paper-formats.js';
+import { LEVELS, SECTION_KEYS, TEACHER_TYPES, sectionFormats, sectionMarks } from '../paper-formats.js';
 
 const router = express.Router();
 
@@ -23,7 +23,7 @@ function toPaper(row) {
 // What the Generator page needs before it can show its form.
 router.get('/config', (_req, res) => {
   const describe = (teacherType) =>
-    sectionFormats(teacherType, ['A', 'B']).map((format) => ({ key: format.key, heading: format.heading, marks: sectionMarks(format) }));
+    sectionFormats(teacherType, SECTION_KEYS).map((format) => ({ key: format.key, heading: format.heading, marks: sectionMarks(format) }));
   res.json({
     configured: geminiConfigured(),
     model: GEMINI_MODEL,

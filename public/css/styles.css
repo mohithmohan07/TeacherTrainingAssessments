@@ -390,6 +390,8 @@ td.right, th.right { text-align: right; white-space: nowrap; }
 .paper-question { margin-bottom: 16px; }
 .q-head { margin-bottom: 4px; }
 .q-scenario { margin: 0 0 6px; text-align: justify; }
+.q-bullets { margin: 0 0 6px; padding-left: 22px; }
+.paper-sheet[dir="rtl"] .q-bullets { padding-left: 0; padding-right: 22px; }
 .q-parts { list-style: none; padding-left: 14px; margin: 0; }
 .paper-part { margin-bottom: 6px; break-inside: avoid; }
 .part-label { font-weight: 600; }

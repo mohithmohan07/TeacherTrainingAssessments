@@ -30,8 +30,7 @@ export async function renderGenerator(root) {
           h('input', { type: 'checkbox', name: 'sections', value: section.key, checked: first || checked.has(section.key) }),
           h('span', {}, h('strong', {}, section.heading), h('small', {}, ` · ${section.marks} marks, 1 hour`))
         )
-      ),
-      h('p', { class: 'hint', style: 'margin:4px 0 0' }, 'Section C will be added once there is a sample paper for it.')
+      )
     );
   };
   teacherType.addEventListener('change', drawSections);
@@ -52,7 +51,7 @@ export async function renderGenerator(root) {
     h(
       'div',
       { class: 'form-grid' },
-      field('Subject', input('subject', { placeholder: 'e.g. Biology, Hindi, Music', required: true })),
+      field('Subject', input('subject', { placeholder: 'e.g. Biology, Hindi, Music' }), { hint: 'Needed for Section B.' }),
       field('Teacher', teacherType),
       field('Level', level),
       field('Language of the paper', withList(input('language', { value: 'English' }), 'gen-languages'), {
@@ -127,7 +126,7 @@ export async function renderGenerator(root) {
                   'tr',
                   { style: 'cursor:pointer', onclick: () => window.navigate(`/generator/${paper.id}`) },
                   h('td', {}, paper.title),
-                  h('td', {}, paper.subject),
+                  h('td', {}, paper.subject || '—'),
                   h('td', {}, paper.grade || '—'),
                   h('td', { class: 'right' }, paper.total_marks),
                   h('td', {}, formatDate(paper.created_at))
@@ -147,7 +146,13 @@ export async function renderGenerator(root) {
       h('div', {}, h('h1', {}, 'Assessment generator'), h('p', {}, `Write a new teacher assessment paper with Gemini (${config.model}), in the same layout as the programme's papers.`))
     ),
     notice,
-    h('div', { class: 'card' }, h('h2', {}, 'New paper'), h('p', { class: 'hint' }, 'Each section has four case-study questions worth 35 marks, with a model answer and marking points for every part.'), form),
+    h(
+      'div',
+      { class: 'card' },
+      h('h2', {}, 'New paper'),
+      h('p', { class: 'hint' }, 'Each section is one hour of case-study questions, with a model answer and marking points for every part.'),
+      form
+    ),
     history
   );
 }
@@ -173,13 +178,30 @@ function renderPart(part, question, paper, showAnswers) {
   );
 }
 
+// A scenario can list observations as "- " lines; show those as bullets.
+function renderScenario(text) {
+  const blocks = [];
+  let list = null;
+  for (const line of text.split('\n').map((value) => value.trim()).filter(Boolean)) {
+    const bullet = /^[-•]\s+/.exec(line);
+    if (bullet) {
+      if (!list) blocks.push((list = h('ul', { class: 'q-bullets' })));
+      list.append(h('li', {}, line.slice(bullet[0].length)));
+    } else {
+      list = null;
+      blocks.push(h('p', { class: 'q-scenario' }, line));
+    }
+  }
+  return blocks;
+}
+
 function renderQuestion(question, paper, showAnswers) {
   const heading = [`Q${question.number}.`, question.title].filter(Boolean).join(' ');
   return h(
     'div',
     { class: 'paper-question' },
     h('div', { class: 'q-head' }, h('strong', {}, heading), ` [${paper.labels.total_marks}: ${question.marks}]`),
-    h('p', { class: 'q-scenario' }, question.scenario),
+    renderScenario(question.scenario),
     h('ol', { class: `q-parts${question.components ? ' components' : ''}` }, question.parts.map((part) => renderPart(part, question, paper, showAnswers)))
   );
 }
@@ -247,7 +269,7 @@ export async function renderGeneratedPaper(root, id) {
     h(
       'div',
       { class: 'page-head no-print' },
-      h('div', {}, h('h1', {}, record.subject), h('p', {}, `Generated ${formatDate(record.created_at)} in ${paper.language}. Print it with or without the answer key.`)),
+      h('div', {}, h('h1', {}, [record.subject, paper.level].filter(Boolean).join(', ')), h('p', {}, `Generated ${formatDate(record.created_at)} in ${paper.language}. Print it with or without the answer key.`)),
       h('div', { class: 'page-actions' }, answersButton, h('button', { class: 'btn btn-primary', onclick: () => window.print() }, 'Print'), h('button', { class: 'btn btn-danger', onclick: remove }, 'Delete'))
     ),
     paper.shortfall?.length ? h('div', { class: 'notice no-print' }, `Gemini left gaps in this paper: ${paper.shortfall.join('; ')}. Generate it again for a complete paper.`) : null,
