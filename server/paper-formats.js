@@ -10,8 +10,6 @@
 // lists situations that suit each group of levels. Both describe the sample
 // papers in our own words; no sample text is copied.
 
-export const SECTION_MINUTES = 60;
-
 const SECTION_A = {
   key: 'A',
   start: 1,

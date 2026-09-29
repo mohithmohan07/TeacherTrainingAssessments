@@ -7,7 +7,6 @@ import { findLanguage } from './languages.js';
 import {
   LEVELS,
   SECTION_KEYS,
-  SECTION_MINUTES,
   TEACHER_TYPES,
   firstQuestionNumber,
   partLabel,
@@ -16,8 +15,34 @@ import {
   sectionMarks,
 } from './paper-formats.js';
 
+// The words printed beside the marks and the time. Each section prints as its
+// own one-hour paper, as the programme's papers do.
+const ENGLISH_LABELS = { total_marks: 'Total Marks', time: 'Time', marks: 'Marks', one_hour: '1 Hour' };
+
 function clean(value, max = 500) {
   return String(value ?? '').trim().slice(0, max);
+}
+
+// A label is words only. Gemini has filled these with the marks themselves
+// ("35" for "Total Marks", which printed as "35: 100"), so a label with a
+// number in it falls back to English.
+function labelWords(text, english) {
+  const words = clean(text, 60).replace(/[:：]$/u, '').trim();
+  return words && !/\p{Nd}/u.test(words) ? words : english;
+}
+
+// Drops marks copied into a heading or title ("(35 Marks)", "[Total Marks: 10]"),
+// since the page prints them beside it.
+function dropMarks(text) {
+  return text.replace(/\s*[([][^()[\]]*\p{Nd}[^()[\]]*[)\]]$/u, '').trim();
+}
+
+// The examination line at the top of a section's paper. Only Section B names
+// the subject, as in the sample papers; A and C are for every teacher.
+function sectionTitle(request, format) {
+  const level = LEVELS[request.level];
+  const subject = format.key === 'B' && request.subject ? `${request.subject} ` : '';
+  return `${[request.board, level.name].filter(Boolean).join(' ')} - ${subject}Teacher Assessment Examination`;
 }
 
 // Turns whatever the form sent into a request the generator can trust.
@@ -46,10 +71,6 @@ export function readRequest(body = {}) {
   return { request, problems };
 }
 
-function hours(count) {
-  return count === 1 ? '1 Hour' : `${count} Hours`;
-}
-
 function describeSection(format, start, group) {
   const lines = [`${format.heading} (${sectionMarks(format)} marks). It tests ${format.focus}.`];
   format.questions.forEach((question, index) => {
@@ -74,7 +95,6 @@ function buildPrompt(request, formats, index) {
   const language = findLanguage(request.language);
   const script = language && language.script !== 'Latin' ? ` in the ${language.script} script` : '';
   const subjectSection = format.key === 'B';
-  const titleExample = [[request.board, level.name].filter(Boolean).join(' '), request.subject].filter(Boolean).join(' - ');
 
   const context = [
     request.board && `Board: ${request.board}`,
@@ -102,7 +122,10 @@ function buildPrompt(request, formats, index) {
     subjectSection
       ? '- Each "scenario" is one paragraph of 3 to 6 sentences with concrete detail for this subject and these classes: the grade, the activity or topic, what learners say or do.'
       : '- This section tests every teacher at this level, whatever their subject, so do not test subject knowledge. Each "scenario" is one paragraph of 3 to 6 sentences set in an ordinary school situation for this level, with concrete detail: the class, what learners, parents or colleagues say or do.',
-    '- Give learners Indian first names where a learner is named. Where a scenario lists several observations or situations, you may set them out as short bullet lines inside the scenario text, one per line starting with "- ".',
+    '- Write to the teacher sitting the paper as "you" (e.g. "You are teaching Class 7 ..." and "How would you ..."), as the programme\'s papers do. Never give that teacher a gender: no "she" or "he", and no Ms., Mrs. or Mr. Model answers and marking points speak of "you" or "the teacher" in the same way.',
+    '- Other adults in a scenario, such as colleagues, the coordinator, the Principal or parents, may be women or men. Vary them, and where it makes no difference, name only the role ("a colleague", "a parent").',
+    '- Where a learner is named, use Indian first names that suit the paper\'s language and region, a mix of girls and boys, with different names in each question. Avoid stereotypes: girls and boys, and learners of every background, appear as both strong and struggling learners.',
+    '- Where a scenario lists several observations or situations, you may set them out as short bullet lines inside the scenario text, one per line starting with "- ".',
     format.questions.some((question) => question.ideas?.[level.group]?.length)
       ? '- The situations listed as ideas show the kind of situation that suits this level. Do not copy them: write a fresh situation of your own, with different details.'
       : null,
@@ -113,12 +136,16 @@ function buildPrompt(request, formats, index) {
       ? '- For the formal document question, the scenario ends by asking for the document (a report, proposal or reflective report) to the Principal; each part is one heading of that document with a one-line description of what it must contain.'
       : null,
     '- For every part, write a model answer a strong teacher would give and the marking points an evaluator should look for, one point per item, adding up to the part\'s marks.',
+    '- Do not start any text with its question number or part letter, and do not write marks in it: the paper prints them.',
     english
       ? '- Write everything in clear, simple English.'
       : `- Write the whole section in ${request.language}${script}, including the title, section heading, question titles, scenarios, parts, model answers, marking points and the labels. Use natural ${request.language} as a teacher of that language would write it, not a word-for-word translation. Keep the question numbers as Q1, Q2 and the part letters as A, B, C, D.`,
+    english
+      ? null
+      : `- If ${request.language} marks gender in verbs or adjectives, phrase what "you" do so that no gender is assumed, for example by building the sentence around the class, the lesson or the task. Where the grammar forces a choice, use the general form that formal examination papers in ${request.language} use for every candidate.`,
     '- The section\'s "heading" is its heading as written above (without the marks), and "key" is its letter.',
-    `- "title" is the examination title line, e.g. "${titleExample} Teacher Assessment Examination".`,
-    `- "labels" gives the words for "Total Marks", "Time" and "Marks", and "duration" says "${hours(formats.length)}", all in the paper's language.`,
+    `- "title" is the examination title line, e.g. "${sectionTitle(request, format)}".`,
+    '- "labels" holds the words for "Total Marks", "Time" and "Marks" in the paper\'s language, with no numbers (the paper adds the marks after them), and "one_hour" is "1 Hour" in that language.',
     request.instructions ? `\nExtra instructions from the trainer:\n${request.instructions}` : null,
   ]
     .filter((line) => line !== null)
@@ -141,13 +168,14 @@ const SECTION_SCHEMA = {
     title: { type: 'string' },
     labels: {
       type: 'object',
+      description: "Words printed on the paper, in the paper's language.",
       properties: {
-        total_marks: { type: 'string' },
-        time: { type: 'string' },
-        marks: { type: 'string' },
-        duration: { type: 'string' },
+        total_marks_label: { type: 'string', description: 'The words "Total Marks", translated. No number.' },
+        time_label: { type: 'string', description: 'The word "Time", translated. No number.' },
+        marks_label: { type: 'string', description: 'The word "Marks", translated. No number.' },
+        one_hour: { type: 'string', description: 'The phrase "1 Hour", translated.' },
       },
-      required: ['total_marks', 'time', 'marks', 'duration'],
+      required: ['total_marks_label', 'time_label', 'marks_label', 'one_hour'],
     },
     section: {
       type: 'object',
@@ -182,8 +210,8 @@ export function normalizePaper(raws, request, formats) {
   const shortfall = [];
 
   const sections = formats.map((format, sectionIndex) => {
-    const match = raws[sectionIndex]?.section;
-    const rawQuestions = Array.isArray(match?.questions) ? match.questions : [];
+    const raw = raws[sectionIndex];
+    const rawQuestions = Array.isArray(raw?.section?.questions) ? raw.section.questions : [];
     const start = firstQuestionNumber(formats, sectionIndex, request.teacher_type);
 
     const questions = format.questions.map((question, index) => {
@@ -210,7 +238,7 @@ export function normalizePaper(raws, request, formats) {
 
       return {
         number,
-        title: question.title ? clean(rawQuestion.title, 200) || question.title : '',
+        title: question.title ? (!english && dropMarks(clean(rawQuestion.title, 200))) || question.title : '',
         marks: questionMarks(question),
         components: Boolean(question.components),
         scenario: clean(rawQuestion.scenario, 6000),
@@ -220,34 +248,52 @@ export function normalizePaper(raws, request, formats) {
 
     return {
       key: format.key,
-      heading: (!english && clean(match?.heading, 300)) || format.heading,
+      title: (!english && clean(raw?.title, 300)) || sectionTitle(request, format),
+      heading: (!english && dropMarks(clean(raw?.section?.heading, 300))) || format.heading,
       marks: sectionMarks(format),
       questions,
     };
   });
 
-  const first = raws.find(Boolean) ?? {};
-  const labels = first.labels ?? {};
+  const labels = raws.find((raw) => raw?.labels)?.labels ?? {};
   const level = LEVELS[request.level];
-  const fallbackTitle = [[request.board, level.name].filter(Boolean).join(' '), request.subject].filter(Boolean).join(' - ');
   return {
-    title: clean(first.title, 300) || `${fallbackTitle} Teacher Assessment Examination`,
+    // What the list of papers calls it: the Section B title when there is one.
+    title: (sections.find((section) => section.key === 'B') ?? sections[0]).title,
     school_name: request.school_name,
     school_logo: request.school_logo,
     level: level.name,
     language: request.language,
     lang: findLanguage(request.language)?.code ?? null,
     rtl: Boolean(findLanguage(request.language)?.rtl),
-    labels: {
-      total_marks: (!english && clean(labels.total_marks, 60)) || 'Total Marks',
-      time: (!english && clean(labels.time, 60)) || 'Time',
-      marks: (!english && clean(labels.marks, 60)) || 'Marks',
-      duration: (!english && clean(labels.duration, 60)) || hours(formats.length),
-    },
-    minutes: SECTION_MINUTES * formats.length,
+    labels: english
+      ? { ...ENGLISH_LABELS }
+      : {
+          total_marks: labelWords(labels.total_marks_label, ENGLISH_LABELS.total_marks),
+          time: labelWords(labels.time_label, ENGLISH_LABELS.time),
+          marks: labelWords(labels.marks_label, ENGLISH_LABELS.marks),
+          one_hour: clean(labels.one_hour, 60) || ENGLISH_LABELS.one_hour,
+        },
     total_marks: sections.reduce((sum, section) => sum + section.marks, 0),
     sections,
     shortfall,
+  };
+}
+
+// Readies a saved paper for the page. Papers saved before each section became
+// its own one-hour paper have no section titles or "1 Hour" label, and their
+// labels may hold numbers.
+export function presentPaper(paper) {
+  const labels = paper.labels ?? {};
+  return {
+    ...paper,
+    labels: {
+      total_marks: labelWords(labels.total_marks, ENGLISH_LABELS.total_marks),
+      time: labelWords(labels.time, ENGLISH_LABELS.time),
+      marks: labelWords(labels.marks, ENGLISH_LABELS.marks),
+      one_hour: labels.one_hour || (paper.sections.length === 1 && clean(labels.duration, 60)) || ENGLISH_LABELS.one_hour,
+    },
+    sections: paper.sections.map((section) => ({ ...section, title: section.title || paper.title })),
   };
 }
 
