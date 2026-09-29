@@ -67,6 +67,14 @@ export const assessmentsApi = {
   removeFile: (id, fileId) => api.del(`/api/assessments/${id}/files/${fileId}`),
 };
 
+export const generatorApi = {
+  config: () => api.get('/api/generator/config'),
+  list: () => api.get('/api/generator'),
+  get: (id) => api.get(`/api/generator/${id}`),
+  generate: (body) => api.postJson('/api/generator', body),
+  remove: (id) => api.del(`/api/generator/${id}`),
+};
+
 export const statsApi = {
   get: () => api.get('/api/stats'),
 };

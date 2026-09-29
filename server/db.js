@@ -79,6 +79,19 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_files_assessment ON assessment_files(assessment_id, kind, position);
+
+  -- Papers written by the assessment generator. \`request\` is what was asked
+  -- for and \`paper\` the questions, answers and marking points, both as JSON.
+  CREATE TABLE IF NOT EXISTS generated_papers (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    title       TEXT NOT NULL,
+    subject     TEXT,
+    grade       TEXT,
+    total_marks REAL,
+    request     TEXT NOT NULL,
+    paper       TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 `);
 
 // Columns added after the first release. SQLite has no ADD COLUMN IF NOT

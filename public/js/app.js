@@ -1,6 +1,7 @@
 import { renderDashboard } from './views/dashboard.js';
 import { renderSchools, renderSchoolDetail } from './views/schools.js';
 import { renderAssessments, renderAssessmentDetail } from './views/assessments.js';
+import { renderGenerator, renderGeneratedPaper } from './views/generator.js';
 import { toast } from './ui.js';
 
 const view = document.getElementById('view');
@@ -11,6 +12,8 @@ const routes = [
   { pattern: /^\/schools\/(\d+)$/, nav: 'schools', render: (id) => renderSchoolDetail(view, id) },
   { pattern: /^\/assessments(?:\?(.*))?$/, nav: 'assessments', render: (query) => renderAssessments(view, new URLSearchParams(query ?? '')) },
   { pattern: /^\/assessments\/(\d+)$/, nav: 'assessments', render: (id) => renderAssessmentDetail(view, id) },
+  { pattern: /^\/generator$/, nav: 'generator', render: () => renderGenerator(view) },
+  { pattern: /^\/generator\/(\d+)$/, nav: 'generator', render: (id) => renderGeneratedPaper(view, id) },
 ];
 
 function currentPath() {

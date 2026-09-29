@@ -7,6 +7,7 @@ import { installAuth, authEnabled } from './auth.js';
 import schoolsRouter from './routes/schools.js';
 import teachersRouter from './routes/teachers.js';
 import assessmentsRouter from './routes/assessments.js';
+import generatorRouter from './routes/generator.js';
 import { sendHelperZip } from './helper-download.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -28,10 +29,13 @@ installAuth(app);
 
 app.use('/uploads', express.static(UPLOADS_DIR, { index: false, maxAge: '1h' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
+// Noto fonts for every script the generator writes in, from the @fontsource packages.
+app.use('/fonts', express.static(path.join(__dirname, '..', 'node_modules', '@fontsource'), { index: false, maxAge: '30d' }));
 
 app.use('/api/schools', schoolsRouter);
 app.use('/api/teachers', teachersRouter);
 app.use('/api/assessments', assessmentsRouter);
+app.use('/api/generator', generatorRouter);
 
 // The scanner helper, for the laptop the scanner is plugged into.
 app.get('/downloads/scanner-helper.zip', sendHelperZip);
