@@ -3,6 +3,8 @@ import db from '../db.js';
 import { uploadScans, uploadWorkbook } from '../uploads.js';
 import { SCAN_KINDS, attachScans, discardUploads } from '../scans.js';
 import { buildTeacherTemplate, parseTeacherWorkbook } from '../excel.js';
+import { GRADES, potentialFor, teacherResults, testFor } from '../results.js';
+import { findReport, isStale } from '../reports.js';
 
 const router = express.Router();
 
@@ -26,8 +28,8 @@ function teacherFields(body) {
 
 /* --------------------------------------------------- the assessments board */
 
-// One row per teacher, carrying the state of that teacher's current
-// assessment, so the board can be drawn from a single request.
+// One row per teacher, carrying the state of that teacher's current sitting
+// in the chosen test, so the board can be drawn from a single request.
 const rosterSql = `
   SELECT t.*, s.name AS school_name,
          a.id     AS assessment_id,
@@ -45,7 +47,7 @@ const rosterSql = `
     JOIN schools s ON s.id = t.school_id
     LEFT JOIN assessments a ON a.id = (
       SELECT a2.id FROM assessments a2
-       WHERE a2.teacher_id = t.id
+       WHERE a2.teacher_id = t.id AND a2.test_id = @test_id
        ORDER BY a2.id DESC
        LIMIT 1
     )
@@ -56,48 +58,105 @@ const selectRoster = db.prepare(
 );
 const selectRosterRow = db.prepare(`${rosterSql} WHERE t.id = @id`);
 
-// The most recently created assessment, not the latest by date: the date is
-// editable, so a backdated entry must not become the teacher's current round.
+// Each row also carries the sections the teacher has results for in the
+// test so far, whichever sittings they came from, and where their reports are.
+function withResults(row, testId) {
+  const sections = teacherResults(row.id, testId);
+  const report = findReport('teacher', testId, row.id);
+  return {
+    ...row,
+    sections: sections.map(({ key, name, percent, grade, grade_label }) => ({ key, name, percent, grade, grade_label })),
+    report_status: report ? (report.status === 'done' && isStale(report, sections) ? 'stale' : report.status) : 'none',
+  };
+}
+
+// The most recently created sitting in the test, not the latest by date: the
+// date is editable, so a backdated entry must not become the current sitting.
 const selectLatestAssessment = db.prepare(
-  'SELECT * FROM assessments WHERE teacher_id = ? ORDER BY id DESC LIMIT 1'
+  'SELECT * FROM assessments WHERE teacher_id = ? AND test_id = ? ORDER BY id DESC LIMIT 1'
 );
 
 const insertAssessment = db.prepare(
-  `INSERT INTO assessments (school_id, teacher_id, title, assessment_date, subject, status)
-   VALUES (@school_id, @teacher_id, @title, date('now'), @subject, 'draft')`
+  `INSERT INTO assessments (school_id, teacher_id, test_id, title, assessment_date, subject, status)
+   VALUES (@school_id, @teacher_id, @test_id, @title, date('now'), @subject, 'draft')`
 );
 
 const selectAssessmentById = db.prepare('SELECT * FROM assessments WHERE id = ?');
 
-// The board row acts on the teacher's current assessment. One that has already
-// been evaluated is left alone: uploading again opens the next round rather
-// than adding pages to an evaluation that has a score against it.
-function currentAssessmentFor(teacher) {
-  const latest = selectLatestAssessment.get(teacher.id);
+// The board row acts on the teacher's current sitting in the test. One that
+// has already been evaluated is left alone: uploading again opens a new
+// sitting in the same test, which is how a teacher sits Section A on one date
+// and Sections B and C on another. Their results are added together.
+function currentAssessmentFor(teacher, test) {
+  const latest = selectLatestAssessment.get(teacher.id, test.id);
   if (latest && latest.status !== 'evaluated') return latest;
 
   const info = insertAssessment.run({
     school_id: teacher.school_id,
     teacher_id: teacher.id,
-    title: `Assessment - ${teacher.name}`,
+    test_id: test.id,
+    title: `${test.name} - ${teacher.name}`,
     subject: String(teacher.subjects ?? '').split(',')[0].trim(),
   });
   return selectAssessmentById.get(info.lastInsertRowid);
 }
 
-// GET /api/teachers/roster?school_id=1
+// GET /api/teachers/roster?school_id=1&test_id=2
 router.get('/roster', (req, res) => {
   const schoolId = Number(req.query.school_id);
   if (!selectSchool.get(schoolId)) return res.status(400).json({ error: 'Pick a school to see its teachers.' });
-  res.json(selectRoster.all({ school_id: schoolId }));
+  const test = testFor(schoolId, req.query.test_id);
+  res.json({
+    test,
+    teachers: selectRoster.all({ school_id: schoolId, test_id: test.id }).map((row) => withResults(row, test.id)),
+  });
 });
 
-// The teacher's current assessment, created on the spot if there is not one
-// yet. This is what the Evaluate button opens.
+// The teacher's current sitting in the test, created on the spot if there is
+// not one yet. This is what the Evaluate button opens.
 router.post('/:id/assessment', (req, res) => {
   const teacher = selectTeacher.get(req.params.id);
   if (!teacher) return res.status(404).json({ error: 'Teacher not found.' });
-  res.json(currentAssessmentFor(teacher));
+  res.json(currentAssessmentFor(teacher, testFor(teacher.school_id, req.body.test_id)));
+});
+
+// Everything the teacher's profile page shows: their details, and for each
+// test their sections, grades, potential identifier, sittings and reports.
+router.get('/:id/profile', (req, res) => {
+  const teacher = selectTeacher.get(req.params.id);
+  if (!teacher) return res.status(404).json({ error: 'Teacher not found.' });
+
+  const tests = db
+    .prepare(
+      `SELECT DISTINCT t.* FROM tests t JOIN assessments a ON a.test_id = t.id
+        WHERE a.teacher_id = ? ORDER BY t.id`
+    )
+    .all(teacher.id)
+    .map((test) => {
+      const sections = teacherResults(teacher.id, test.id);
+      const report = findReport('teacher', test.id, teacher.id);
+      return {
+        test,
+        sections: sections.map(({ questions, summary, strengths, areas_to_improve, ...rest }) => rest),
+        potential: potentialFor(sections),
+        sittings: db
+          .prepare(
+            `SELECT id, title, assessment_date, status, ai_status, created_at FROM assessments
+              WHERE teacher_id = ? AND test_id = ? ORDER BY id`
+          )
+          .all(teacher.id, test.id),
+        report: report && {
+          status: report.status,
+          error: report.error,
+          written_at: report.written_at,
+          stale: isStale(report, sections),
+          teacher: report.content?.teacher ?? null,
+          management: report.content?.management ?? null,
+        },
+      };
+    });
+
+  res.json({ teacher, school: db.prepare('SELECT id, name, logo_path FROM schools WHERE id = ?').get(teacher.school_id), grades: GRADES, tests });
 });
 
 // Upload scanned pages straight from the teacher's row on the board. This only
@@ -116,10 +175,11 @@ router.post('/:id/scans', uploadScans.array('files', 40), (req, res) => {
   }
   if (!req.files?.length) return res.status(400).json({ error: 'Choose at least one scanned image.' });
 
-  const assessment = currentAssessmentFor(teacher);
+  const test = testFor(teacher.school_id, req.body.test_id);
+  const assessment = currentAssessmentFor(teacher, test);
   attachScans(assessment.id, kind, req.files);
 
-  res.status(201).json(selectRosterRow.get({ id: teacher.id }));
+  res.status(201).json(withResults(selectRosterRow.get({ id: teacher.id, test_id: test.id }), test.id));
 });
 
 /* ------------------------------------------------------------------ teachers */

@@ -8,6 +8,8 @@ import schoolsRouter from './routes/schools.js';
 import teachersRouter from './routes/teachers.js';
 import assessmentsRouter from './routes/assessments.js';
 import generatorRouter from './routes/generator.js';
+import testsRouter from './routes/tests.js';
+import reportsRouter from './routes/reports.js';
 import { sendHelperZip } from './helper-download.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -36,6 +38,8 @@ app.use('/api/schools', schoolsRouter);
 app.use('/api/teachers', teachersRouter);
 app.use('/api/assessments', assessmentsRouter);
 app.use('/api/generator', generatorRouter);
+app.use('/api/tests', testsRouter);
+app.use('/api/reports', reportsRouter);
 
 // The scanner helper, for the laptop the scanner is plugged into.
 app.get('/downloads/scanner-helper.zip', sendHelperZip);

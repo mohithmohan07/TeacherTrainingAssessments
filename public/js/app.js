@@ -2,6 +2,8 @@ import { renderDashboard } from './views/dashboard.js';
 import { renderSchools, renderSchoolDetail } from './views/schools.js';
 import { renderAssessments, renderAssessmentDetail } from './views/assessments.js';
 import { renderGenerator, renderGeneratedPaper } from './views/generator.js';
+import { renderTeacherProfile } from './views/teachers.js';
+import { renderTeacherReport, renderSchoolReport } from './views/reports.js';
 import { toast } from './ui.js';
 
 const view = document.getElementById('view');
@@ -10,6 +12,9 @@ const routes = [
   { pattern: /^\/dashboard$/, nav: 'dashboard', render: () => renderDashboard(view) },
   { pattern: /^\/schools$/, nav: 'schools', render: () => renderSchools(view) },
   { pattern: /^\/schools\/(\d+)$/, nav: 'schools', render: (id) => renderSchoolDetail(view, id) },
+  { pattern: /^\/schools\/(\d+)\/report\/(\d+)$/, nav: 'assessments', render: (id, testId) => renderSchoolReport(view, id, testId) },
+  { pattern: /^\/teachers\/(\d+)$/, nav: 'schools', render: (id) => renderTeacherProfile(view, id) },
+  { pattern: /^\/teachers\/(\d+)\/report\/(\d+)(?:\?(.*))?$/, nav: 'assessments', render: (id, testId, query) => renderTeacherReport(view, id, testId, new URLSearchParams(query ?? '')) },
   { pattern: /^\/assessments(?:\?(.*))?$/, nav: 'assessments', render: (query) => renderAssessments(view, new URLSearchParams(query ?? '')) },
   { pattern: /^\/assessments\/(\d+)$/, nav: 'assessments', render: (id) => renderAssessmentDetail(view, id) },
   { pattern: /^\/generator$/, nav: 'generator', render: () => renderGenerator(view) },

@@ -146,3 +146,25 @@ export function select(name, options, { value = '', id } = {}) {
 export function emptyState(message, action) {
   return h('div', { class: 'empty' }, h('p', {}, message), action ?? null);
 }
+
+// One section's result: "Section A 72% · B". The colour follows the grade.
+export function sectionChip(section, { short = false } = {}) {
+  const name = short && /^Section [A-Z]$/.test(section.name) ? section.name.slice(8) : section.name;
+  return h(
+    'span',
+    { class: `grade-chip grade-${section.grade ?? 'none'}`, title: section.grade_label ? `${section.name}: ${section.grade_label}` : section.name },
+    section.percent === null || section.percent === undefined ? name : `${name} ${section.percent}%`,
+    section.grade ? h('b', {}, section.grade) : null
+  );
+}
+
+// The same, showing only the percentage, for tables with a column per section.
+export function percentChip(section) {
+  return sectionChip({ ...section, name: section.percent === null || section.percent === undefined ? '—' : `${section.percent}%`, percent: null });
+}
+
+// The potential identifier from the management report.
+export function potentialBadge(potential) {
+  if (!potential) return null;
+  return h('span', { class: `potential potential-${potential.level}` }, potential.headline);
+}

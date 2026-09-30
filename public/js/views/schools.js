@@ -285,7 +285,7 @@ function teacherListCard(school, teachers, refresh) {
     const row = h(
       'tr',
       {},
-      h('td', {}, teacher.name),
+      h('td', {}, h('a', { class: 'teacher-link', href: `#/teachers/${teacher.id}` }, teacher.name)),
       h('td', {}, teacher.grade || '—'),
       h('td', {}, teacher.subjects || '—'),
       h('td', {}, String(teacher.assessment_count)),
