@@ -10,6 +10,7 @@ import assessmentsRouter from './routes/assessments.js';
 import generatorRouter from './routes/generator.js';
 import testsRouter from './routes/tests.js';
 import reportsRouter from './routes/reports.js';
+import dashboardRouter from './routes/dashboard.js';
 import { sendHelperZip } from './helper-download.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -40,36 +41,10 @@ app.use('/api/assessments', assessmentsRouter);
 app.use('/api/generator', generatorRouter);
 app.use('/api/tests', testsRouter);
 app.use('/api/reports', reportsRouter);
+app.use('/api/dashboard', dashboardRouter);
 
 // The scanner helper, for the laptop the scanner is plugged into.
 app.get('/downloads/scanner-helper.zip', sendHelperZip);
-
-// Numbers for the dashboard.
-app.get('/api/stats', (_req, res) => {
-  const counts = db
-    .prepare(
-      `SELECT (SELECT COUNT(*) FROM schools)                              AS schools,
-              (SELECT COUNT(*) FROM teachers)                             AS teachers,
-              (SELECT COUNT(*) FROM assessments)                          AS assessments,
-              (SELECT COUNT(*) FROM assessments WHERE status = 'evaluated') AS evaluated,
-              (SELECT COUNT(*) FROM assessment_files)                     AS scanned_pages`
-    )
-    .get();
-
-  const recent = db
-    .prepare(
-      `SELECT a.id, a.title, a.status, a.assessment_date, a.updated_at,
-              t.name AS teacher_name, s.name AS school_name
-         FROM assessments a
-         JOIN teachers t ON t.id = a.teacher_id
-         JOIN schools  s ON s.id = a.school_id
-        ORDER BY a.updated_at DESC
-        LIMIT 8`
-    )
-    .all();
-
-  res.json({ counts, recent });
-});
 
 // Anything else that is not an API call is handled by the single-page app.
 app.get(/^\/(?!api\/|uploads\/|healthz|login|logout).*/, (_req, res) => {
