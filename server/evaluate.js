@@ -1,6 +1,7 @@
-// Marking an assessment with the OpenAI API. Evaluate sends the scanned
-// question paper and the teacher's scanned response to the model, which reads
-// both and marks every question. It runs in the background: the request that
+// Marking an assessment with the OpenAI API. Evaluate sends the question
+// paper (scanned pages, or PDFs confirmed from the paper library) and the
+// teacher's scanned response to the model, which reads both and marks every
+// question. It runs in the background: the request that
 // starts it returns straight away and the page polls the assessment until the
 // marking is done or has failed. Once it is done, the teacher's reports for
 // the test are rebuilt (reports.js).
@@ -10,13 +11,15 @@ import db, { UPLOADS_DIR } from './db.js';
 import { OPENAI_MODEL, friendly, openaiConfigured, requestJson } from './openai.js';
 import { queueTeacherReports } from './reports.js';
 import { swapScanKinds } from './scans.js';
+import { sittingPapers } from './papers.js';
+import { sectionKey } from './results.js';
 
 // Types the OpenAI API accepts as image input. The scanner helper saves JPEG.
 const OPENAI_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 
 const INSTRUCTIONS = `You are an experienced examiner marking a teacher training assessment.
 
-You are given scanned pages in two groups: first the QUESTION PAPER, then the TEACHER'S RESPONSE (the answers the teacher wrote on separate sheets, usually by hand). Each page is labelled with its group just before it.
+You are given two groups: first the QUESTION PAPER (scanned pages, or the paper itself as a PDF), then the TEACHER'S RESPONSE (scanned pages of the answers the teacher wrote on separate sheets, usually by hand). Each page or file is labelled with its group just before it.
 
 Pages are sometimes filed under the wrong group. If every page labelled QUESTION PAPER is plainly the teacher's own handwritten answers, and the pages labelled TEACHER'S RESPONSE are plainly the printed question paper, the two groups were swapped: mark them the right way round and set pages_swapped to true. In every other case, including when you are unsure or the teacher wrote on the question paper itself, use the groups as labelled and set pages_swapped to false.
 
@@ -91,10 +94,12 @@ export function startEvaluation(assessmentId) {
   if (assessment.ai_status === 'running') return null; // already on it
 
   const paper = selectFiles.all(assessment.id, 'question_paper');
+  const library = sittingPapers(assessment.id);
   const response = selectFiles.all(assessment.id, 'response');
-  if (!paper.length && !response.length) return 'Scan or upload the question paper and the teacher’s response first.';
-  if (!paper.length) return 'Scan or upload the question paper first.';
-  if (!response.length) return 'Scan or upload the teacher’s response first.';
+  const hasPaper = paper.length || library.length;
+  if (!hasPaper && !response.length) return 'Choose the question paper from the library or scan it, and scan the teacher’s answer paper, first.';
+  if (!hasPaper) return 'Choose the question paper from the library, or scan or upload it, first.';
+  if (!response.length) return 'Scan or upload the teacher’s answer paper first.';
 
   const unsupported = [...paper, ...response].filter((file) => !OPENAI_IMAGE_TYPES.has(file.mime_type));
   if (unsupported.length) {
@@ -104,30 +109,41 @@ export function startEvaluation(assessmentId) {
   }
 
   markRunning.run(assessment.id);
-  evaluate(assessment.id, paper, response).catch((error) => {
+  evaluate(assessment, { paper, library, response }).catch((error) => {
     console.error(`Evaluating assessment ${assessment.id} failed:`, error);
     markFailed.run(error.userMessage ?? `Marking failed: ${error.message}`, assessment.id);
   });
   return null;
 }
 
-async function evaluate(assessmentId, paper, response) {
+async function evaluate(assessment, { paper, library, response }) {
+  const assessmentId = assessment.id;
   const content = [
-    { type: 'input_text', text: `QUESTION PAPER (${paper.length} page${paper.length === 1 ? '' : 's'}):` },
-    ...(await pageInputs('QUESTION PAPER', paper)),
+    ...(await libraryInputs(library)),
+    ...(paper.length
+      ? [
+          { type: 'input_text', text: `QUESTION PAPER (${paper.length} scanned page${paper.length === 1 ? '' : 's'}):` },
+          ...(await pageInputs('QUESTION PAPER', paper)),
+        ]
+      : []),
     { type: 'input_text', text: `TEACHER'S RESPONSE (${response.length} page${response.length === 1 ? '' : 's'}):` },
     ...(await pageInputs("TEACHER'S RESPONSE", response)),
   ];
 
   const marks = await requestJson({
-    instructions: INSTRUCTIONS,
+    instructions: INSTRUCTIONS + sectionInstructions(assessment.section),
     content,
     name: 'assessment_marks',
     schema: RESULT_SCHEMA,
     task: 'mark this',
     retry: 'Press Evaluate to try again.',
   });
-  const result = normalise(marks);
+  const result = normalise({
+    ...marks,
+    questions: scopeToSection(marks.questions ?? [], assessment.section),
+    // Only scanned pages can have been filed the wrong way round.
+    pages_swapped: marks.pages_swapped === true && paper.length > 0 && !library.length,
+  });
   if (!result.questions.length) {
     throw friendly('OpenAI found no questions to mark. Check the question paper pages are readable and the right way up, then press Evaluate again.');
   }
@@ -138,6 +154,44 @@ async function evaluate(assessmentId, paper, response) {
   // marking that started on its own.
   const saved = selectAssessment.get(assessmentId);
   if (saved.test_id) queueTeacherReports(saved.teacher_id, saved.test_id);
+}
+
+// A sitting of one section is marked on that section alone, even when the
+// question paper has others.
+function sectionInstructions(section) {
+  if (!section) return '';
+  return `
+
+This sitting is for Section ${section} only: the teacher sat just that section on this date. Mark only the Section ${section} questions, give every row the section "Section ${section}", and leave out the other sections even if the question paper has them.`;
+}
+
+// Rows from other sections are dropped, and every row is filed under the
+// sitting's section, including on papers that name no sections at all.
+export function scopeToSection(questions, section) {
+  if (!section) return questions;
+  const inSection = questions.filter((q) => sectionKey(q.section) === section);
+  return (inSection.length ? inSection : questions).map((q) => ({ ...q, section: `Section ${section}` }));
+}
+
+// Papers confirmed from the library go to OpenAI as the PDFs themselves,
+// each introduced with what it is.
+async function libraryInputs(papers) {
+  const inputs = await Promise.all(
+    papers.map(async (paper) => {
+      const data = await fs.readFile(path.join(UPLOADS_DIR, paper.stored_name));
+      const sections = String(paper.sections).split(',').filter(Boolean);
+      const about = [
+        sections.length ? `Section${sections.length > 1 ? 's' : ''} ${sections.join(' and ')}` : '',
+        paper.subject,
+        paper.language && paper.language !== 'English' ? `in ${paper.language}` : '',
+      ].filter(Boolean).join(', ');
+      return [
+        { type: 'input_text', text: `QUESTION PAPER from the paper library: "${paper.title}"${about ? ` (${about})` : ''}. It is a PDF:` },
+        { type: 'input_file', filename: `${paper.title.replace(/[^\w .-]+/g, ' ').trim() || 'question paper'}.pdf`, file_data: `data:application/pdf;base64,${data.toString('base64')}` },
+      ];
+    })
+  );
+  return inputs.flat();
 }
 
 // Every page carries its group and number, so a long run of images cannot

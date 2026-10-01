@@ -127,6 +127,43 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_reports_test ON reports(test_id, kind, teacher_id);
+
+  -- The question paper library: papers kept once as PDFs, labelled so the
+  -- board can suggest the right one for a teacher. \`sections\` and \`levels\`
+  -- are comma-separated ("A,C"; "middle-school,secondary"), and an empty
+  -- \`levels\` means any level. \`priority\` breaks ties between near-identical
+  -- papers, higher first. \`checksum\` stops an import adding a paper twice.
+  CREATE TABLE IF NOT EXISTS papers (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    title         TEXT NOT NULL,
+    sections      TEXT NOT NULL DEFAULT '',
+    subject       TEXT NOT NULL DEFAULT '',
+    levels        TEXT NOT NULL DEFAULT '',
+    board         TEXT NOT NULL DEFAULT '',
+    language      TEXT NOT NULL DEFAULT '',
+    total_marks   REAL,
+    notes         TEXT NOT NULL DEFAULT '',
+    priority      INTEGER NOT NULL DEFAULT 0,
+    stored_name   TEXT NOT NULL,
+    original_name TEXT NOT NULL,
+    size_bytes    INTEGER,
+    preview_name  TEXT,
+    checksum      TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_papers_checksum ON papers(checksum);
+
+  -- Library papers confirmed as a sitting's question paper, in order. They
+  -- stand in for (or sit beside) scanned question paper pages.
+  CREATE TABLE IF NOT EXISTS assessment_papers (
+    assessment_id INTEGER NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+    paper_id      INTEGER NOT NULL REFERENCES papers(id),
+    position      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (assessment_id, paper_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_assessment_papers_paper ON assessment_papers(paper_id);
 `);
 
 // Columns added after the first release. SQLite has no ADD COLUMN IF NOT
@@ -146,6 +183,10 @@ addColumn('assessments', 'ai_evaluated_at', 'TEXT');
 
 // Which test a sitting belongs to.
 addColumn('assessments', 'test_id', 'INTEGER REFERENCES tests(id) ON DELETE CASCADE');
+
+// Which section a sitting is for, when the teacher sat one section on its own
+// ('A', 'B' or 'C'). NULL means the full paper, whichever sections it has.
+addColumn('assessments', 'section', 'TEXT');
 
 // Sittings from before tests existed go into a "Test 1" for their school.
 db.transaction(() => {
