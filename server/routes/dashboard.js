@@ -9,15 +9,19 @@ const selectSchools = db.prepare('SELECT id, name, logo_path, city, state FROM s
 const selectSchool = db.prepare('SELECT id, name, logo_path, city, state FROM schools WHERE id = ?');
 const selectTests = db.prepare('SELECT id, name FROM tests WHERE school_id = ? ORDER BY id DESC');
 
-// Each teacher's current sitting in the test, as on the Assessments board.
-const selectCurrentSittings = db.prepare(`
-  SELECT t.id AS teacher_id, a.id AS assessment_id, a.status, a.ai_status,
-         (SELECT COUNT(*) FROM assessment_files f WHERE f.assessment_id = a.id AND f.kind = 'response') AS response_count
-    FROM teachers t
-    LEFT JOIN assessments a ON a.id = (
-      SELECT a2.id FROM assessments a2 WHERE a2.teacher_id = t.id AND a2.test_id = @test_id ORDER BY a2.id DESC LIMIT 1
-    )
-   WHERE t.school_id = @school_id
+// What each teacher's sittings in the test that are not evaluated yet are
+// waiting on. A teacher can have more than one open at a time when sections
+// are uploaded one by one, so every open sitting counts, not only the latest.
+const selectOpenSittings = db.prepare(`
+  SELECT a.teacher_id,
+         MAX(a.ai_status = 'running') AS marking,
+         MAX(a.ai_status = 'failed')  AS failed,
+         MAX(a.ai_status NOT IN ('running', 'failed') AND EXISTS (
+           SELECT 1 FROM assessment_files f WHERE f.assessment_id = a.id AND f.kind = 'response'
+         )) AS to_evaluate
+    FROM assessments a
+   WHERE a.test_id = @test_id AND a.school_id = @school_id AND a.status != 'evaluated'
+   GROUP BY a.teacher_id
 `);
 
 const POTENTIAL_LEVELS = [
@@ -32,18 +36,17 @@ const POTENTIAL_LEVELS = [
 // teachers are doing section by section. Grades only, never an overall percentage.
 function schoolSummary(school, test) {
   const overview = schoolOverview(school.id, test.id);
-  const sittings = new Map(selectCurrentSittings.all({ school_id: school.id, test_id: test.id }).map((row) => [row.teacher_id, row]));
+  const openSittings = new Map(selectOpenSittings.all({ school_id: school.id, test_id: test.id }).map((row) => [row.teacher_id, row]));
   const person = (t) => ({ id: t.id, name: t.name });
 
   const waiting = { not_started: [], to_evaluate: [], marking: [], failed: [], reports_to_build: [] };
   for (const teacher of overview.teachers) {
-    const sitting = sittings.get(teacher.id);
+    const open = openSittings.get(teacher.id);
     const hasResults = teacher.sections.length > 0;
-    const open = sitting?.assessment_id && sitting.status !== 'evaluated';
 
-    if (open && sitting.ai_status === 'running') waiting.marking.push(person(teacher));
-    else if (open && sitting.ai_status === 'failed') waiting.failed.push(person(teacher));
-    else if (open && sitting.response_count > 0) waiting.to_evaluate.push(person(teacher));
+    if (open?.marking) waiting.marking.push(person(teacher));
+    else if (open?.failed) waiting.failed.push(person(teacher));
+    else if (open?.to_evaluate) waiting.to_evaluate.push(person(teacher));
     else if (!hasResults) waiting.not_started.push(person(teacher));
 
     if (hasResults) {

@@ -35,6 +35,27 @@ export const uploadLogo = multer({
   fileFilter: imageFilter,
 });
 
+// A question paper for the library: one PDF, up to 30 MB, checked and
+// written to disk by papers.js.
+export const uploadPaper = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 30 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, cb) => {
+    if (path.extname(file.originalname).toLowerCase() === '.pdf' || file.mimetype === 'application/pdf') return cb(null, true);
+    cb(new Error('Please upload the question paper as a PDF. In Word, use File → Save As → PDF first.'));
+  },
+});
+
+// A paper pack: one zip of PDFs and their labels, up to 200 MB.
+export const uploadPack = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 200 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, cb) => {
+    if (path.extname(file.originalname).toLowerCase() === '.zip') return cb(null, true);
+    cb(new Error('Please choose the paper pack .zip file.'));
+  },
+});
+
 // Excel import: held in memory, parsed and discarded.
 export const uploadWorkbook = multer({
   storage: multer.memoryStorage(),

@@ -267,6 +267,10 @@ td.right, th.right { text-align: right; white-space: nowrap; }
 /* One teacher's row on the assessments board: page count, then the button. */
 .scan-cell { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .scan-cell .scan-count { color: var(--muted); font-size: 13px; min-width: 62px; }
+.scan-cell .scan-first {
+  width: 40px; height: 54px; object-fit: cover; object-position: top;
+  border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); cursor: zoom-in;
+}
 .scan-cell .btn[disabled] { opacity: 0.6; cursor: default; }
 
 /* The strip above the board that connects the Scan buttons to the scanner. */
@@ -474,7 +478,7 @@ td.right, th.right { text-align: right; white-space: nowrap; }
 .change.up { color: var(--ok); }
 .change.down { color: #7d2451; }
 
-.segmented { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.segmented { align-self: flex-start; display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
 .segmented button { font: inherit; font-size: 13.5px; padding: 8px 12px; border: none; background: var(--surface); cursor: pointer; color: var(--muted); }
 .segmented button + button { border-left: 1px solid var(--border); }
 .segmented button.active { background: var(--accent); color: #fff; }
@@ -619,4 +623,80 @@ td.right, th.right { text-align: right; white-space: nowrap; }
   .report-sheet { padding: 20px 16px 16px; }
   .report-title { font-size: 24px; }
   .report-details { gap: 8px 22px; }
+}
+
+/* ---------- question paper library ---------- */
+
+.paper-thumb {
+  width: 40px; height: 54px; flex: none; object-fit: cover; object-position: top;
+  border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2);
+}
+.paper-thumb-lg { width: 72px; height: 98px; }
+.paper-thumb-pdf {
+  display: inline-grid; place-items: center;
+  font-size: 11px; font-weight: 700; letter-spacing: .5px; color: var(--danger);
+}
+
+/* The question paper cell on the board: a confirmed paper, or a suggestion. */
+.paper-cell { display: grid; gap: 8px; justify-items: start; }
+.paper-chosen { display: flex; gap: 10px; align-items: flex-start; }
+.paper-chosen-text { min-width: 0; font-size: 14px; }
+.paper-chosen-text .hint { font-size: 12.5px; }
+.paper-list { display: grid; gap: 14px; margin-bottom: 6px; }
+.paper-suggestion {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
+  padding: 7px 10px; border: 1px dashed #c6d3e0; border-radius: 8px; background: var(--accent-soft);
+  font-size: 13.5px; max-width: 360px;
+}
+.paper-suggestion-text { min-width: 0; }
+
+.check-row { display: flex; flex-wrap: wrap; gap: 6px 16px; padding-top: 4px; }
+.check-row label.inline { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 400; }
+.check-row input { width: auto; }
+.filter-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.filter-row select, .filter-row input { width: auto; flex: 1 1 160px; }
+.paper-note { color: var(--warn); }
+details.paper-form-card > summary { cursor: pointer; list-style-position: inside; }
+
+/* The "is this the paper?" dialog. */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 50;
+  display: grid; place-items: center; padding: 16px;
+  background: rgba(10, 18, 26, 0.55);
+}
+.modal {
+  background: var(--surface); border-radius: var(--radius); box-shadow: 0 20px 60px rgba(10, 18, 26, 0.3);
+  width: min(1080px, 100%); max-height: calc(100vh - 32px);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.modal-head {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;
+  padding: 16px 20px 12px; border-bottom: 1px solid var(--border);
+}
+.modal-head h2 { margin: 0 0 4px; font-size: 18px; }
+.modal-head .hint { margin: 0; }
+.modal-close { border: none; background: none; font-size: 26px; line-height: 1; color: var(--muted); cursor: pointer; padding: 0 4px; }
+.modal-foot {
+  display: flex; justify-content: flex-end; gap: 8px;
+  padding: 12px 20px; border-top: 1px solid var(--border); background: var(--surface-2);
+}
+
+.picker-body { display: grid; grid-template-columns: 300px 1fr; min-height: 0; flex: 1; }
+.picker-slots { padding: 14px; border-right: 1px solid var(--border); overflow-y: auto; display: grid; gap: 10px; align-content: start; }
+.picker-slot { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; display: grid; gap: 6px; }
+.picker-slot.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.picker-slot-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.picker-slot select { width: 100%; }
+.picker-show { font-size: 13px; justify-self: start; }
+.badge.suggested { background: var(--ok-soft); color: var(--ok); }
+.picker-preview { padding: 14px 16px; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.picker-paper-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 6px; }
+.picker-note { margin: 0 0 8px; padding: 8px 12px; font-size: 13px; }
+.picker-pdf { flex: 1; width: 100%; min-height: 60vh; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); }
+.picker-empty { margin: auto; color: var(--muted); }
+
+@media (max-width: 760px) {
+  .picker-body { grid-template-columns: 1fr; overflow-y: auto; }
+  .picker-slots { border-right: none; border-bottom: 1px solid var(--border); }
+  .picker-pdf { min-height: 50vh; }
 }

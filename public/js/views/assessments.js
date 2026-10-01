@@ -3,12 +3,38 @@ import {
   formatDate, formatBytes, emptyState, openLightbox, sectionChip,
 } from '../ui.js';
 import { schoolsApi, teachersApi, assessmentsApi, testsApi } from '../api.js';
+import { choosePaper, paperFacts, paperThumb } from '../paper-picker.js';
 import {
   scanner, scanPages, connectScanner, stopScanning, checkScannerOnce, selectScanner, selectedScanner,
   scanBothSides, setScanBothSides, HELPER_DOWNLOAD_URL,
 } from '../scanner.js';
 
-const KIND_NAMES = { question_paper: 'question paper', response: 'response' };
+const KIND_NAMES = { question_paper: 'question paper', response: 'answer paper' };
+
+// The board works on the full paper or on one section at a time.
+const SECTION_OPTIONS = [
+  { value: '', label: 'Full paper' },
+  { value: 'A', label: 'Section A' },
+  { value: 'B', label: 'Section B' },
+  { value: 'C', label: 'Section C' },
+];
+const SECTION_KEY = 'tta.board.section';
+
+function rememberedSection() {
+  try {
+    return localStorage.getItem(SECTION_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+function rememberSection(section) {
+  try {
+    localStorage.setItem(SECTION_KEY, section);
+  } catch {
+    // Not remembered; the board still works on the chosen section.
+  }
+}
 
 const STATUS_OPTIONS = [
   { value: 'draft', label: 'Draft' },
@@ -35,8 +61,10 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
   const state = {
     schoolId: query.get('school') ?? String(schools[0].id),
     testId: query.get('test') ?? null,
+    section: SECTION_OPTIONS.some((o) => o.value === query.get('section')) ? query.get('section') : rememberedSection(),
     tests: [],
     roster: [],
+    librarySize: 0,
     assessments: [],
   };
 
@@ -46,10 +74,11 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
     state.tests = await testsApi.list(state.schoolId);
     if (!state.tests.some((t) => String(t.id) === String(state.testId))) state.testId = String(state.tests[0].id);
     const [roster, assessments] = await Promise.all([
-      teachersApi.roster(state.schoolId, state.testId),
+      teachersApi.roster(state.schoolId, state.testId, state.section),
       assessmentsApi.list({ school_id: state.schoolId, test_id: state.testId }),
     ]);
     state.roster = roster.teachers;
+    state.librarySize = roster.library_size;
     state.assessments = assessments;
     draw();
   }
@@ -100,6 +129,28 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
       h('button', { class: 'btn btn-sm', type: 'button', onclick: newTest }, 'New test')
     );
 
+    const sectionControl = h(
+      'div',
+      { class: 'segmented', role: 'group', 'aria-label': 'Full paper or one section' },
+      SECTION_OPTIONS.map((option) =>
+        h(
+          'button',
+          {
+            type: 'button',
+            class: option.value === state.section ? 'active' : '',
+            'aria-pressed': String(option.value === state.section),
+            onclick: () => {
+              if (option.value === state.section) return;
+              state.section = option.value;
+              rememberSection(option.value);
+              load();
+            },
+          },
+          option.label
+        )
+      )
+    );
+
     mount(container,
       h(
         'div',
@@ -108,7 +159,7 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
           'div',
           {},
           h('h1', {}, 'Assessments'),
-          h('p', {}, 'Upload each teacher’s question paper and response on their row, then press Evaluate to have OpenAI mark it. Sections sat on different dates add up under the same test.')
+          h('p', {}, 'Confirm or upload each teacher’s question paper, upload their answer paper, then press Evaluate to have OpenAI mark it. Sections sat on different dates add up under the same test.')
         )
       ),
       h(
@@ -118,7 +169,13 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
           'div',
           { class: 'form-grid' },
           field('School', schoolSelect),
-          field('Test', testControls, { hint: 'Each test is one round, such as a pre-training and a post-training test.' })
+          field('Test', testControls, { hint: 'Each test is one round, such as a pre-training and a post-training test.' }),
+          field('Papers', sectionControl, {
+            span: true,
+            hint: state.section
+              ? `Each row takes the Section ${state.section} question paper and answer paper only, and is marked as Section ${state.section}.`
+              : 'Each row takes the whole paper. Pick a section when a teacher sits one section on its own.',
+          })
         )
       ),
       teacherBoardCard(state, load, draw),
@@ -157,8 +214,8 @@ function teacherBoardCard(state, reload, redraw) {
   return h(
     'div',
     { class: 'card' },
-    h('h2', {}, `Teachers (${state.roster.length})`),
-    h('p', { class: 'hint' }, 'Uploading pages only files them against the teacher. Nothing is marked until you press Evaluate.'),
+    h('h2', {}, `Teachers (${state.roster.length})${state.section ? ` · Section ${state.section}` : ' · Full paper'}`),
+    h('p', { class: 'hint' }, 'Confirming a paper or uploading pages only files them against the teacher. Nothing is marked until you press Evaluate.'),
     scannerPanel(redraw),
     h(
       'div',
@@ -173,8 +230,8 @@ function teacherBoardCard(state, reload, redraw) {
             'tr',
             {},
             h('th', {}, 'Teacher'),
-            h('th', {}, 'Question paper'),
-            h('th', {}, 'Teacher’s response'),
+            h('th', {}, state.section ? `Section ${state.section} question paper` : 'Question paper'),
+            h('th', {}, state.section ? `Section ${state.section} answer paper` : 'Answer paper'),
             h('th', {}, 'Status'),
             h('th', {}, 'Sections so far'),
             h('th', { class: 'right' }, '')
@@ -195,8 +252,8 @@ function teacherBoardCard(state, reload, redraw) {
                   ? h('div', { class: 'hint' }, [teacher.grade, teacher.subjects].filter(Boolean).join(' · '))
                   : null
               ),
-              h('td', {}, scanCell(state, teacher, 'question_paper', teacher.question_paper_count, reload, redraw)),
-              h('td', {}, scanCell(state, teacher, 'response', teacher.response_count, reload, redraw)),
+              h('td', {}, questionPaperCell(state, teacher, reload, redraw)),
+              h('td', {}, scanCell(state, teacher, 'response', teacher.response_count, teacher.response_first, reload, redraw)),
               h(
                 'td',
                 {},
@@ -204,7 +261,9 @@ function teacherBoardCard(state, reload, redraw) {
                   ? h('span', { class: 'badge running' }, 'Marking…')
                   : teacher.assessment_id
                     ? statusBadge(teacher.assessment_status)
-                    : h('span', { class: 'badge draft' }, 'Not started')
+                    : teacher.sections.length
+                      ? h('span', { class: 'hint' }, '—')
+                      : h('span', { class: 'badge draft' }, 'Not started')
               ),
               h(
                 'td',
@@ -219,6 +278,7 @@ function teacherBoardCard(state, reload, redraw) {
                 h(
                   'div',
                   { class: 'row-actions' },
+                  swapButton(teacher, reload),
                   evaluateButton(state, teacher),
                   teacher.sections.length ? reportButton(state, teacher) : null
                 )
@@ -232,11 +292,16 @@ function teacherBoardCard(state, reload, redraw) {
 }
 
 // One upload control for one kind of scan, on one teacher's row. With the
-// scanner connected the button scans; otherwise it picks image files.
-function scanCell(state, teacher, kind, count, reload, redraw) {
+// scanner connected the button scans; otherwise it picks image files. The
+// button names what it files the pages as, and once pages are in, the first
+// one shows small beside the count, so pages filed in the wrong column are
+// plain to see.
+function scanCell(state, teacher, kind, count, firstPage, reload, redraw) {
   const label = count ? `${count} page${count === 1 ? '' : 's'}` : 'None yet';
   const scanning = scanner.status === 'ready';
-  const idleLabel = scanning ? (count ? 'Scan more' : 'Scan') : count ? 'Add pages' : 'Upload';
+  const idleLabel = scanning
+    ? (count ? 'Scan more' : `Scan ${KIND_NAMES[kind]}`)
+    : count ? 'Add pages' : `Upload ${KIND_NAMES[kind]}`;
   const fileInput = h('input', { type: 'file', accept: 'image/*', multiple: true, style: 'display:none' });
   const button = h('button', { class: 'btn btn-sm', type: 'button' }, idleLabel);
 
@@ -250,13 +315,14 @@ function scanCell(state, teacher, kind, count, reload, redraw) {
     const data = new FormData();
     data.set('kind', kind);
     data.set('test_id', state.testId);
+    if (state.section) data.set('section', state.section);
     for (const file of files) data.append('files', file);
 
     button.textContent = 'Uploading…';
     try {
       await teachersApi.uploadScans(teacher.id, data);
       const pages = `${files.length} page${files.length === 1 ? '' : 's'}`;
-      toast(`${pages} ${scanned ? 'scanned' : 'added'} for ${teacher.name}.`, 'success');
+      toast(`${pages} ${scanned ? 'scanned' : 'added'} as ${teacher.name}’s ${KIND_NAMES[kind]}.`, 'success');
       if (warning) toast(warning, 'error');
       await reload(); // redraws the whole board, so the button state goes with it
     } catch (error) {
@@ -292,7 +358,122 @@ function scanCell(state, teacher, kind, count, reload, redraw) {
     upload(chosen);
   });
 
-  return h('div', { class: 'scan-cell' }, h('span', { class: 'scan-count' }, label), button, fileInput);
+  const preview = count && firstPage
+    ? h('img', {
+        class: 'scan-first',
+        src: `/uploads/${firstPage}`,
+        alt: `First page of ${teacher.name}’s ${KIND_NAMES[kind]}`,
+        title: `First page of the ${KIND_NAMES[kind]}. Click to see it larger.`,
+        loading: 'lazy',
+        onclick: () => openLightbox(`/uploads/${firstPage}`, `${teacher.name} - ${KIND_NAMES[kind]}`),
+      })
+    : null;
+
+  return h('div', { class: 'scan-cell' }, preview, h('span', { class: 'scan-count' }, label), button, fileInput);
+}
+
+// The question paper on a teacher's row comes one of two ways: papers from the
+// library, confirmed for this teacher, or scanned pages. Until it has either,
+// the library's best fit is suggested beside the upload button; nothing is
+// used until it is confirmed in the dialog.
+function questionPaperCell(state, teacher, reload, redraw) {
+  const locked = teacher.assessment_status === 'evaluated' || teacher.ai_status === 'running';
+
+  if (teacher.papers.length) {
+    return h(
+      'div',
+      { class: 'paper-cell' },
+      teacher.papers.map((paper) =>
+        h(
+          'div',
+          { class: 'paper-chosen' },
+          paperThumb(paper),
+          h(
+            'div',
+            { class: 'paper-chosen-text' },
+            h('a', { href: `/uploads/${paper.stored_name}`, target: '_blank', rel: 'noopener', title: paperFacts(paper) }, paper.title),
+            h('div', { class: 'hint' }, `From the library · ${paperFacts(paper)}`)
+          )
+        )
+      ),
+      teacher.question_paper_count
+        ? h('div', { class: 'hint' }, `Also ${teacher.question_paper_count} scanned page${teacher.question_paper_count === 1 ? '' : 's'}.`)
+        : null,
+      locked ? null : h('button', { class: 'btn-link', type: 'button', onclick: () => confirmPaper(state, teacher, reload) }, 'Change paper')
+    );
+  }
+
+  const scans = scanCell(state, teacher, 'question_paper', teacher.question_paper_count, teacher.question_paper_first, reload, redraw);
+  if (teacher.question_paper_count || locked) return scans;
+
+  const suggested = teacher.suggested_papers ?? [];
+  let suggestion = null;
+  if (suggested.length) {
+    suggestion = h(
+      'div',
+      { class: 'paper-suggestion' },
+      h(
+        'div',
+        { class: 'paper-suggestion-text' },
+        h('span', { class: 'hint' }, 'Suggested: '),
+        suggested.length === 1
+          ? h('strong', {}, suggested[0].title)
+          : h('strong', { title: suggested.map((p) => p.title).join('\n') }, `${suggested.length} papers (${suggested.flatMap((p) => p.sections).join(', ')})`)
+      ),
+      h('button', { class: 'btn btn-sm btn-primary', type: 'button', onclick: () => confirmPaper(state, teacher, reload) }, 'Confirm paper')
+    );
+  } else if (state.librarySize) {
+    suggestion = h(
+      'div',
+      { class: 'paper-suggestion' },
+      h('button', { class: 'btn btn-sm', type: 'button', onclick: () => confirmPaper(state, teacher, reload) }, 'Choose from library')
+    );
+  }
+  return h('div', { class: 'paper-cell' }, suggestion, scans);
+}
+
+// Asks "is this the paper?" and files the confirmed papers against the
+// teacher's current sitting for the full paper or the board's section.
+async function confirmPaper(state, teacher, reload) {
+  const ids = await choosePaper({ teacher, section: state.section, current: teacher.papers });
+  if (!ids) return;
+  try {
+    const sitting = teacher.assessment_id
+      ? { id: teacher.assessment_id }
+      : await teachersApi.currentAssessment(teacher.id, state.testId, state.section);
+    const updated = await assessmentsApi.setPapers(sitting.id, ids);
+    const names = updated.papers.map((paper) => `“${paper.title}”`).join(' and ');
+    toast(`${names} confirmed as ${teacher.name}’s question paper. Now upload the answer paper.`, 'success');
+    await reload();
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+// Swaps the question paper and the answer paper on a row, for pages that went
+// into the wrong column. Offered until the sitting is evaluated; after that,
+// the evaluation screen has the same button.
+function swapButton(teacher, reload) {
+  const hasPages = teacher.question_paper_count > 0 || teacher.response_count > 0;
+  if (!teacher.assessment_id || !hasPages || teacher.assessment_status === 'evaluated' || teacher.ai_status === 'running') return null;
+
+  const button = h(
+    'button',
+    { class: 'btn btn-sm', type: 'button', title: 'Pages in the wrong column? Swap the question paper and the answer paper.' },
+    'Swap'
+  );
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    try {
+      await assessmentsApi.swap(teacher.assessment_id);
+      toast(`Swapped ${teacher.name}’s question paper and answer paper. Press Swap again to undo.`, 'success');
+      await reload();
+    } catch (error) {
+      toast(error.message, 'error');
+      button.disabled = false;
+    }
+  });
+  return button;
 }
 
 // The strip above the board that connects the Scan buttons to the scanner
@@ -399,8 +580,8 @@ function evaluateButton(state, teacher) {
   button.addEventListener('click', async () => {
     button.disabled = true;
     try {
-      const id = teacher.assessment_id ?? (await teachersApi.currentAssessment(teacher.id, state.testId)).id;
-      const ready = teacher.question_paper_count > 0 && teacher.response_count > 0;
+      const id = teacher.assessment_id ?? (await teachersApi.currentAssessment(teacher.id, state.testId, state.section)).id;
+      const ready = (teacher.question_paper_count > 0 || teacher.papers.length > 0) && teacher.response_count > 0;
       if (!evaluated && !running && ready) {
         try {
           await assessmentsApi.evaluate(id);
@@ -492,10 +673,10 @@ function historyCard(state) {
                 h(
                   'tr',
                   { style: 'cursor:pointer', onclick: () => window.navigate(`/assessments/${row.id}`) },
-                  h('td', {}, row.title),
+                  h('td', {}, row.title, row.paper_titles ? h('div', { class: 'hint' }, `Paper: ${row.paper_titles}`) : null),
                   h('td', {}, row.teacher_grade ? `${row.teacher_name} — ${row.teacher_grade}` : row.teacher_name),
                   h('td', {}, formatDate(row.assessment_date) || '—'),
-                  h('td', {}, `${row.question_paper_count} paper · ${row.response_count} response`),
+                  h('td', {}, `${row.paper_titles ? 'Library paper' : `${row.question_paper_count} paper`} · ${row.response_count} answer`),
                   h(
                     'td',
                     {},
@@ -582,7 +763,7 @@ export async function renderAssessmentDetail(root, id) {
           'div',
           {},
           h('h1', {}, assessment.title),
-          h('p', {}, `${assessment.teacher_name}${assessment.teacher_grade ? ` — ${assessment.teacher_grade}` : ''} · ${assessment.school_name}${assessment.test_name ? ` · ${assessment.test_name}` : ''}${assessment.assessment_date ? ` · ${formatDate(assessment.assessment_date)}` : ''}`)
+          h('p', {}, `${assessment.teacher_name}${assessment.teacher_grade ? ` — ${assessment.teacher_grade}` : ''} · ${assessment.school_name}${assessment.test_name ? ` · ${assessment.test_name}` : ''} · ${assessment.section ? `Section ${assessment.section}` : 'Full paper'}${assessment.assessment_date ? ` · ${formatDate(assessment.assessment_date)}` : ''}`)
         ),
         h(
           'div',
@@ -622,10 +803,30 @@ export async function renderAssessmentDetail(root, id) {
 }
 
 function scansCard(assessment, refresh) {
+  const hasPages = assessment.question_paper_files.length > 0 || assessment.response_files.length > 0;
+  const swap = hasPages && assessment.ai_status !== 'running'
+    ? h('button', { class: 'btn btn-sm', type: 'button' }, 'Swap question paper and answer paper')
+    : null;
+  swap?.addEventListener('click', async () => {
+    swap.disabled = true;
+    try {
+      await assessmentsApi.swap(assessment.id);
+      toast(
+        assessment.ai_result
+          ? 'Swapped. Press Evaluate again to mark them the right way round.'
+          : 'Swapped. Press the button again to undo.',
+        'success'
+      );
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+    await refresh();
+  });
+
   return h(
     'div',
     { class: 'card' },
-    h('h2', {}, 'Scanned pages'),
+    h('div', { class: 'scan-group-head' }, h('h2', { style: 'margin:0' }, 'Question paper and answer paper'), swap),
     h(
       'p',
       { class: 'hint' },
@@ -633,8 +834,75 @@ function scansCard(assessment, refresh) {
         ? 'Press Scan pages to feed them straight from the scanner, or drop image files here. You can add several at once.'
         : 'Scan the pages on your laptop, then drop the image files here. You can add several at once.'
     ),
-    scanGroup(assessment, 'question_paper', 'Question paper', assessment.question_paper_files, refresh),
-    scanGroup(assessment, 'response', 'Teacher’s response', assessment.response_files, refresh)
+    libraryPapers(assessment, refresh),
+    scanGroup(assessment, 'question_paper', assessment.papers.length ? 'Scanned question paper pages' : 'Question paper', assessment.question_paper_files, refresh),
+    scanGroup(assessment, 'response', 'Answer paper', assessment.response_files, refresh)
+  );
+}
+
+// Papers from the library confirmed as this sitting's question paper. OpenAI
+// reads them as PDFs, so nothing needs scanning for the question paper.
+function libraryPapers(assessment, refresh) {
+  const locked = assessment.ai_status === 'running';
+  const teacher = { id: assessment.teacher_id, name: assessment.teacher_name, grade: assessment.teacher_grade };
+  const choose = h(
+    'button',
+    { class: 'btn btn-sm', type: 'button', disabled: locked },
+    assessment.papers.length ? 'Change paper' : 'Choose from the paper library'
+  );
+  choose.addEventListener('click', async () => {
+    const ids = await choosePaper({ teacher, section: assessment.section ?? '', current: assessment.papers });
+    if (!ids) return;
+    try {
+      await assessmentsApi.setPapers(assessment.id, ids);
+      toast(assessment.ai_result ? 'Paper changed. Press Evaluate again to mark against it.' : 'Paper confirmed.', 'success');
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+    await refresh();
+  });
+
+  const remove = async (paper) => {
+    if (!confirmAction(`Stop using “${paper.title}” as the question paper? It stays in the library.`)) return;
+    try {
+      await assessmentsApi.setPapers(assessment.id, assessment.papers.filter((p) => p.id !== paper.id).map((p) => p.id));
+      toast('Paper removed from this sitting.', 'success');
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+    await refresh();
+  };
+
+  return h(
+    'div',
+    { class: 'scan-group' },
+    h('div', { class: 'scan-group-head' }, h('h3', {}, 'Question paper from the library'), choose),
+    assessment.papers.length
+      ? h(
+          'div',
+          { class: 'paper-list' },
+          assessment.papers.map((paper) =>
+            h(
+              'div',
+              { class: 'paper-chosen' },
+              paperThumb(paper, 'paper-thumb paper-thumb-lg'),
+              h(
+                'div',
+                { class: 'paper-chosen-text' },
+                h('strong', {}, paper.title),
+                h('div', { class: 'hint' }, paperFacts(paper)),
+                paper.notes ? h('div', { class: 'hint' }, paper.notes) : null,
+                h(
+                  'div',
+                  { class: 'row-actions', style: 'justify-content:flex-start;margin-top:6px' },
+                  h('a', { class: 'btn btn-sm', href: `/uploads/${paper.stored_name}`, target: '_blank', rel: 'noopener' }, 'Open'),
+                  locked ? null : h('button', { class: 'btn btn-sm', type: 'button', onclick: () => remove(paper) }, 'Remove')
+                )
+              )
+            )
+          )
+        )
+      : h('p', { class: 'hint' }, 'None chosen. Choose the paper the teacher sat from the library, or scan or upload the question paper below.')
   );
 }
 
@@ -752,7 +1020,7 @@ function scanGroup(assessment, kind, label, files, refresh) {
 // The OpenAI marking: a button to run it, its progress, and the marks it gave
 // question by question, grouped by section.
 function markingCard(assessment, runEvaluation, onSaved) {
-  const hasScans = assessment.question_paper_files.length > 0 && assessment.response_files.length > 0;
+  const hasScans = (assessment.question_paper_files.length > 0 || assessment.papers.length > 0) && assessment.response_files.length > 0;
   const running = assessment.ai_status === 'running';
   const result = assessment.ai_result;
 
@@ -774,9 +1042,9 @@ function markingCard(assessment, runEvaluation, onSaved) {
   } else if (assessment.ai_status === 'failed') {
     body = h('div', { class: 'marking-state error' }, assessment.ai_error || 'The marking did not finish.');
   } else if (!hasScans) {
-    body = h('p', { class: 'hint' }, 'Scan or upload the question paper and the teacher’s response above, then press Evaluate.');
+    body = h('p', { class: 'hint' }, 'Choose or upload the question paper and upload the teacher’s answer paper above, then press Evaluate.');
   } else if (!result) {
-    body = h('p', { class: 'hint' }, 'Press Evaluate to have OpenAI mark the teacher’s response against the question paper.');
+    body = h('p', { class: 'hint' }, `Press Evaluate to have OpenAI mark the teacher’s answer paper against the question paper${assessment.section ? `, as Section ${assessment.section} only` : ''}.`);
   }
 
   return h(
@@ -817,6 +1085,13 @@ function markingResult(assessment, result, onSaved) {
     { class: 'marking-result' },
     h('div', { class: 'marking-total chips' }, assessment.sections.map((section) => sectionChip(section))),
     h('p', { class: 'hint' }, assessment.sections.map((s) => `${s.name}: ${s.awarded} / ${s.max}${s.grade_label ? ` (${s.grade_label})` : ''}`).join(' · ')),
+    result.pages_swapped
+      ? h(
+          'p',
+          { class: 'notice' },
+          'The question paper and the answer paper were uploaded the wrong way round. OpenAI marked them the right way round, and they have been swapped back above.'
+        )
+      : null,
     assessment.unanswered_sections.length
       ? h(
           'p',
@@ -893,6 +1168,9 @@ function detailsCard(assessment, refresh) {
       { class: 'form-grid' },
       field('Title', input('title', { value: assessment.title, required: true })),
       field('Date', input('assessment_date', { type: 'date', value: assessment.assessment_date ?? '' })),
+      field('Paper', select('section', SECTION_OPTIONS, { value: assessment.section ?? '' }), {
+        hint: 'A single section is marked as that section only.',
+      }),
       field('Subject', input('subject', { value: assessment.subject })),
       field('Status', select('status', STATUS_OPTIONS, { value: assessment.status })),
       // With OpenAI's marks, scores come from the questions above. Without

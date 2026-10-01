@@ -55,11 +55,65 @@ The import tells you how many teachers it added, and lists any rows it skipped.
 Rows with no name are skipped, and so is anyone already on that school's list,
 so you can safely re-upload a file you have added a few rows to.
 
+## The paper library
+
+The **Paper library** page keeps the question papers teachers sit, once each,
+as PDFs labelled with their sections, subject, levels, board and language. On
+the Assessments board, a teacher with no question paper yet is shown the
+library paper that best fits their class, subject and school board, with
+**Confirm paper**. That opens the paper beside the other choices and asks
+whether it is the one the teacher sat; pick another if not, then press **Yes,
+use this paper** and upload the answer paper. Nothing is used until it is
+confirmed, and **Change paper** puts a different one in. OpenAI reads a library
+paper as the PDF itself, so the question paper needs no scanning.
+
+Papers come in one at a time (**Add a Paper**, with a PDF; save a Word paper as
+PDF first) or many at once from a **paper pack**: a `.zip` holding the PDFs,
+an optional first-page picture of each, and a `manifest.json` of their labels:
+
+```json
+{
+  "format": "tta-paper-pack",
+  "version": 1,
+  "papers": [
+    {
+      "file": "papers/icse-middle-science-b.pdf",
+      "preview": "previews/icse-middle-science-b.png",
+      "title": "ICSE Middle School Science · Section B",
+      "sections": ["B"],
+      "subject": "Science",
+      "levels": ["middle-school"],
+      "board": "ICSE",
+      "language": "English",
+      "total_marks": 35,
+      "notes": "",
+      "priority": 1
+    }
+  ]
+}
+```
+
+Levels are `pre-primary`, `primary`, `middle-school`, `secondary` and
+`senior-secondary`; none means any level. The board is `CBSE`, `ICSE`,
+`Karnataka State`, `Karnataka Pre-University`, or empty for any. `priority`
+breaks ties between near-identical papers, higher first. Importing a pack
+again skips papers already in the library, and a paper some sitting uses
+cannot be deleted. Packs are for papers kept out of this repository: they
+live in the app's data folder, not on GitHub.
+
 ## Uploading scans
 
+The board works on the **Full paper** or on **Section A**, **B** or **C**.
+With a section picked, each row takes that section's question paper and
+answer paper only, and Evaluate marks just that section; it adds to the
+teacher's results in the test like any other sitting.
+
 Each teacher's row on the **Assessments** page has an Upload button for the
-question paper and one for the response. They either scan straight from the
-scanner or upload image files.
+question paper and one for the answer paper (the teacher's response). They
+either scan straight from the scanner or upload image files. Once pages are in,
+the first one shows small beside the count, so pages in the wrong column are
+easy to spot: **Swap** on the row (or on the assessment's own page) swaps the
+question paper and the answer paper, and pressing it again swaps them back.
 
 ### Scanning straight from the scanner
 
@@ -94,7 +148,8 @@ JPG, PNG, WEBP, TIFF, GIF and BMP are accepted, up to 25 MB per page.
 ## Marking with OpenAI
 
 Uploading or scanning never marks anything. When a teacher has both a question
-paper and a response, press **Evaluate** on their row: the app sends the pages
+paper (scanned, or confirmed from the paper library) and a response, press
+**Evaluate** on their row: the app sends the pages
 to the OpenAI API, which reads the paper and the teacher's handwriting, marks
 every part of every question against the marks printed on the paper, and writes
 feedback. Papers and answers can be in any language (English, Hindi, Kannada,
@@ -102,7 +157,10 @@ Sanskrit and so on); the feedback is in English. The assessment page shows the
 marking while it runs, then the total, a score per section, the marks and
 feedback for each part with what the teacher wrote, and strengths and areas to
 improve. The assessment is marked Evaluated; you can correct any question's
-marks in the Marks column, or press **Evaluate again**.
+marks in the Marks column, or press **Evaluate again**. If the question paper
+and the answer paper were plainly uploaded the wrong way round, OpenAI marks
+them the right way round and the app swaps the pages back, saying so above the
+marks.
 
 It needs the `OPENAI_API_KEY` secret on the server (on Fly:
 `fly secrets set OPENAI_API_KEY=... -a teachertrainingassessments`). The model
@@ -247,7 +305,8 @@ control — download `app.db` now and then if the records matter.
 Everything is inside the `data/` folder next to the code:
 
 - `data/app.db` — the SQLite database with schools, teachers and assessments.
-- `data/uploads/` — the school logos and the scanned pages.
+- `data/uploads/` — the school logos, the scanned pages and the paper
+  library's PDFs.
 
 That folder is **not** committed to git, so nothing about a real school or
 teacher ends up on GitHub. To back your work up, copy the whole `data/` folder.
@@ -277,13 +336,14 @@ server/
   db.js             database connection and schema
   openai.js         the one OpenAI request, shared by marking and reports
   evaluate.js       marking the scans with OpenAI
+  papers.js         the question paper library: labels, suggestions, pack import
   results.js        section results, grades and the potential identifier
   reports.js        writing the teacher, management and school reports
   generator.js      writing question papers with Gemini
   excel.js          the import template, and reading a filled-in one back
   uploads.js        file upload rules (types and size limits)
   seed.js           optional sample data
-  routes/           schools, teachers, tests, assessments, reports, dashboard, generator
+  routes/           schools, teachers, tests, assessments, papers, reports, dashboard, generator
 public/
   index.html        the single page
   css/styles.css

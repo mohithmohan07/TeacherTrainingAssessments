@@ -50,10 +50,12 @@ export const teachersApi = {
   import: (formData) => api.postForm('/api/teachers/import', formData),
 
   // The assessments board: one row per teacher, with that teacher's current
-  // sitting in the test and their results so far folded in.
-  roster: (schoolId, testId) => api.get(`/api/teachers/roster?${new URLSearchParams({ school_id: schoolId, ...(testId ? { test_id: testId } : {}) })}`),
+  // sitting in the test (for the full paper, or one section) and their
+  // results so far folded in.
+  roster: (schoolId, testId, section) =>
+    api.get(`/api/teachers/roster?${new URLSearchParams({ school_id: schoolId, ...(testId ? { test_id: testId } : {}), ...(section ? { section } : {}) })}`),
   uploadScans: (id, formData) => api.postForm(`/api/teachers/${id}/scans`, formData),
-  currentAssessment: (id, testId) => api.postJson(`/api/teachers/${id}/assessment`, { test_id: testId }),
+  currentAssessment: (id, testId, section) => api.postJson(`/api/teachers/${id}/assessment`, { test_id: testId, section: section || '' }),
   profile: (id) => api.get(`/api/teachers/${id}/profile`),
 };
 
@@ -78,9 +80,21 @@ export const assessmentsApi = {
   update: (id, body) => api.putJson(`/api/assessments/${id}`, body),
   evaluate: (id) => api.postJson(`/api/assessments/${id}/evaluate`, {}),
   saveMarks: (id, marks) => api.putJson(`/api/assessments/${id}/marks`, { marks }),
+  swap: (id) => api.postJson(`/api/assessments/${id}/swap`, {}),
+  setPapers: (id, paperIds) => api.putJson(`/api/assessments/${id}/papers`, { paper_ids: paperIds }),
   remove: (id) => api.del(`/api/assessments/${id}`),
   uploadFiles: (id, formData) => api.postForm(`/api/assessments/${id}/files`, formData),
   removeFile: (id, fileId) => api.del(`/api/assessments/${id}/files/${fileId}`),
+};
+
+// The question paper library.
+export const papersApi = {
+  list: () => api.get('/api/papers'),
+  choices: (teacherId, section) => api.get(`/api/papers/choices?${new URLSearchParams({ teacher_id: teacherId, ...(section ? { section } : {}) })}`),
+  add: (formData) => api.postForm('/api/papers', formData),
+  update: (id, body) => api.putJson(`/api/papers/${id}`, body),
+  remove: (id) => api.del(`/api/papers/${id}`),
+  importPack: (formData) => api.postForm('/api/papers/import', formData),
 };
 
 export const generatorApi = {

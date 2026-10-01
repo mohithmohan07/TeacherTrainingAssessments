@@ -36,6 +36,18 @@ const markScanned = db.prepare(
     WHERE id = ?`
 );
 
+// Pages filed the wrong way round: the question paper becomes the response
+// and the response the question paper. Each keeps its page order.
+const flipKinds = db.prepare(
+  `UPDATE assessment_files
+      SET kind = CASE kind WHEN 'question_paper' THEN 'response' ELSE 'question_paper' END
+    WHERE assessment_id = ?`
+);
+
+export function swapScanKinds(assessmentId) {
+  flipKinds.run(assessmentId);
+}
+
 export const attachScans = db.transaction((assessmentId, kind, files) => {
   const startAt = nextPosition.get(assessmentId, kind).max_position + 1;
   files.forEach((file, index) => {

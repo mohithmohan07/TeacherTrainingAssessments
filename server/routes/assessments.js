@@ -1,9 +1,10 @@
 import express from 'express';
 import db from '../db.js';
 import { uploadScans } from '../uploads.js';
-import { SCAN_KINDS, attachScans, discardUploads, removeStoredFile } from '../scans.js';
+import { SCAN_KINDS, attachScans, discardUploads, removeStoredFile, swapScanKinds } from '../scans.js';
 import { normalise, startEvaluation } from '../evaluate.js';
 import { sittingSections, testFor, unansweredSections } from '../results.js';
+import { PAPER_SECTIONS, presentPaper, setSittingPapers, sittingPapers } from '../papers.js';
 
 const router = express.Router();
 
@@ -36,6 +37,7 @@ function withFiles(assessment) {
     unanswered_sections: aiResult ? unansweredSections(aiResult) : [],
     question_paper_files: files.filter((f) => f.kind === 'question_paper'),
     response_files: files.filter((f) => f.kind === 'response'),
+    papers: sittingPapers(assessment.id).map(presentPaper),
   };
 }
 
@@ -51,6 +53,8 @@ function assessmentFields(body) {
   const rawMax = String(body.max_score ?? '').trim();
   return {
     title: String(body.title ?? '').trim(),
+    // 'A', 'B' or 'C' for a sitting of one section; null for the full paper.
+    section: PAPER_SECTIONS.includes(body.section) ? body.section : null,
     assessment_date: String(body.assessment_date ?? '').trim() || null,
     subject: String(body.subject ?? '').trim(),
     status: STATUSES.has(body.status) ? body.status : 'draft',
@@ -83,7 +87,9 @@ router.get('/', (req, res) => {
     .prepare(
       `SELECT a.*, t.name AS teacher_name, t.grade AS teacher_grade, s.name AS school_name,
               (SELECT COUNT(*) FROM assessment_files f WHERE f.assessment_id = a.id AND f.kind = 'question_paper') AS question_paper_count,
-              (SELECT COUNT(*) FROM assessment_files f WHERE f.assessment_id = a.id AND f.kind = 'response')       AS response_count
+              (SELECT COUNT(*) FROM assessment_files f WHERE f.assessment_id = a.id AND f.kind = 'response')       AS response_count,
+              (SELECT group_concat(p.title, ' · ') FROM assessment_papers ap JOIN papers p ON p.id = ap.paper_id
+                WHERE ap.assessment_id = a.id) AS paper_titles
          FROM assessments a
          JOIN teachers t ON t.id = a.teacher_id
          JOIN schools  s ON s.id = a.school_id
@@ -114,8 +120,8 @@ router.post('/', (req, res) => {
   const test = testFor(teacher.school_id, req.body.test_id);
   const info = db
     .prepare(
-      `INSERT INTO assessments (school_id, teacher_id, test_id, title, assessment_date, subject, status, notes, score, max_score)
-       VALUES (@school_id, @teacher_id, @test_id, @title, @assessment_date, @subject, @status, @notes, @score, @max_score)`
+      `INSERT INTO assessments (school_id, teacher_id, test_id, section, title, assessment_date, subject, status, notes, score, max_score)
+       VALUES (@school_id, @teacher_id, @test_id, @section, @title, @assessment_date, @subject, @status, @notes, @score, @max_score)`
     )
     .run({ ...fields, school_id: teacher.school_id, teacher_id: teacher.id, test_id: test.id });
 
@@ -131,7 +137,7 @@ router.put('/:id', (req, res) => {
 
   db.prepare(
     `UPDATE assessments
-        SET title = @title, assessment_date = @assessment_date, subject = @subject, status = @status,
+        SET title = @title, section = @section, assessment_date = @assessment_date, subject = @subject, status = @status,
             notes = @notes, score = @score, max_score = @max_score, updated_at = datetime('now')
       WHERE id = @id`
   ).run({ ...fields, id: assessment.id });
@@ -213,6 +219,40 @@ router.post('/:id/files', uploadScans.array('files', 40), (req, res) => {
   attachScans(assessment.id, kind, req.files);
 
   res.status(201).json(withFiles(selectAssessmentRow.get(assessment.id)));
+});
+
+// The papers from the library confirmed as this sitting's question paper, in
+// order; an empty list clears them. Choosing a paper never evaluates.
+router.put('/:id/papers', (req, res) => {
+  const assessment = selectAssessmentRow.get(req.params.id);
+  if (!assessment) return res.status(404).json({ error: 'Assessment not found.' });
+  if (assessment.ai_status === 'running') {
+    return res.status(400).json({ error: 'OpenAI is marking this sitting. Wait for it to finish, then change the paper.' });
+  }
+  const ids = (Array.isArray(req.body.paper_ids) ? req.body.paper_ids : []).map(Number);
+  const known = ids.filter((id) => db.prepare('SELECT 1 FROM papers WHERE id = ?').get(id));
+  if (known.length !== ids.length) return res.status(400).json({ error: 'That paper is no longer in the library. Reload the page and choose again.' });
+
+  setSittingPapers(assessment.id, known);
+  db.prepare("UPDATE assessments SET updated_at = datetime('now') WHERE id = ?").run(assessment.id);
+  res.json(withFiles(selectAssessmentRow.get(assessment.id)));
+});
+
+// Swap the question paper and the response, for pages filed the wrong way
+// round. Pressing it again swaps them back. Marks already given stay until
+// Evaluate is pressed again.
+router.post('/:id/swap', (req, res) => {
+  const assessment = selectAssessmentRow.get(req.params.id);
+  if (!assessment) return res.status(404).json({ error: 'Assessment not found.' });
+  if (assessment.ai_status === 'running') {
+    return res.status(400).json({ error: 'OpenAI is marking these pages. Wait for it to finish, then swap them.' });
+  }
+  if (!assessment.question_paper_count && !assessment.response_count) {
+    return res.status(400).json({ error: 'There are no pages to swap yet.' });
+  }
+
+  swapScanKinds(assessment.id);
+  res.json(withFiles(selectAssessmentRow.get(assessment.id)));
 });
 
 router.delete('/:id/files/:fileId', (req, res) => {
