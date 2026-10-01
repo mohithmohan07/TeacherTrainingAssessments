@@ -10,7 +10,7 @@ export function h(tag, attrs = {}, ...children) {
     else if (key === 'html') el.innerHTML = value;
     else el.setAttribute(key, value === true ? '' : value);
   }
-  for (const child of children.flat()) {
+  for (const child of children.flat(Infinity)) {
     if (child === null || child === undefined || child === false) continue;
     el.append(child instanceof Node ? child : document.createTextNode(String(child)));
   }
@@ -19,7 +19,7 @@ export function h(tag, attrs = {}, ...children) {
 
 // replaceChildren() turns a null child into the text "null", so filter first.
 export function mount(parent, ...children) {
-  parent.replaceChildren(...children.flat().filter((child) => child !== null && child !== undefined && child !== false));
+  parent.replaceChildren(...children.flat(Infinity).filter((child) => child !== null && child !== undefined && child !== false));
   return parent;
 }
 
@@ -163,8 +163,43 @@ export function percentChip(section) {
   return sectionChip({ ...section, name: section.percent === null || section.percent === undefined ? '—' : `${section.percent}%`, percent: null });
 }
 
-// The potential identifier from the management report.
+// The potential identifier from the management report. Reports written
+// before headlines were in title case still show them in title case.
 export function potentialBadge(potential) {
   if (!potential) return null;
-  return h('span', { class: `potential potential-${potential.level}` }, potential.headline);
+  return h('span', { class: `potential potential-${potential.level}` }, titleCase(potential.headline));
+}
+
+// Short words that stay lower case inside a title.
+const MINOR_WORDS = new Set(['a', 'an', 'and', 'as', 'at', 'but', 'by', 'for', 'in', 'nor', 'of', 'on', 'or', 'per', 'the', 'to', 'via', 'with']);
+
+// "Priority for support" → "Priority for Support". It only ever raises a
+// first letter, so names such as "UpSchool" or "PE" are left as they are.
+export function titleCase(text) {
+  const words = String(text ?? '').split(' ');
+  return words
+    .map((word, i) =>
+      i > 0 && i < words.length - 1 && MINOR_WORDS.has(word.toLowerCase())
+        ? word
+        : word.replace(/^([^\p{L}]*)(\p{Ll})/u, (_, lead, letter) => lead + letter.toUpperCase())
+    )
+    .join(' ');
+}
+
+// UpSchool runs the programme, so its logo is on every report and paper.
+export function upschoolLogo(className = 'upschool-logo') {
+  return h('img', { class: className, src: '/img/upschool-logo.png', alt: 'UpSchool' });
+}
+
+// Printed pages have no page margins (see @page in styles.css): that is what
+// stops the browser printing the page address and date at the top and bottom
+// of every page. This frame puts the space back on every printed page, and
+// repeats `head` at the top of each one. On screen it is just its contents.
+export function printFrame(head, ...body) {
+  return h(
+    'div',
+    { class: 'print-frame' },
+    h('div', { class: 'print-frame-head' }, h('div', { class: 'print-frame-cell' }, head)),
+    h('div', { class: 'print-frame-body' }, h('div', { class: 'print-frame-cell' }, body))
+  );
 }

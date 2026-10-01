@@ -1,6 +1,6 @@
 // A teacher's profile: who they are, and what every test they have sat shows,
 // section by section, with how each section has moved from test to test.
-import { h, mount, formatDate, statusBadge, percentChip, potentialBadge, emptyState, logoFor } from '../ui.js';
+import { h, mount, formatDate, statusBadge, percentChip, potentialBadge, emptyState, logoFor, titleCase } from '../ui.js';
 import { teachersApi } from '../api.js';
 
 export async function renderTeacherProfile(root, id) {
@@ -69,7 +69,7 @@ function progressCard(tests, grades) {
     h(
       'div',
       { class: 'table-wrap' },
-      h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Test'), keys.map((key) => h('th', {}, key ? `Section ${key}` : 'Paper')), h('th', {}, 'Potential'))), h('tbody', {}, rows))
+      h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Test'), keys.map((key) => h('th', {}, key ? `Section ${key}` : 'Paper')), h('th', {}, 'Potential Identifier'))), h('tbody', {}, rows))
     )
   );
 }
@@ -97,7 +97,7 @@ function testCard(teacher, entry) {
       'div',
       { class: 'scan-group-head' },
       h('h2', { style: 'margin:0' }, test.name),
-      sections.length ? h('div', { class: 'page-actions' }, reportLink('teacher', 'Teacher report'), reportLink('management', 'Management report')) : null
+      sections.length ? h('div', { class: 'page-actions' }, reportLink('teacher', 'Teacher Report'), reportLink('management', 'Management Report')) : null
     ),
     sections.length
       ? h(
@@ -106,7 +106,7 @@ function testCard(teacher, entry) {
           h(
             'table',
             {},
-            h('thead', {}, h('tr', {}, h('th', {}, 'Section'), h('th', {}, 'Date sat'), h('th', { class: 'right' }, 'Marks'), h('th', {}, 'Result'))),
+            h('thead', {}, h('tr', {}, h('th', {}, 'Section'), h('th', {}, 'Date Sat'), h('th', { class: 'right' }, 'Marks'), h('th', {}, 'Result'))),
             h(
               'tbody',
               {},
@@ -114,7 +114,7 @@ function testCard(teacher, entry) {
                 h(
                   'tr',
                   { style: 'cursor:pointer', onclick: () => window.navigate(`/assessments/${s.assessment_id}`) },
-                  h('td', {}, h('strong', {}, s.name), s.title ? h('div', { class: 'hint' }, s.title) : null),
+                  h('td', {}, h('strong', {}, titleCase(s.name)), s.title ? h('div', { class: 'hint' }, s.title) : null),
                   h('td', {}, formatDate(s.date) || '—'),
                   h('td', { class: 'right' }, `${s.awarded} / ${s.max}`),
                   h('td', {}, percentChip(s), s.grade_label ? h('span', { class: 'hint' }, ` ${s.grade_label}`) : null)
@@ -124,12 +124,12 @@ function testCard(teacher, entry) {
           )
         )
       : h('p', { class: 'hint' }, 'Nothing has been evaluated in this test yet.'),
-    potential ? h('p', {}, h('strong', {}, 'Potential: '), potential.headline, '. ', h('span', { class: 'hint' }, `${potential.meaning} ${potential.evidence}`)) : null,
+    potential ? h('p', {}, h('strong', {}, 'Potential Identifier: '), potentialBadge(potential), ' ', h('span', { class: 'hint' }, `${potential.meaning} ${potential.evidence}`)) : null,
     report?.teacher?.practice_ideas?.length
-      ? h('div', {}, h('h3', { class: 'subhead' }, 'Practice ideas from the teacher’s report'), h('ul', {}, report.teacher.practice_ideas.map((idea) => h('li', {}, idea))))
+      ? h('div', {}, h('h3', { class: 'subhead' }, 'Practice Ideas from the Teacher’s Report'), h('ul', {}, report.teacher.practice_ideas.map((idea) => h('li', {}, idea))))
       : null,
     report?.management?.support?.length
-      ? h('div', {}, h('h3', { class: 'subhead' }, 'Support recommended to management'), h('ul', {}, report.management.support.map((item) => h('li', {}, item))))
+      ? h('div', {}, h('h3', { class: 'subhead' }, 'Support Recommended to Management'), h('ul', {}, report.management.support.map((item) => h('li', {}, item))))
       : null,
     reportNote ? h('p', { class: 'hint' }, reportNote) : null,
     h(

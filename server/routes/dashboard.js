@@ -21,11 +21,11 @@ const selectCurrentSittings = db.prepare(`
 `);
 
 const POTENTIAL_LEVELS = [
-  { level: 'mentor', headline: 'Mentor potential' },
-  { level: 'strong', headline: 'Strong performer' },
-  { level: 'emerging', headline: 'Strength to build on' },
-  { level: 'developing', headline: 'Developing steadily' },
-  { level: 'support', headline: 'Priority for support' },
+  { level: 'mentor', headline: 'Mentor Potential' },
+  { level: 'strong', headline: 'Strong Performer' },
+  { level: 'emerging', headline: 'Strength to Build On' },
+  { level: 'developing', headline: 'Developing Steadily' },
+  { level: 'support', headline: 'Priority for Support' },
 ];
 
 // One school's picture in one test: what is waiting to be done, and how its
