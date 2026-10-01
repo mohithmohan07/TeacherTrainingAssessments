@@ -154,7 +154,7 @@ function resultsPanel(data, grades) {
       ? h(
           'div',
           { class: 'dash-potential' },
-          h('h4', {}, 'Potential identifier'),
+          h('h4', {}, 'Potential Identifier'),
           potential
             .filter((p) => p.teachers.length)
             .map((p) =>

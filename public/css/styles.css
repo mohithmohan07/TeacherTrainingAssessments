@@ -380,11 +380,14 @@ td.right, th.right { text-align: right; white-space: nowrap; }
 .paper-sheet:lang(ks) { font-family: "Noto Naskh Arabic", "Noto Nastaliq Urdu", "Noto Serif", serif; line-height: 1.9; }
 .paper-sheet[dir="rtl"] .q-parts { padding-left: 0; padding-right: 14px; }
 .paper-sheet[dir="rtl"] .q-answer { border-left: none; border-right: 3px solid var(--ok); }
-.paper-school { display: flex; align-items: center; justify-content: center; gap: 14px; }
-.paper-school img { height: 64px; max-width: 120px; object-fit: contain; }
+/* As on the programme's own papers: the school's logo on the left, UpSchool's
+   on the right, and the school's name between them. */
+.paper-brand { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 14px; margin-bottom: 8px; }
+.paper-brand .school-mark { justify-self: start; height: 60px; max-width: 160px; object-fit: contain; }
+.paper-brand .upschool-logo { justify-self: end; height: 32px; }
 
 .paper-head { text-align: center; padding-bottom: 10px; margin-bottom: 14px; }
-.paper-school { font-weight: 700; font-size: 17px; letter-spacing: 0.3px; text-transform: uppercase; margin-bottom: 4px; }
+.paper-school { font-weight: 700; font-size: 17px; letter-spacing: 0.3px; text-transform: uppercase; }
 .paper-head h2 { margin: 4px 0 6px; font-size: 18px; }
 .paper-meta { display: flex; justify-content: space-between; margin: 0; font-weight: 600; font-size: 14px; }
 .paper-section { margin-top: 18px; }
@@ -404,15 +407,16 @@ td.right, th.right { text-align: right; white-space: nowrap; }
 
 @media print {
   .sidebar, .no-print, .toasts { display: none !important; }
-  .app { display: block; }
+  .app { display: block; min-height: 0; }
   .view { padding: 0; max-width: none; }
   body { background: #fff; }
-  .paper-sheet { border: none; box-shadow: none; padding: 0; max-width: none; }
+  .paper-sheet { border: none; border-radius: 0; box-shadow: none; padding: 0; max-width: none; }
   .paper-sheet + .paper-sheet { margin-top: 0; break-before: page; }
   .q-answer { background: none; }
 }
 
-@media (max-width: 860px) {
+/* Screens only: a printed A4 page is narrower than this too. */
+@media screen and (max-width: 860px) {
   .app { grid-template-columns: 1fr; }
   .sidebar { flex-direction: row; align-items: center; gap: 16px; padding: 12px 16px; }
   .nav { flex-direction: row; }
@@ -482,25 +486,59 @@ td.right, th.right { text-align: right; white-space: nowrap; }
 .sittings ul { margin: 8px 0 0; padding-left: 18px; }
 .sittings li { margin-bottom: 4px; }
 
+/* A report, on screen and printed. Type runs from the serif report title,
+   through serif section headings, to sans sub-headings and body text. */
 .report-sheet {
-  background: #fff; color: #16232e;
+  --serif: "Noto Serif", Georgia, "Times New Roman", serif;
+  background: #fff; color: #1b2733;
   border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
-  padding: 32px 40px; max-width: 900px; margin-top: 12px;
+  padding: 28px 44px 20px; max-width: 900px; margin-top: 12px;
+  font-size: 14.5px; line-height: 1.6;
 }
-.report-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; padding-bottom: 14px; margin-bottom: 18px; border-bottom: 2px solid var(--accent); }
-.report-school { display: flex; align-items: center; gap: 12px; }
-.report-school strong { font-size: 17px; }
-.report-meta { text-align: right; font-size: 14px; }
-.report-meta div:first-child { font-weight: 650; font-size: 16px; }
-.report-sheet h3 { font-size: 15.5px; margin: 22px 0 8px; color: var(--accent); }
-.report-sheet h4 { font-size: 13.5px; margin: 8px 0 4px; }
-.report-sheet ul, .report-sheet ol { margin: 0; padding-left: 20px; }
-.report-sheet li { margin-bottom: 4px; }
-.report-lead { font-size: 15.5px; }
-.report-key { margin-top: 6px; }
+
+/* The school's letterhead: at the top of every printed page. */
+.report-letterhead { display: flex; align-items: center; gap: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--accent); }
+.report-letterhead .school-logo { width: auto; height: 54px; max-width: 160px; padding: 0; border: none; border-radius: 0; }
+.report-letterhead .logo-placeholder { width: 54px; height: 54px; flex: none; }
+.report-programme { font-family: var(--serif); font-size: 21px; font-weight: 700; line-height: 1.25; color: var(--accent); }
+.report-school-name { margin-top: 2px; font-size: 13.5px; color: var(--muted); }
+
+/* The report's title, and who and what it is about. */
+.report-title-block { margin: 26px 0 24px; }
+.report-audience { margin: 0 0 4px; font-size: 13px; font-weight: 650; letter-spacing: 0.3px; color: #8a6116; }
+.report-title { margin: 0; font-family: var(--serif); font-size: 29px; font-weight: 700; line-height: 1.2; letter-spacing: -0.2px; color: #13212e; }
+.report-details { display: flex; flex-wrap: wrap; gap: 10px 34px; margin: 16px 0 0; padding: 12px 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+.report-details dt { font-size: 12px; font-weight: 600; color: var(--muted); }
+.report-details dd { margin: 0; font-size: 14.5px; font-weight: 650; }
+
+.report-sheet h2 {
+  margin: 30px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+  font-family: var(--serif); font-size: 19px; font-weight: 700; line-height: 1.3; color: var(--accent);
+  break-after: avoid; break-inside: avoid;
+}
+.report-section-head small { display: block; margin-top: 2px; font-family: var(--font); font-size: 13px; font-weight: 500; color: var(--muted); }
+.report-sheet h3 { margin: 16px 0 6px; font-size: 14.5px; font-weight: 700; line-height: 1.35; color: #13212e; break-after: avoid; break-inside: avoid; }
+.report-sheet h3.report-section-head { font-family: var(--serif); font-size: 16px; color: var(--accent); }
+.report-sheet p { margin: 0 0 10px; }
+.report-sheet ul, .report-sheet ol { margin: 0 0 8px; padding-left: 20px; }
+.report-sheet li { margin-bottom: 5px; }
+.report-sheet li::marker { color: var(--accent); }
+.report-lead { font-size: 15.5px; line-height: 1.7; color: #22303d; }
+.report-sheet .report-closing { margin-top: 26px; padding: 12px 16px; border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 8px 8px 0; }
+.report-note { font-size: 13.5px; color: var(--muted); }
+.report-sheet .report-key { margin: 10px 0 0; font-size: 12.5px; color: var(--muted); }
+.report-key strong { font-weight: 650; color: #3c4b5a; }
 .report-section { break-inside: avoid; }
-.report-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px 24px; }
+.report-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 4px 30px; }
 .report-table th, .report-table td { padding: 8px 10px; }
+.report-table th { text-transform: none; letter-spacing: 0; font-size: 12.5px; font-weight: 650; color: #3c4b5a; background: var(--surface-2); }
+.report-table tr { break-inside: avoid; }
+.report-table td.nowrap { white-space: nowrap; }
+
+/* UpSchool's credit: at the foot of every printed page. */
+.report-footer { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 32px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+.upschool-logo { display: block; height: 21px; width: auto; }
+
 /* ---------- dashboard ---------- */
 
 .dash-head { display: flex; justify-content: space-between; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 16px; }
@@ -536,20 +574,49 @@ td.right, th.right { text-align: right; white-space: nowrap; }
 .dash-potential summary::-webkit-details-marker { display: none; }
 .dash-potential details .dash-names { margin: 4px 0 8px 4px; }
 
-.potential-box { margin-top: 18px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); break-inside: avoid; }
+.potential-box { margin-top: 24px; padding: 16px 18px; border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: var(--radius); background: var(--surface-2); break-inside: avoid; }
 .potential-box p { margin: 8px 0 0; }
-.potential-head { display: flex; align-items: center; gap: 10px; }
-.insight + .insight { margin-top: 10px; }
+.potential-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; }
+.report-sheet .potential-head h2 { margin: 0; padding: 0; border: none; font-size: 17px; }
+.potential-areas { font-size: 13.5px; }
+.insight { break-inside: avoid; }
+.insight + .insight { margin-top: 12px; }
 .insight p { margin: 2px 0; }
 
+/* Reports and papers print on pages with no margins, which is what keeps the
+   browser from printing the page address, date and title on them. Their
+   .print-frame puts the margins back on every page instead (see printFrame in
+   ui.js): a header group repeated at the top of each page, and padding at the
+   foot of the body that is repeated on every page it runs over, which keeps
+   text clear of the report footer. */
+@page framed { margin: 0; }
+
 @media print {
-  .report-sheet { border: none; box-shadow: none; padding: 0; max-width: none; margin: 0; }
-  .grade-chip, .potential, .potential-box { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .report-sheet, .paper-sheet { page: framed; }
+  .print-frame { display: table; width: 100%; border-collapse: collapse; }
+  /* Chromium repeats a header group on each page only when it cannot itself
+     break across pages. */
+  .print-frame-head { display: table-header-group; break-inside: avoid; }
+  .print-frame-body { display: table-row-group; }
+  .print-frame-cell { display: table-cell; padding: 0 16mm; }
+  .print-frame-head > .print-frame-cell { padding-top: 12mm; }
+  .print-frame-body > .print-frame-cell { padding-bottom: 14mm; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+
+  /* Print type a little smaller, as for any printed report: about 10pt. */
+  .report-sheet { border: none; border-radius: 0; box-shadow: none; padding: 0; max-width: none; margin: 0; font-size: 13.5px; line-height: 1.55; }
+  .report-sheet .print-frame-head > .print-frame-cell { padding-bottom: 6mm; }
+  .report-sheet .print-frame-body > .print-frame-cell { padding-bottom: 24mm; }
+  .report-title-block { margin: 2mm 0 20px; }
+  .report-sheet h2 { margin-top: 24px; }
+  .report-lead { font-size: 14.5px; }
+  .report-footer { position: fixed; left: 16mm; right: 16mm; bottom: 9mm; margin: 0; background: #fff; }
+  .report-sheet a { color: inherit; text-decoration: none; }
+  .grade-chip, .potential, .potential-box, .report-details, .report-closing, .report-table th { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   tbody tr:hover { background: none; }
 }
 
-@media (max-width: 860px) {
-  .report-sheet { padding: 20px 16px; }
-  .report-head { flex-direction: column; }
-  .report-meta { text-align: left; }
+@media screen and (max-width: 860px) {
+  .report-sheet { padding: 20px 16px 16px; }
+  .report-title { font-size: 24px; }
+  .report-details { gap: 8px 22px; }
 }

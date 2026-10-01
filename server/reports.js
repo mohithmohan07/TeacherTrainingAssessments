@@ -215,9 +215,10 @@ function matchSections(items, sections) {
 
 const strings = (list) => (Array.isArray(list) ? list.map((item) => String(item).trim()).filter(Boolean) : []);
 
+// evaluated_at is kept so that isStale() can be checked against a snapshot.
 function snapshot(sections) {
-  return sections.map(({ key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id }) => ({
-    key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id,
+  return sections.map(({ key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at }) => ({
+    key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at,
   }));
 }
 

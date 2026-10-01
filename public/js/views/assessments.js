@@ -442,7 +442,7 @@ function schoolReportCard(state) {
       h(
         'div',
         {},
-        h('h2', { style: 'margin:0' }, 'Report on all teachers'),
+        h('h2', { style: 'margin:0' }, 'Report on All Teachers'),
         h(
           'p',
           { class: 'hint', style: 'margin:4px 0 0' },
@@ -460,7 +460,7 @@ function schoolReportCard(state) {
           onclick: assessed ? null : (event) => event.preventDefault(),
           style: assessed ? null : 'opacity:.55;cursor:not-allowed',
         },
-        'Management report'
+        'Management Report'
       )
     )
   );

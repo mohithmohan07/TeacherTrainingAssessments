@@ -169,22 +169,27 @@ export function potentialFor(sections) {
   const support = graded.filter((s) => s.grade === 'D');
   const exemplary = graded.filter((s) => s.grade === 'A');
   const names = (list) => list.map((s) => s.name).join(', ');
+  // "Section A", or "Sections A and B" when there are two.
+  const sectionList = (list) =>
+    list.length > 1 && list.every((s) => /^[A-Z]$/.test(s.key))
+      ? `Sections ${list.slice(0, -1).map((s) => s.key).join(', ')} and ${list.at(-1).key}`
+      : names(list);
 
   let level;
   let headline;
   let meaning;
   if (exemplary.length === graded.length) {
     level = 'mentor';
-    headline = 'Mentor potential';
+    headline = 'Mentor Potential';
     meaning = 'Exemplary in every section sat. A candidate to guide colleagues and lead training.';
   } else if (strengths.length === graded.length) {
     level = 'strong';
-    headline = 'Strong performer';
+    headline = 'Strong Performer';
     meaning = 'Proficient or better in every section sat. Ready for more responsibility in these areas.';
   } else if (strengths.length) {
     const developing = graded.filter((s) => s.grade === 'C');
     level = 'emerging';
-    headline = `Strength in ${names(strengths)}`;
+    headline = `Strength in ${sectionList(strengths)}`;
     meaning = [
       'A real strength to build on.',
       developing.length ? `Still developing in ${names(developing)}.` : '',
@@ -192,11 +197,11 @@ export function potentialFor(sections) {
     ].filter(Boolean).join(' ');
   } else if (!support.length) {
     level = 'developing';
-    headline = 'Developing steadily';
+    headline = 'Developing Steadily';
     meaning = 'Developing in every section sat. Regular training and practice should lift these to proficient.';
   } else {
     level = 'support';
-    headline = 'Priority for support';
+    headline = 'Priority for Support';
     meaning = `Needs focused support in ${names(support)} before other responsibilities.`;
   }
 

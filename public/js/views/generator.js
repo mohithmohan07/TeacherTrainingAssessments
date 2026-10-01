@@ -1,4 +1,4 @@
-import { h, mount, toast, confirmAction, formatDate, field, input, textarea, select, emptyState } from '../ui.js';
+import { h, mount, toast, confirmAction, formatDate, field, input, textarea, select, emptyState, upschoolLogo, printFrame } from '../ui.js';
 import { generatorApi, schoolsApi } from '../api.js';
 
 const BOARDS = ['CBSE', 'ICSE', 'Karnataka State', 'Karnataka Pre-University'];
@@ -218,30 +218,32 @@ export async function renderGeneratedPaper(root, id) {
     h(
       'article',
       { class: 'paper-sheet', lang: paper.lang, dir: paper.rtl ? 'rtl' : null },
-      h(
-        'header',
-        { class: 'paper-head' },
-        paper.school_name
-          ? h(
-              'div',
-              { class: 'paper-school' },
-              paper.school_logo ? h('img', { src: `/uploads/${paper.school_logo}`, alt: '' }) : null,
-              h('span', { lang: 'en', dir: 'ltr' }, paper.school_name)
-            )
-          : null,
-        h('h2', {}, section.title),
+      printFrame(
+        null,
         h(
-          'p',
-          { class: 'paper-meta' },
-          h('span', {}, `${paper.labels.total_marks}: ${section.marks}`),
-          h('span', {}, `${paper.labels.time}: ${paper.labels.one_hour}`)
+          'header',
+          { class: 'paper-head' },
+          h(
+            'div',
+            { class: 'paper-brand' },
+            paper.school_logo ? h('img', { class: 'school-mark', src: `/uploads/${paper.school_logo}`, alt: paper.school_name ?? '' }) : h('span', {}),
+            paper.school_name ? h('div', { class: 'paper-school', lang: 'en', dir: 'ltr' }, paper.school_name) : h('span', {}),
+            upschoolLogo()
+          ),
+          h('h2', {}, section.title),
+          h(
+            'p',
+            { class: 'paper-meta' },
+            h('span', {}, `${paper.labels.total_marks}: ${section.marks}`),
+            h('span', {}, `${paper.labels.time}: ${paper.labels.one_hour}`)
+          )
+        ),
+        h(
+          'section',
+          { class: 'paper-section' },
+          h('h3', {}, `${section.heading} (${section.marks} ${paper.labels.marks})`),
+          section.questions.map((question) => renderQuestion(question, paper, showAnswers))
         )
-      ),
-      h(
-        'section',
-        { class: 'paper-section' },
-        h('h3', {}, `${section.heading} (${section.marks} ${paper.labels.marks})`),
-        section.questions.map((question) => renderQuestion(question, paper, showAnswers))
       )
     );
   const draw = () => mount(sheets, paper.sections.map(renderSheet));
