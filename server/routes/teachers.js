@@ -42,7 +42,15 @@ const rosterSql = `
          (SELECT COUNT(*) FROM assessment_files f
            WHERE f.assessment_id = a.id AND f.kind = 'question_paper') AS question_paper_count,
          (SELECT COUNT(*) FROM assessment_files f
-           WHERE f.assessment_id = a.id AND f.kind = 'response')       AS response_count
+           WHERE f.assessment_id = a.id AND f.kind = 'response')       AS response_count,
+         -- The first page of each, shown small on the row so a question
+         -- paper filed as the answers (or the other way round) is plain to see.
+         (SELECT f.stored_name FROM assessment_files f
+           WHERE f.assessment_id = a.id AND f.kind = 'question_paper'
+           ORDER BY f.position, f.id LIMIT 1) AS question_paper_first,
+         (SELECT f.stored_name FROM assessment_files f
+           WHERE f.assessment_id = a.id AND f.kind = 'response'
+           ORDER BY f.position, f.id LIMIT 1) AS response_first
     FROM teachers t
     JOIN schools s ON s.id = t.school_id
     LEFT JOIN assessments a ON a.id = (

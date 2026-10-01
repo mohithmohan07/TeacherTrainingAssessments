@@ -8,7 +8,7 @@ import {
   scanBothSides, setScanBothSides, HELPER_DOWNLOAD_URL,
 } from '../scanner.js';
 
-const KIND_NAMES = { question_paper: 'question paper', response: 'response' };
+const KIND_NAMES = { question_paper: 'question paper', response: 'answer paper' };
 
 const STATUS_OPTIONS = [
   { value: 'draft', label: 'Draft' },
@@ -174,7 +174,7 @@ function teacherBoardCard(state, reload, redraw) {
             {},
             h('th', {}, 'Teacher'),
             h('th', {}, 'Question paper'),
-            h('th', {}, 'Teacher’s response'),
+            h('th', {}, 'Answer paper'),
             h('th', {}, 'Status'),
             h('th', {}, 'Sections so far'),
             h('th', { class: 'right' }, '')
@@ -195,8 +195,8 @@ function teacherBoardCard(state, reload, redraw) {
                   ? h('div', { class: 'hint' }, [teacher.grade, teacher.subjects].filter(Boolean).join(' · '))
                   : null
               ),
-              h('td', {}, scanCell(state, teacher, 'question_paper', teacher.question_paper_count, reload, redraw)),
-              h('td', {}, scanCell(state, teacher, 'response', teacher.response_count, reload, redraw)),
+              h('td', {}, scanCell(state, teacher, 'question_paper', teacher.question_paper_count, teacher.question_paper_first, reload, redraw)),
+              h('td', {}, scanCell(state, teacher, 'response', teacher.response_count, teacher.response_first, reload, redraw)),
               h(
                 'td',
                 {},
@@ -219,6 +219,7 @@ function teacherBoardCard(state, reload, redraw) {
                 h(
                   'div',
                   { class: 'row-actions' },
+                  swapButton(teacher, reload),
                   evaluateButton(state, teacher),
                   teacher.sections.length ? reportButton(state, teacher) : null
                 )
@@ -232,11 +233,16 @@ function teacherBoardCard(state, reload, redraw) {
 }
 
 // One upload control for one kind of scan, on one teacher's row. With the
-// scanner connected the button scans; otherwise it picks image files.
-function scanCell(state, teacher, kind, count, reload, redraw) {
+// scanner connected the button scans; otherwise it picks image files. The
+// button names what it files the pages as, and once pages are in, the first
+// one shows small beside the count, so pages filed in the wrong column are
+// plain to see.
+function scanCell(state, teacher, kind, count, firstPage, reload, redraw) {
   const label = count ? `${count} page${count === 1 ? '' : 's'}` : 'None yet';
   const scanning = scanner.status === 'ready';
-  const idleLabel = scanning ? (count ? 'Scan more' : 'Scan') : count ? 'Add pages' : 'Upload';
+  const idleLabel = scanning
+    ? (count ? 'Scan more' : `Scan ${KIND_NAMES[kind]}`)
+    : count ? 'Add pages' : `Upload ${KIND_NAMES[kind]}`;
   const fileInput = h('input', { type: 'file', accept: 'image/*', multiple: true, style: 'display:none' });
   const button = h('button', { class: 'btn btn-sm', type: 'button' }, idleLabel);
 
@@ -256,7 +262,7 @@ function scanCell(state, teacher, kind, count, reload, redraw) {
     try {
       await teachersApi.uploadScans(teacher.id, data);
       const pages = `${files.length} page${files.length === 1 ? '' : 's'}`;
-      toast(`${pages} ${scanned ? 'scanned' : 'added'} for ${teacher.name}.`, 'success');
+      toast(`${pages} ${scanned ? 'scanned' : 'added'} as ${teacher.name}’s ${KIND_NAMES[kind]}.`, 'success');
       if (warning) toast(warning, 'error');
       await reload(); // redraws the whole board, so the button state goes with it
     } catch (error) {
@@ -292,7 +298,44 @@ function scanCell(state, teacher, kind, count, reload, redraw) {
     upload(chosen);
   });
 
-  return h('div', { class: 'scan-cell' }, h('span', { class: 'scan-count' }, label), button, fileInput);
+  const preview = count && firstPage
+    ? h('img', {
+        class: 'scan-first',
+        src: `/uploads/${firstPage}`,
+        alt: `First page of ${teacher.name}’s ${KIND_NAMES[kind]}`,
+        title: `First page of the ${KIND_NAMES[kind]}. Click to see it larger.`,
+        loading: 'lazy',
+        onclick: () => openLightbox(`/uploads/${firstPage}`, `${teacher.name} - ${KIND_NAMES[kind]}`),
+      })
+    : null;
+
+  return h('div', { class: 'scan-cell' }, preview, h('span', { class: 'scan-count' }, label), button, fileInput);
+}
+
+// Swaps the question paper and the answer paper on a row, for pages that went
+// into the wrong column. Offered until the sitting is evaluated; after that,
+// the evaluation screen has the same button.
+function swapButton(teacher, reload) {
+  const hasPages = teacher.question_paper_count > 0 || teacher.response_count > 0;
+  if (!teacher.assessment_id || !hasPages || teacher.assessment_status === 'evaluated' || teacher.ai_status === 'running') return null;
+
+  const button = h(
+    'button',
+    { class: 'btn btn-sm', type: 'button', title: 'Pages in the wrong column? Swap the question paper and the answer paper.' },
+    'Swap'
+  );
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    try {
+      await assessmentsApi.swap(teacher.assessment_id);
+      toast(`Swapped ${teacher.name}’s question paper and answer paper. Press Swap again to undo.`, 'success');
+      await reload();
+    } catch (error) {
+      toast(error.message, 'error');
+      button.disabled = false;
+    }
+  });
+  return button;
 }
 
 // The strip above the board that connects the Scan buttons to the scanner
@@ -622,10 +665,30 @@ export async function renderAssessmentDetail(root, id) {
 }
 
 function scansCard(assessment, refresh) {
+  const hasPages = assessment.question_paper_files.length > 0 || assessment.response_files.length > 0;
+  const swap = hasPages && assessment.ai_status !== 'running'
+    ? h('button', { class: 'btn btn-sm', type: 'button' }, 'Swap question paper and answer paper')
+    : null;
+  swap?.addEventListener('click', async () => {
+    swap.disabled = true;
+    try {
+      await assessmentsApi.swap(assessment.id);
+      toast(
+        assessment.ai_result
+          ? 'Swapped. Press Evaluate again to mark them the right way round.'
+          : 'Swapped. Press the button again to undo.',
+        'success'
+      );
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+    await refresh();
+  });
+
   return h(
     'div',
     { class: 'card' },
-    h('h2', {}, 'Scanned pages'),
+    h('div', { class: 'scan-group-head' }, h('h2', { style: 'margin:0' }, 'Scanned pages'), swap),
     h(
       'p',
       { class: 'hint' },
@@ -634,7 +697,7 @@ function scansCard(assessment, refresh) {
         : 'Scan the pages on your laptop, then drop the image files here. You can add several at once.'
     ),
     scanGroup(assessment, 'question_paper', 'Question paper', assessment.question_paper_files, refresh),
-    scanGroup(assessment, 'response', 'Teacher’s response', assessment.response_files, refresh)
+    scanGroup(assessment, 'response', 'Answer paper', assessment.response_files, refresh)
   );
 }
 
@@ -817,6 +880,13 @@ function markingResult(assessment, result, onSaved) {
     { class: 'marking-result' },
     h('div', { class: 'marking-total chips' }, assessment.sections.map((section) => sectionChip(section))),
     h('p', { class: 'hint' }, assessment.sections.map((s) => `${s.name}: ${s.awarded} / ${s.max}${s.grade_label ? ` (${s.grade_label})` : ''}`).join(' · ')),
+    result.pages_swapped
+      ? h(
+          'p',
+          { class: 'notice' },
+          'The question paper and the answer paper were uploaded the wrong way round. OpenAI marked them the right way round, and they have been swapped back above.'
+        )
+      : null,
     assessment.unanswered_sections.length
       ? h(
           'p',

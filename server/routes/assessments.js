@@ -1,7 +1,7 @@
 import express from 'express';
 import db from '../db.js';
 import { uploadScans } from '../uploads.js';
-import { SCAN_KINDS, attachScans, discardUploads, removeStoredFile } from '../scans.js';
+import { SCAN_KINDS, attachScans, discardUploads, removeStoredFile, swapScanKinds } from '../scans.js';
 import { normalise, startEvaluation } from '../evaluate.js';
 import { sittingSections, testFor, unansweredSections } from '../results.js';
 
@@ -213,6 +213,23 @@ router.post('/:id/files', uploadScans.array('files', 40), (req, res) => {
   attachScans(assessment.id, kind, req.files);
 
   res.status(201).json(withFiles(selectAssessmentRow.get(assessment.id)));
+});
+
+// Swap the question paper and the response, for pages filed the wrong way
+// round. Pressing it again swaps them back. Marks already given stay until
+// Evaluate is pressed again.
+router.post('/:id/swap', (req, res) => {
+  const assessment = selectAssessmentRow.get(req.params.id);
+  if (!assessment) return res.status(404).json({ error: 'Assessment not found.' });
+  if (assessment.ai_status === 'running') {
+    return res.status(400).json({ error: 'OpenAI is marking these pages. Wait for it to finish, then swap them.' });
+  }
+  if (!assessment.question_paper_count && !assessment.response_count) {
+    return res.status(400).json({ error: 'There are no pages to swap yet.' });
+  }
+
+  swapScanKinds(assessment.id);
+  res.json(withFiles(selectAssessmentRow.get(assessment.id)));
 });
 
 router.delete('/:id/files/:fileId', (req, res) => {

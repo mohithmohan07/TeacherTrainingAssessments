@@ -9,13 +9,16 @@ import path from 'node:path';
 import db, { UPLOADS_DIR } from './db.js';
 import { OPENAI_MODEL, friendly, openaiConfigured, requestJson } from './openai.js';
 import { queueTeacherReports } from './reports.js';
+import { swapScanKinds } from './scans.js';
 
 // Types the OpenAI API accepts as image input. The scanner helper saves JPEG.
 const OPENAI_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 
 const INSTRUCTIONS = `You are an experienced examiner marking a teacher training assessment.
 
-You are given scanned pages in two groups: first the QUESTION PAPER, then the TEACHER'S RESPONSE (the answers the teacher wrote on separate sheets, usually by hand).
+You are given scanned pages in two groups: first the QUESTION PAPER, then the TEACHER'S RESPONSE (the answers the teacher wrote on separate sheets, usually by hand). Each page is labelled with its group just before it.
+
+Pages are sometimes filed under the wrong group. If every page labelled QUESTION PAPER is plainly the teacher's own handwritten answers, and the pages labelled TEACHER'S RESPONSE are plainly the printed question paper, the two groups were swapped: mark them the right way round and set pages_swapped to true. In every other case, including when you are unsure or the teacher wrote on the question paper itself, use the groups as labelled and set pages_swapped to false.
 
 The paper and the answers may be in English or any Indian language, in any script: for example Hindi, Marathi, Sanskrit, Kannada, Tamil, Telugu, Malayalam, Bengali, Assamese, Urdu or Kashmiri (Urdu and Kashmiri are written right to left). Read everything in the language it is written in, and never take marks off for the language an answer is written in.
 
@@ -33,8 +36,9 @@ Mark the response against the question paper:
 const RESULT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['questions', 'summary', 'strengths', 'areas_to_improve'],
+  required: ['pages_swapped', 'questions', 'summary', 'strengths', 'areas_to_improve'],
   properties: {
+    pages_swapped: { type: 'boolean', description: 'True only when the question paper and the response were plainly filed the wrong way round.' },
     questions: {
       type: 'array',
       items: {
@@ -110,9 +114,9 @@ export function startEvaluation(assessmentId) {
 async function evaluate(assessmentId, paper, response) {
   const content = [
     { type: 'input_text', text: `QUESTION PAPER (${paper.length} page${paper.length === 1 ? '' : 's'}):` },
-    ...(await Promise.all(paper.map(imageInput))),
+    ...(await pageInputs('QUESTION PAPER', paper)),
     { type: 'input_text', text: `TEACHER'S RESPONSE (${response.length} page${response.length === 1 ? '' : 's'}):` },
-    ...(await Promise.all(response.map(imageInput))),
+    ...(await pageInputs("TEACHER'S RESPONSE", response)),
   ];
 
   const marks = await requestJson({
@@ -127,13 +131,7 @@ async function evaluate(assessmentId, paper, response) {
   if (!result.questions.length) {
     throw friendly('OpenAI found no questions to mark. Check the question paper pages are readable and the right way up, then press Evaluate again.');
   }
-  saveResult.run({
-    id: assessmentId,
-    result: JSON.stringify(result),
-    model: OPENAI_MODEL,
-    score: result.total_score,
-    max_score: result.max_score,
-  });
+  saveMarking(assessmentId, result);
 
   // The teacher's reports for this test are rewritten to take in the new
   // sections. Pressing Evaluate is what asked for this, so it is not a
@@ -142,10 +140,31 @@ async function evaluate(assessmentId, paper, response) {
   if (saved.test_id) queueTeacherReports(saved.teacher_id, saved.test_id);
 }
 
+// Every page carries its group and number, so a long run of images cannot
+// blur where the question paper ends and the response begins.
+async function pageInputs(group, files) {
+  const pages = await Promise.all(files.map(imageInput));
+  return pages.flatMap((page, i) => [{ type: 'input_text', text: `${group}, page ${i + 1} of ${files.length}:` }, page]);
+}
+
 async function imageInput(file) {
   const data = await fs.readFile(path.join(UPLOADS_DIR, file.stored_name));
   return { type: 'input_image', image_url: `data:${file.mime_type};base64,${data.toString('base64')}`, detail: 'high' };
 }
+
+// When the marking found the question paper and the response filed the wrong
+// way round, it marked them the right way round, and the stored pages are
+// swapped back to match, so the evaluation screen shows them correctly.
+const saveMarking = db.transaction((assessmentId, result) => {
+  saveResult.run({
+    id: assessmentId,
+    result: JSON.stringify(result),
+    model: OPENAI_MODEL,
+    score: result.total_score,
+    max_score: result.max_score,
+  });
+  if (result.pages_swapped) swapScanKinds(assessmentId);
+});
 
 // Totals are added up here rather than taken from the model, and marks are
 // kept within each question's maximum.
@@ -164,6 +183,7 @@ export function normalise(raw) {
   });
   const sum = (key) => Math.round(questions.reduce((total, q) => total + q[key], 0) * 100) / 100;
   return {
+    pages_swapped: raw.pages_swapped === true,
     questions,
     total_score: sum('marks_awarded'),
     max_score: sum('max_marks'),

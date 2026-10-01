@@ -267,6 +267,10 @@ td.right, th.right { text-align: right; white-space: nowrap; }
 /* One teacher's row on the assessments board: page count, then the button. */
 .scan-cell { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .scan-cell .scan-count { color: var(--muted); font-size: 13px; min-width: 62px; }
+.scan-cell .scan-first {
+  width: 40px; height: 54px; object-fit: cover; object-position: top;
+  border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); cursor: zoom-in;
+}
 .scan-cell .btn[disabled] { opacity: 0.6; cursor: default; }
 
 /* The strip above the board that connects the Scan buttons to the scanner. */

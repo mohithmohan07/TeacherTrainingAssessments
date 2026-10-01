@@ -58,8 +58,11 @@ so you can safely re-upload a file you have added a few rows to.
 ## Uploading scans
 
 Each teacher's row on the **Assessments** page has an Upload button for the
-question paper and one for the response. They either scan straight from the
-scanner or upload image files.
+question paper and one for the answer paper (the teacher's response). They
+either scan straight from the scanner or upload image files. Once pages are in,
+the first one shows small beside the count, so pages in the wrong column are
+easy to spot: **Swap** on the row (or on the assessment's own page) swaps the
+question paper and the answer paper, and pressing it again swaps them back.
 
 ### Scanning straight from the scanner
 
@@ -102,7 +105,10 @@ Sanskrit and so on); the feedback is in English. The assessment page shows the
 marking while it runs, then the total, a score per section, the marks and
 feedback for each part with what the teacher wrote, and strengths and areas to
 improve. The assessment is marked Evaluated; you can correct any question's
-marks in the Marks column, or press **Evaluate again**.
+marks in the Marks column, or press **Evaluate again**. If the question paper
+and the answer paper were plainly uploaded the wrong way round, OpenAI marks
+them the right way round and the app swaps the pages back, saying so above the
+marks.
 
 It needs the `OPENAI_API_KEY` secret on the server (on Fly:
 `fly secrets set OPENAI_API_KEY=... -a teachertrainingassessments`). The model
