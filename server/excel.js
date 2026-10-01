@@ -1,4 +1,5 @@
 import ExcelJS from 'exceljs';
+import JSZip from 'jszip';
 
 export const TEMPLATE_COLUMNS = [
   { header: 'Teacher Name', key: 'name', width: 30 },
@@ -102,12 +103,83 @@ export async function buildTeacherTemplate(school) {
 }
 
 /**
+ * ExcelJS only understands workbooks laid out the way Excel itself saves them.
+ * Files written by other tools (Open XML SDK, some online converters and AI
+ * assistants) are equally valid but use prefixed tags such as <x:sheet> and
+ * absolute part paths such as "/xl/workbook.xml", and ExcelJS then fails with
+ * "Cannot read properties of undefined (reading 'sheets')". Rewriting those two
+ * things gives ExcelJS the same workbook in the form it expects.
+ */
+const DEFAULT_NAMESPACES = new Set([
+  'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
+  'http://schemas.openxmlformats.org/package/2006/relationships',
+  'http://schemas.openxmlformats.org/package/2006/content-types',
+]);
+
+async function normaliseWorkbook(buffer) {
+  const zip = await JSZip.loadAsync(buffer);
+  for (const file of Object.values(zip.files)) {
+    if (file.dir || !/\.(xml|rels)$/i.test(file.name)) continue;
+    const original = await file.async('string');
+    let xml = original.replace(/^\uFEFF/, '');
+
+    // Drop the prefix when the root element is in one of the namespaces Excel
+    // writes unprefixed: <x:worksheet xmlns:x="..."> becomes <worksheet xmlns="...">.
+    // Other parts (such as docProps/core.xml) keep their prefixes, which ExcelJS expects.
+    const root = xml.match(/<(?![?!])([A-Za-z_][\w.-]*):[A-Za-z_][\w.-]*([^>]*)>/);
+    const rootTagIsFirst = root && !/<(?![?!])/.test(xml.slice(0, root.index));
+    const rootNamespace = root?.[2].match(new RegExp(`xmlns:${root[1]}="([^"]*)"`))?.[1];
+    if (rootTagIsFirst && DEFAULT_NAMESPACES.has(rootNamespace) && !/\sxmlns=/.test(root[2])) {
+      const prefix = root[1];
+      xml = xml
+        .replace(new RegExp(`(</?)${prefix}:`, 'g'), '$1')
+        .replace(new RegExp(`xmlns:${prefix}=`, 'g'), 'xmlns=');
+    }
+
+    // Relationship targets: "/xl/worksheets/sheet1.xml" -> relative to the part.
+    if (file.name.endsWith('.rels')) {
+      const baseDir = file.name.replace(/(^|\/)_rels\/[^/]*$/, '$1');
+      xml = xml.replace(/Target="\/([^"]*)"/g, (match, target) => {
+        if (!baseDir) return `Target="${target}"`;
+        return target.startsWith(baseDir) ? `Target="${target.slice(baseDir.length)}"` : match;
+      });
+    }
+
+    if (xml !== original) zip.file(file.name, xml);
+  }
+  return zip.generateAsync({ type: 'nodebuffer' });
+}
+
+async function loadWorkbook(buffer) {
+  const workbook = new ExcelJS.Workbook();
+  try {
+    await workbook.xlsx.load(buffer);
+    if (workbook.worksheets.length) return workbook;
+  } catch {
+    // fall through and try the normalised copy
+  }
+  const retry = new ExcelJS.Workbook();
+  try {
+    await retry.xlsx.load(await normaliseWorkbook(buffer));
+  } catch {
+    throw new Error(
+      'Could not read this file as an Excel workbook. Open it in Excel, choose Save As, pick "Excel Workbook (.xlsx)" and upload the saved copy.'
+    );
+  }
+  return retry;
+}
+
+/**
  * Reads an uploaded workbook and returns { rows, errors }.
  * `rows` are cleaned teacher records; `errors` describe rows that were skipped.
  */
 export async function parseTeacherWorkbook(buffer) {
-  const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.load(buffer);
+  let workbook;
+  try {
+    workbook = await loadWorkbook(buffer);
+  } catch (error) {
+    return { rows: [], errors: [{ row: 0, message: error.message }] };
+  }
 
   const sheet =
     workbook.getWorksheet('Teachers') ??
