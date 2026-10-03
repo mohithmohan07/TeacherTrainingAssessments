@@ -164,6 +164,14 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_assessment_papers_paper ON assessment_papers(paper_id);
+
+  -- Settings kept on the server rather than in the code, as JSON by key.
+  -- 'training' holds the growth paths the training plans are drawn from.
+  CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 `);
 
 // Columns added after the first release. SQLite has no ADD COLUMN IF NOT

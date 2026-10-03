@@ -2,6 +2,8 @@
 // management report on that teacher (one page, two versions), and the
 // management report on all of a school's teachers. Each prints on its own,
 // with the school's logo at the top of every page and UpSchool's at the foot.
+// A teacher's reports end with their answers question by question, and the
+// management reports carry a training plan on pages of its own.
 import { h, mount, toast, formatDate, logoFor, percentChip, potentialBadge, emptyState, titleCase, upschoolLogo, printFrame } from '../ui.js';
 import { reportsApi } from '../api.js';
 
@@ -118,6 +120,10 @@ function sectionHeading(name, sections, tag = 'h2') {
 }
 
 const bullets = (items) => (items?.length ? h('ul', {}, items.map((item) => h('li', {}, item))) : null);
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const listing = (items) => (items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}` : items[0] ?? '');
+const clipText = (text, max) => (text.length > max ? `${text.slice(0, max).trimEnd()}…` : text);
+const marks = (n) => String(Math.round(Number(n) * 100) / 100);
 
 function gradeKey(grades) {
   return h(
@@ -126,6 +132,323 @@ function gradeKey(grades) {
     h('strong', {}, 'Grades: '),
     grades.map((g) => `${g.grade} ${g.label} (${g.min}%+)`).join(' · '),
     '. Each section is graded on its own; there is no overall percentage.'
+  );
+}
+
+/* ---------------------------------------------------- question by question */
+
+// The questions behind each section: from the report when it kept them, so a
+// printed report shows the marks it was written from, otherwise as marked now.
+function withQuestions(sections, live) {
+  return sections.map((s) => (s.questions ? s : { ...s, questions: live.find((l) => l.key === s.key)?.questions ?? [] }));
+}
+
+const markTone = (q) => (q.max_marks > 0 && q.marks_awarded >= q.max_marks ? 'q-full' : q.marks_awarded > 0 ? 'q-part' : 'q-none');
+
+// Every question the teacher was marked on, section by section, as on the
+// marking screen: the marks, the examiner's feedback and what they wrote.
+function questionPages(sections, { forTeacher }) {
+  const shown = sections.filter((s) => s.questions?.length);
+  if (!shown.length) return null;
+  return h(
+    'section',
+    { class: 'report-page' },
+    h('h2', { class: 'report-page-title' }, forTeacher ? 'Your Answers, Question by Question' : 'Question by Question'),
+    h(
+      'p',
+      { class: 'report-note' },
+      forTeacher
+        ? 'The examiner’s note on each of your answers: what earned marks, and what would have earned more.'
+        : 'The examiner’s note on each answer, with the start of what the teacher wrote.'
+    ),
+    shown.map((s) =>
+      h(
+        'div',
+        { class: 'q-section' },
+        h(
+          'div',
+          { class: 'q-section-head' },
+          sectionHeading(s.name, sections, 'h3'),
+          h(
+            'span',
+            { class: 'q-total' },
+            `${marks(s.awarded)} / ${marks(s.max)} marks${s.percent === null ? '' : ` · ${s.percent}%`}`,
+            s.grade ? h('span', { class: `grade-chip grade-${s.grade}` }, `${s.grade} · ${s.grade_label}`) : null
+          )
+        ),
+        h(
+          'div',
+          { class: 'table-wrap' },
+          h(
+            'table',
+            { class: 'report-table q-table' },
+            h('thead', {}, h('tr', {}, h('th', {}, 'Question'), h('th', { class: 'right' }, 'Marks'), h('th', {}, 'Feedback'))),
+            h(
+              'tbody',
+              {},
+              s.questions.map((q) =>
+                h(
+                  'tr',
+                  {},
+                  h('td', { class: 'nowrap' }, h('strong', {}, q.question || '—')),
+                  h('td', { class: 'right' }, h('span', { class: `q-marks ${markTone(q)}` }, `${marks(q.marks_awarded)} / ${marks(q.max_marks)}`)),
+                  h(
+                    'td',
+                    {},
+                    q.feedback || '—',
+                    q.teacher_answer
+                      ? h('div', { class: 'q-wrote' }, h('span', { class: 'q-wrote-label' }, forTeacher ? 'You wrote: ' : 'Teacher wrote: '), h('span', { dir: 'auto' }, clipText(q.teacher_answer, 200)))
+                      : null
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  );
+}
+
+/* ------------------------------------------------------------- training */
+
+const dayRange = (b) => (b.from === b.to ? `Day ${b.from}` : `Days ${b.from}–${b.to}`);
+// Each section keeps its colour across the plan; the shared blocks have their own.
+const toneOf = (b) => (b.kind === 'section' ? `tone-${b.key || 'paper'}` : `tone-${b.kind}`);
+const shortTitle = (b) => (b.kind === 'section' ? b.title.split(':')[0] : b.title);
+const pathLength = (p) => (p.min_days === p.max_days ? plural(p.min_days, 'day') : `${p.min_days} to ${p.max_days} days`);
+const asClause = (text) => String(text ?? '').trim().replace(/\.$/, '').replace(/^\p{Lu}(?!\p{Lu})/u, (c) => c.toLowerCase());
+
+function fact(label, value, note) {
+  return h('div', { class: 'plan-fact' }, h('span', {}, label), h('strong', {}, value), note ? h('small', {}, note) : null);
+}
+
+// What the report says about training when the growth paths are missing or
+// have changed since it was written. Screen only.
+function trainingNotice(state, written, rebuild) {
+  if (!state.set) {
+    return h('div', { class: 'notice no-print' }, 'To recommend training in this report, add UpSchool’s growth paths on the ', h('a', { href: '#/training' }, 'Training paths'), ' page, then rebuild it.');
+  }
+  if (!written) return null;
+  if (!written.training) return h('div', { class: 'notice no-print' }, 'This report was written before the growth paths were added, so it has no training plan. ', rebuild);
+  if (written.training.version !== state.version) return h('div', { class: 'notice no-print' }, 'The growth paths have changed since this report was written. Rebuild it to bring the training plan up to date. ', rebuild);
+  return null;
+}
+
+// "Need for Support" in the management report on one teacher: the training
+// the plan recommends, then any other support.
+function needForSupport(plan, support) {
+  const callout = plan
+    ? h(
+        'div',
+        { class: 'training-callout' },
+        h(
+          'div',
+          { class: 'training-callout-head' },
+          h('span', { class: 'training-callout-label' }, 'Recommended Training'),
+          h('strong', {}, plan.path ? plan.path.name : 'No Growth Path Needed'),
+          plan.path ? h('span', { class: 'training-callout-days' }, plural(plan.days, 'day')) : null
+        ),
+        h('p', {}, plan.reason, plan.partial ? h('span', { class: 'hint' }, ` ${plan.partial}`) : null),
+        plan.path ? h('p', { class: 'report-note' }, 'The day-by-day plan of action follows in the Training Plan.') : plan.continuity ? h('p', {}, plan.continuity) : null
+      )
+    : null;
+  if (!callout && !support.length) return null;
+  return h(
+    'section',
+    { class: 'report-section' },
+    h('h2', {}, 'Need for Support'),
+    callout,
+    support.length ? [plan?.path ? h('h3', {}, 'Alongside the Training') : null, bullets(support)] : null
+  );
+}
+
+function dayStrip(plan) {
+  return h(
+    'div',
+    { class: 'day-strip-wrap' },
+    h(
+      'div',
+      { class: 'day-strip', style: `grid-template-columns: repeat(${plan.days}, minmax(0, 1fr))` },
+      plan.blocks.flatMap((b) => Array.from({ length: b.days }, (_, i) => h('span', { class: `day ${toneOf(b)}`, title: b.title }, b.from + i)))
+    ),
+    h('div', { class: 'day-legend' }, plan.blocks.map((b) => h('span', {}, h('i', { class: toneOf(b) }), h('strong', {}, dayRange(b)), ` ${shortTitle(b)}`)))
+  );
+}
+
+function planBlock(b) {
+  return h(
+    'div',
+    { class: `plan-block edge-${toneOf(b).slice(5)}` },
+    h(
+      'div',
+      { class: 'plan-block-head' },
+      h('span', { class: `plan-block-days ${toneOf(b)}` }, dayRange(b)),
+      h('span', { class: 'plan-block-title' }, b.title),
+      h('span', { class: 'plan-block-length' }, [plural(b.days, 'day'), b.grade ? `Grade ${b.grade}, ${b.grade_label}` : null].filter(Boolean).join(' · '))
+    ),
+    b.focus?.length ? [h('h4', {}, 'What the Teacher Will Work On'), bullets(b.focus)] : null,
+    b.delivery ? h('p', {}, h('strong', {}, 'How UpSchool Delivers It: '), b.delivery) : null,
+    b.outcome ? h('p', {}, h('strong', {}, 'By the End: '), b.outcome) : null
+  );
+}
+
+const runSteps = (steps) =>
+  steps?.length ? h('div', { class: 'plan-part' }, h('h3', {}, 'How UpSchool’s Team Will Run It'), h('ol', { class: 'plan-steps' }, steps.map((step) => h('li', {}, step.stage ? h('strong', {}, `${step.stage}: `) : null, step.detail)))) : null;
+
+// The training plan for one teacher, on pages of its own.
+function trainingPlanPage(plan, teacher) {
+  if (!plan?.path) return null;
+  return h(
+    'section',
+    { class: 'report-page training-plan' },
+    h('h2', { class: 'report-page-title' }, 'Training Plan', h('small', {}, `Recommended for ${teacher.name}`)),
+    h(
+      'div',
+      { class: 'plan-facts' },
+      fact('Growth Path', plan.path.name, plan.programme || null),
+      fact('Length', plural(plan.days, 'day'), `This path runs ${pathLength(plan.path)}`),
+      fact('Focus', plan.focus.map((f) => f.name).join(' · '), plan.focus.map((f) => f.grade_label).join(' · '))
+    ),
+    plan.summary ? h('p', { class: 'report-lead' }, plan.summary) : null,
+    h(
+      'p',
+      {},
+      h('strong', {}, 'Why This Path: '),
+      plan.reason,
+      plan.path.scope ? ` The ${plan.path.name} is for ${asClause(plan.path.scope)}.` : '',
+      plan.partial ? h('span', { class: 'hint' }, ` ${plan.partial}`) : null
+    ),
+    h('h3', {}, 'Days at a Glance'),
+    dayStrip(plan),
+    h('h3', {}, 'Plan of Action'),
+    plan.blocks.map(planBlock),
+    runSteps(plan.execution),
+    h(
+      'div',
+      { class: 'plan-part' },
+      h('h3', {}, 'Exit Assessment'),
+      h('p', {}, h('strong', {}, 'Aim: '), plan.target),
+      plan.exit_focus ? h('p', {}, plan.exit_focus) : null,
+      plan.exit_assessment ? h('p', { class: 'report-note' }, plan.exit_assessment) : null
+    ),
+    plan.continuity ? h('div', { class: 'plan-part' }, h('h3', {}, 'After the Plan'), h('p', {}, plan.continuity)) : null
+  );
+}
+
+// A teacher's path in the table of all teachers.
+const trainingCell = (entry) => (entry ? [h('div', {}, entry.path), h('div', { class: 'hint' }, plural(entry.days, 'day'))] : h('span', { class: 'hint' }, 'None needed'));
+
+// "Need for Support" in the report on all teachers: who each path is for.
+// The Training Plan that follows sets out the days.
+function schoolNeedForSupport(training) {
+  if (!training) return null;
+  if (!training.paths.length) {
+    return h('section', { class: 'report-section' }, h('h2', {}, 'Need for Support'), h('p', {}, 'Every teacher assessed so far is Proficient or better in each section they sat, so no growth path is needed.'));
+  }
+  return h(
+    'section',
+    { class: 'report-section' },
+    h('h2', {}, 'Need for Support'),
+    h('p', {}, `${training.on_path} of the ${plural(training.assessed, 'teacher')} assessed would benefit from a growth path. The plan of action follows in the Training Plan.`),
+    h(
+      'ul',
+      {},
+      training.paths.map((p) => h('li', {}, h('strong', {}, p.name), ` (${pathLength(p)}): `, p.teachers.map((t) => t.name).join(', '))),
+      training.none.length ? h('li', {}, h('strong', {}, 'No growth path needed: '), training.none.map((t) => t.name).join(', ')) : null
+    )
+  );
+}
+
+function pathsTable(training) {
+  return h(
+    'div',
+    { class: 'table-wrap' },
+    h(
+      'table',
+      { class: 'report-table' },
+      h('thead', {}, h('tr', {}, h('th', {}, 'Growth Path'), h('th', {}, 'Teachers'), h('th', { class: 'right' }, 'Training Days'))),
+      h(
+        'tbody',
+        {},
+        training.paths.map((p) =>
+          h(
+            'tr',
+            {},
+            h('td', {}, h('strong', {}, p.name), h('div', { class: 'hint' }, [pathLength(p), p.scope].filter(Boolean).join(' · '))),
+            h('td', {}, p.teachers.map((t, i) => [i ? ', ' : '', `${t.name} (${t.days})`])),
+            h('td', { class: 'right' }, p.teacher_days)
+          )
+        ),
+        training.none.length
+          ? h('tr', {}, h('td', {}, h('strong', {}, 'No Growth Path Needed')), h('td', {}, training.none.map((t) => t.name).join(', ')), h('td', { class: 'right' }, '—'))
+          : null
+      )
+    ),
+    h('p', { class: 'report-key' }, 'Each teacher’s own number of days is in brackets; training days are added up across the teachers on a path.')
+  );
+}
+
+// The training plan for the school, on pages of its own.
+function schoolTrainingPage(training) {
+  if (!training?.paths.length) return null;
+  return h(
+    'section',
+    { class: 'report-page training-plan' },
+    h('h2', { class: 'report-page-title' }, 'Training Plan', h('small', {}, 'For the school’s teachers')),
+    h(
+      'div',
+      { class: 'plan-facts' },
+      fact('Teachers on a Path', `${training.on_path} of ${training.assessed}`, 'of those assessed so far'),
+      fact('Days per Teacher', training.shortest === training.longest ? plural(training.shortest, 'day') : `${training.shortest} to ${training.longest} days`, 'Depending on the path'),
+      fact('Training Days in All', String(training.teacher_days), 'Added up across teachers')
+    ),
+    training.summary ? h('p', { class: 'report-lead' }, training.summary) : null,
+    h('h3', {}, 'Paths and Teachers'),
+    pathsTable(training),
+    h('h3', {}, 'Cohorts by Section'),
+    h('p', { class: 'report-note' }, 'Teachers who need support in the same section can be trained together; each one’s days on that section are in brackets.'),
+    h(
+      'div',
+      { class: 'table-wrap' },
+      h(
+        'table',
+        { class: 'report-table' },
+        h('thead', {}, h('tr', {}, h('th', {}, 'Section'), h('th', {}, 'Teachers'))),
+        h(
+          'tbody',
+          {},
+          training.cohorts.map((c) =>
+            h(
+              'tr',
+              {},
+              h('td', {}, h('span', { class: `cohort-dot tone-${c.key || 'paper'}` }), h('strong', {}, titleCase(c.name)), c.title ? h('div', { class: 'hint' }, c.title) : null),
+              h('td', {}, c.teachers.map((t, i) => [i ? ', ' : '', `${t.name} (${t.grade}, ${plural(t.days, 'day')})`]))
+            )
+          )
+        )
+      )
+    ),
+    training.phases?.length ? h('h3', {}, 'Plan of Action') : null,
+    (training.phases ?? []).map((phase) =>
+      h(
+        'div',
+        { class: 'plan-block edge-phase' },
+        h('div', { class: 'plan-block-head' }, phase.timing ? h('span', { class: 'plan-block-days tone-phase' }, phase.timing) : null, h('span', { class: 'plan-block-title' }, phase.title)),
+        phase.who ? h('p', {}, h('strong', {}, 'Who: '), phase.who) : null,
+        phase.what ? h('p', {}, h('strong', {}, 'What: '), phase.what) : null,
+        phase.delivery ? h('p', {}, h('strong', {}, 'How UpSchool Delivers It: '), phase.delivery) : null
+      )
+    ),
+    runSteps(training.execution),
+    h(
+      'div',
+      { class: 'plan-part' },
+      h('h3', {}, 'Exit Assessment'),
+      h('p', {}, 'Each teacher sits the exit assessment on the sections in their plan once it is finished.'),
+      training.exit_assessment ? h('p', { class: 'report-note' }, training.exit_assessment) : null
+    ),
+    training.continuity ? h('div', { class: 'plan-part' }, h('h3', {}, 'After the Plan'), h('p', {}, training.continuity)) : null
   );
 }
 
@@ -189,7 +512,8 @@ export async function renderTeacherReport(root, teacherId, testId, query = new U
         { school, title: 'Results So Far', details: teacherDetails(teacher, test, null) },
         resultsTable(data.sections),
         gradeKey(data.grades),
-        running ? null : h('p', { class: 'hint no-print' }, 'The written report has not been built yet. Press Build report.')
+        running ? null : h('p', { class: 'hint no-print' }, 'The written report has not been built yet. Press Build report.'),
+        questionPages(data.sections, { forTeacher: audience === 'teacher' })
       );
     } else {
       sheet = audience === 'teacher' ? teacherSheet(data, content) : managementSheet(data, content);
@@ -211,6 +535,7 @@ export async function renderTeacherReport(root, teacherId, testId, query = new U
         h('div', { class: 'page-actions' }, toggle, buildButton, h('button', { class: 'btn btn-primary', onclick: () => window.print(), disabled: !content }, 'Print'))
       ),
       reportState(report, { building: inlineBuild, what: `${teacher.name}’s reports` }),
+      audience === 'management' && !running ? trainingNotice(data.training, content, h('button', { class: 'btn-link', type: 'button', onclick: build }, 'Rebuild report')) : null,
       sheet
     );
   }
@@ -244,7 +569,8 @@ function teacherSheet(data, content) {
     notSat.length
       ? h('p', { class: 'report-note' }, `You have not sat ${notSat.map((k) => `Section ${k}`).join(' or ')} in this test yet. When you do, it will be added to this report.`)
       : null,
-    t.closing ? h('p', { class: 'report-closing' }, t.closing) : null
+    t.closing ? h('p', { class: 'report-closing' }, t.closing) : null,
+    questionPages(withQuestions(content.sections, data.sections), { forTeacher: true })
   );
 }
 
@@ -288,7 +614,9 @@ function managementSheet(data, content) {
         h('div', { class: 'report-cols' }, h('div', {}, h('h3', {}, 'Strengths'), bullets(s.strengths)), h('div', {}, h('h3', {}, 'Gaps'), bullets(s.gaps)))
       )
     ),
-    m.support.length ? h('section', { class: 'report-section' }, h('h2', {}, 'Recommended Support'), bullets(m.support)) : null
+    needForSupport(content.training, m.support),
+    trainingPlanPage(content.training, teacher),
+    questionPages(withQuestions(content.sections, data.sections), { forTeacher: false })
   );
 }
 
@@ -385,7 +713,7 @@ export async function renderSchoolReport(root, schoolId, testId) {
         h(
           'table',
           { class: 'report-table' },
-          h('thead', {}, h('tr', {}, h('th', {}, 'Teacher'), keys.map((key) => h('th', {}, key ? `Section ${key}` : 'Paper')), h('th', {}, 'Potential Identifier'))),
+          h('thead', {}, h('tr', {}, h('th', {}, 'Teacher'), keys.map((key) => h('th', {}, key ? `Section ${key}` : 'Paper')), h('th', {}, 'Potential Identifier'), figures.training ? h('th', {}, 'Training') : null)),
           h(
             'tbody',
             {},
@@ -398,7 +726,8 @@ export async function renderSchoolReport(root, schoolId, testId) {
                   const s = t.sections.find((x) => x.key === key);
                   return h('td', {}, s ? percentChip(s) : h('span', { class: 'hint' }, 'not sat'));
                 }),
-                h('td', {}, potentialBadge(t.potential), t.potential?.provisional ? h('div', { class: 'hint' }, t.potential.evidence) : null)
+                h('td', {}, potentialBadge(t.potential), t.potential?.provisional ? h('div', { class: 'hint' }, t.potential.evidence) : null),
+                figures.training ? h('td', {}, trainingCell(figures.training.by_teacher[t.id])) : null
               )
             )
           )
@@ -425,8 +754,11 @@ export async function renderSchoolReport(root, schoolId, testId) {
           )
         : null,
 
+      schoolNeedForSupport(figures.training),
+
       written?.recommendations?.length ? h('section', { class: 'report-section' }, h('h2', {}, 'Recommendations'), h('ol', {}, written.recommendations.map((r) => h('li', {}, r)))) : null,
-      !written && !running ? h('p', { class: 'hint no-print' }, 'The figures above are live. Press Build report to add OpenAI’s written analysis and recommendations.') : null
+      !written && !running ? h('p', { class: 'hint no-print' }, 'The figures above are live. Press Build report to add OpenAI’s written analysis, recommendations and plan of action.') : null,
+      schoolTrainingPage(figures.training)
     );
 
     mount(
@@ -439,6 +771,7 @@ export async function renderSchoolReport(root, schoolId, testId) {
         h('div', { class: 'page-actions' }, buildButton, h('button', { class: 'btn btn-primary', onclick: () => window.print() }, 'Print'))
       ),
       reportState(report, { building: h('button', { class: 'btn-link', type: 'button', onclick: build }, 'Rebuild report'), what: 'the report on all teachers' }),
+      data.assessed && !running ? trainingNotice(data.training_state, written, h('button', { class: 'btn-link', type: 'button', onclick: build }, 'Rebuild report')) : null,
       data.assessed ? sheet : emptyState('No teacher has been evaluated in this test yet.')
     );
   }

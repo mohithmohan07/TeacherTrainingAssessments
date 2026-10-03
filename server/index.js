@@ -12,6 +12,7 @@ import testsRouter from './routes/tests.js';
 import reportsRouter from './routes/reports.js';
 import dashboardRouter from './routes/dashboard.js';
 import papersRouter from './routes/papers.js';
+import trainingRouter from './routes/training.js';
 import { sendHelperZip } from './helper-download.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -44,6 +45,7 @@ app.use('/api/tests', testsRouter);
 app.use('/api/reports', reportsRouter);
 app.use('/api/dashboard', dashboardRouter);
 app.use('/api/papers', papersRouter);
+app.use('/api/training', trainingRouter);
 
 // The scanner helper, for the laptop the scanner is plugged into.
 app.get('/downloads/scanner-helper.zip', sendHelperZip);
@@ -58,7 +60,7 @@ app.use((error, _req, res, _next) => {
   if (error instanceof multer.MulterError) {
     const message =
       error.code === 'LIMIT_FILE_SIZE'
-        ? 'That file is too large. Scans can be up to 25 MB each, logos up to 5 MB, question papers 30 MB and paper packs 200 MB.'
+        ? 'That file is too large. Scans can be up to 25 MB each, logos up to 5 MB, question papers and training documents 30 MB, and paper packs 200 MB.'
         : `Upload failed: ${error.message}`;
     return res.status(400).json({ error: message });
   }
