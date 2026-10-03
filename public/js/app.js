@@ -5,6 +5,7 @@ import { renderGenerator, renderGeneratedPaper } from './views/generator.js';
 import { renderTeacherProfile } from './views/teachers.js';
 import { renderTeacherReport, renderSchoolReport } from './views/reports.js';
 import { renderPapers } from './views/papers.js';
+import { renderTraining } from './views/training.js';
 import { toast } from './ui.js';
 
 const view = document.getElementById('view');
@@ -19,6 +20,7 @@ const routes = [
   { pattern: /^\/assessments(?:\?(.*))?$/, nav: 'assessments', render: (query) => renderAssessments(view, new URLSearchParams(query ?? '')) },
   { pattern: /^\/assessments\/(\d+)$/, nav: 'assessments', render: (id) => renderAssessmentDetail(view, id) },
   { pattern: /^\/papers$/, nav: 'papers', render: () => renderPapers(view) },
+  { pattern: /^\/training$/, nav: 'training', render: () => renderTraining(view) },
   { pattern: /^\/generator$/, nav: 'generator', render: () => renderGenerator(view) },
   { pattern: /^\/generator\/(\d+)$/, nav: 'generator', render: (id) => renderGeneratedPaper(view, id) },
 ];

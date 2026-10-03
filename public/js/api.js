@@ -97,6 +97,14 @@ export const papersApi = {
   importPack: (formData) => api.postForm('/api/papers/import', formData),
 };
 
+// The growth paths the training plans in the management reports are drawn from.
+export const trainingApi = {
+  get: () => api.get('/api/training'),
+  save: (body) => api.putJson('/api/training', body),
+  clear: () => api.del('/api/training'),
+  read: (formData) => api.postForm('/api/training/read', formData),
+};
+
 export const generatorApi = {
   config: () => api.get('/api/generator/config'),
   list: () => api.get('/api/generator'),

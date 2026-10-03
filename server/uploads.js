@@ -46,6 +46,17 @@ export const uploadPaper = multer({
   },
 });
 
+// A document to read the training paths from, such as a proposal: one PDF,
+// up to 30 MB, held in memory, read by OpenAI and discarded.
+export const uploadDocument = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 30 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, cb) => {
+    if (path.extname(file.originalname).toLowerCase() === '.pdf' || file.mimetype === 'application/pdf') return cb(null, true);
+    cb(new Error('Please choose a PDF. From Word or Google Docs, save or download the document as a PDF first.'));
+  },
+});
+
 // A paper pack: one zip of PDFs and their labels, up to 200 MB.
 export const uploadPack = multer({
   storage: multer.memoryStorage(),

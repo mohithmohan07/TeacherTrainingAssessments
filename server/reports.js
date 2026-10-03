@@ -7,7 +7,9 @@
 // all of a school's teachers is a separate request, made only when someone
 // asks for it. Percentages, grades and the potential identifier are worked
 // out here (results.js), never by the model, and each report keeps a copy of
-// the results it was written from.
+// the results it was written from, question by question. The management
+// reports also carry a training plan, whose path and days are worked out in
+// training.js and whose content OpenAI writes in the same request.
 import db from './db.js';
 import { OPENAI_MODEL, friendly, openaiConfigured, requestJson } from './openai.js';
 import {
@@ -19,6 +21,19 @@ import {
   sectionKey,
   teacherResults,
 } from './results.js';
+import {
+  SCHOOL_PLAN_INSTRUCTIONS,
+  SCHOOL_PLAN_SCHEMA,
+  TEACHER_PLAN_INSTRUCTIONS,
+  TEACHER_PLAN_SCHEMA,
+  describeSchoolTraining,
+  describeTeacherPlan,
+  getFramework,
+  schoolTraining,
+  trainingPlanFor,
+  writtenPlan,
+  writtenSchoolPlan,
+} from './training.js';
 
 const selectTeacher = db.prepare(
   `SELECT t.*, s.name AS school_name FROM teachers t JOIN schools s ON s.id = t.school_id WHERE t.id = ?`
@@ -173,6 +188,14 @@ const clip = (text, max) => {
   return value.length > max ? `${value.slice(0, max)}…` : value;
 };
 
+// The schema with a training_plan to fill in as well, asked for only when
+// there is a plan to write.
+const withPlan = (schema, plan) => ({
+  ...schema,
+  required: [...schema.required, 'training_plan'],
+  properties: { ...schema.properties, training_plan: plan },
+});
+
 // The results as the report writer sees them.
 function describeResults(teacher, test, sections) {
   const lines = [
@@ -215,10 +238,25 @@ function matchSections(items, sections) {
 
 const strings = (list) => (Array.isArray(list) ? list.map((item) => String(item).trim()).filter(Boolean) : []);
 
+// A section's questions as the reports show them: marks, the examiner's
+// feedback and the start of what the teacher wrote.
+export function questionsOf(section) {
+  return (section.questions ?? []).map((q) => ({
+    question: String(q.question ?? ''),
+    max_marks: Number(q.max_marks) || 0,
+    marks_awarded: Number(q.marks_awarded) || 0,
+    feedback: String(q.feedback ?? '').trim(),
+    teacher_answer: clip(q.teacher_answer, 400),
+  }));
+}
+
 // evaluated_at is kept so that isStale() can be checked against a snapshot.
-function snapshot(sections) {
-  return sections.map(({ key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at }) => ({
+// A teacher's own reports keep the questions too, so a printed report always
+// shows the marks it was written from.
+function snapshot(sections, { questions = false } = {}) {
+  return sections.map(({ key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at, ...rest }) => ({
     key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at,
+    ...(questions ? { questions: questionsOf(rest) } : {}),
   }));
 }
 
@@ -229,11 +267,13 @@ async function writeTeacherReports(teacherId, testId, reportId) {
   if (!teacher || !test) throw friendly('This teacher or test no longer exists.');
   if (!sections.length) throw friendly('There are no marked sections for this teacher in this test yet. Press Evaluate first.');
 
+  const framework = getFramework();
+  const plan = trainingPlanFor(sections, framework);
   const raw = await requestJson({
-    instructions: TEACHER_INSTRUCTIONS,
-    content: [{ type: 'input_text', text: describeResults(teacher, test, sections) }],
+    instructions: TEACHER_INSTRUCTIONS + (plan?.path ? TEACHER_PLAN_INSTRUCTIONS : ''),
+    content: [{ type: 'input_text', text: describeResults(teacher, test, sections) + describeTeacherPlan(plan) }],
     name: 'teacher_reports',
-    schema: TEACHER_SCHEMA,
+    schema: plan?.path ? withPlan(TEACHER_SCHEMA, TEACHER_PLAN_SCHEMA) : TEACHER_SCHEMA,
     task: 'write this report',
     retry: 'Press Build report to try again.',
   });
@@ -242,8 +282,9 @@ async function writeTeacherReports(teacherId, testId, reportId) {
   const m = raw.management_report ?? {};
   const content = {
     test_name: test.name,
-    sections: snapshot(sections),
+    sections: snapshot(sections, { questions: true }),
     potential: potentialFor(sections),
+    training: writtenPlan(plan, raw.training_plan, framework),
     teacher: {
       opening: String(t.opening ?? '').trim(),
       sections: matchSections(t.sections, sections).map((s) => ({
@@ -411,11 +452,13 @@ async function writeSchoolReport(schoolId, testId, reportId) {
   }
   if (overview.not_assessed.length) lines.push('', `Not yet assessed in this test: ${overview.not_assessed.join(', ')}`);
 
+  const training = schoolTraining(overview.teachers, getFramework());
+  const planning = Boolean(training?.paths.length);
   const raw = await requestJson({
-    instructions: SCHOOL_INSTRUCTIONS,
-    content: [{ type: 'input_text', text: lines.join('\n') }],
+    instructions: SCHOOL_INSTRUCTIONS + (planning ? SCHOOL_PLAN_INSTRUCTIONS : ''),
+    content: [{ type: 'input_text', text: lines.join('\n') + describeSchoolTraining(training) }],
     name: 'school_report',
-    schema: SCHOOL_SCHEMA,
+    schema: planning ? withPlan(SCHOOL_SCHEMA, SCHOOL_PLAN_SCHEMA) : SCHOOL_SCHEMA,
     task: 'write this report',
     retry: 'Press Build report to try again.',
   });
@@ -430,6 +473,7 @@ async function writeSchoolReport(schoolId, testId, reportId) {
       training_priority: String(s.training_priority ?? '').trim(),
     })),
     recommendations: strings(raw.recommendations),
+    training: writtenSchoolPlan(training, raw.training_plan),
   };
   saveReport.run({ id: reportId, content: JSON.stringify(content), basis: schoolBasis(overview), model: OPENAI_MODEL });
 }

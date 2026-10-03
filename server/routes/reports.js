@@ -4,11 +4,13 @@ import { GRADES, potentialFor, teacherResults } from '../results.js';
 import {
   findReport,
   isStale,
+  questionsOf,
   queueSchoolReport,
   queueTeacherReports,
   schoolOverview,
   schoolReportIsStale,
 } from '../reports.js';
+import { getFramework, schoolTraining } from '../training.js';
 
 const router = express.Router();
 
@@ -36,6 +38,13 @@ function lookupSchool(req, res) {
   return { school, test };
 }
 
+// `training` says whether growth paths are set up, and which version, so the
+// page can tell when a report's training plan is missing or out of date.
+function trainingState() {
+  const framework = getFramework();
+  return { set: Boolean(framework), version: framework?.version ?? null };
+}
+
 function teacherPayload(teacher, test) {
   const sections = teacherResults(teacher.id, test.id);
   const report = findReport('teacher', test.id, teacher.id);
@@ -44,9 +53,10 @@ function teacherPayload(teacher, test) {
     school: selectSchool.get(teacher.school_id),
     test,
     grades: GRADES,
-    sections: sections.map(({ questions, ...rest }) => rest),
+    sections: sections.map(({ questions, ...rest }) => ({ ...rest, questions: questionsOf({ questions }) })),
     potential: potentialFor(sections),
     report: report && { ...report, stale: isStale(report, sections) },
+    training: trainingState(),
   };
 }
 
@@ -64,6 +74,8 @@ router.post('/teacher', (req, res) => {
   res.status(202).json(teacherPayload(found.teacher, found.test));
 });
 
+// The figures are live until the report is written; the page then shows the
+// ones the report was written from.
 function schoolPayload(school, test) {
   const overview = schoolOverview(school.id, test.id);
   const report = findReport('school', test.id, null);
@@ -72,6 +84,8 @@ function schoolPayload(school, test) {
     test,
     grades: GRADES,
     ...overview,
+    training: schoolTraining(overview.teachers, getFramework()),
+    training_state: trainingState(),
     report: report && { ...report, stale: schoolReportIsStale(report, overview) },
   };
 }

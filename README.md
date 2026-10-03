@@ -201,11 +201,19 @@ that teacher for the test, from the marks and the examiner's feedback:
   next steps they can try in their own classroom, and small practice ideas. It
   takes the realities of teaching into account and never criticises.
 - **For management**: factual. The evidence behind each section's result,
-  strengths and gaps, responsibilities the evidence supports, recommended
-  support, and the potential identifier.
+  strengths and gaps, responsibilities the evidence supports, the potential
+  identifier, and under **Need for Support** the training recommended for the
+  teacher, set out day by day on its own **Training Plan** page (see
+  [Training plans](#training-plans)).
+
+Both end with **Question by Question** pages, like the marking screen: every
+question's marks, the examiner's feedback on it and the start of what the
+teacher wrote, section by section. The teacher's copy speaks to the teacher
+("You wrote").
 
 Open them with **Report** on the teacher's row or from their profile; each
-prints on its own. If marks are corrected or more sections are evaluated
+prints on its own, and the Training Plan and Question by Question each start
+on a new printed page. If marks are corrected or more sections are evaluated
 afterwards, the page says so and **Rebuild report** brings it up to date.
 
 Every report has the school's logo and "Teacher Training Assessment" at the
@@ -228,11 +236,44 @@ It always says how many of the three sections it rests on.
 At the end, **Management report** under the board builds the report on all of
 the school's teachers in the test: section averages and grade counts, every
 teacher's sections and potential, who could mentor and who needs support, which
-colleagues could support each other in a section, and OpenAI's analysis and
-recommendations for the school's training plan.
+colleagues could support each other in a section, which growth path each
+teacher needs, OpenAI's analysis and recommendations, and a **Training Plan**
+page for the whole school: the paths and their teachers, cohorts of teachers
+who need the same section, a plan of action in phases, and how UpSchool's team
+would run it.
 
 Reports are in English and use the same `OPENAI_API_KEY` and `OPENAI_MODEL` as
 marking.
+
+## Training plans
+
+The training the management reports recommend comes from UpSchool's growth
+paths, set up once on the **Training paths** page. Choose the training proposal
+as a PDF and press **Read PDF**: OpenAI fills in each path's name, what it
+covers and how many days it runs, the exit assessment and any support after
+the training, leaving out prices and names. Check them and press **Save**, or
+type them in by hand. The paths are kept in the app's database, not in this
+repository, and the reports never mention the proposal.
+
+A teacher's path is picked from their section grades by fixed rules, with the
+paths ordered from the shortest to the longest:
+
+- **No path**: Proficient (B) or better in every section sat.
+- **The first path**: one section at C or D.
+- **The second path**: two or more sections at C or D, but fewer than two at D.
+- **The third path**: two or more sections at D.
+
+With fewer paths, the longest stands in for the missing ones. The days are
+fixed by rules too, so they always add up: each section needing support asks
+for days (6 at grade D, 4 at C), plus a day of classroom application for each
+and a review day, kept within the path's range. The plan takes the section
+that needs most support first, then classroom application with coaching, then
+review and readiness for the exit assessment. OpenAI writes what the teacher
+works on in each block of days, how UpSchool delivers it and what they should
+manage by the end, and how UpSchool's team runs the plan.
+
+Reports built before the paths were saved, or before they were changed, say so
+on screen; **Rebuild report** brings the training plan up to date.
 
 ## Running it on Fly.io
 
@@ -304,7 +345,8 @@ control — download `app.db` now and then if the records matter.
 
 Everything is inside the `data/` folder next to the code:
 
-- `data/app.db` — the SQLite database with schools, teachers and assessments.
+- `data/app.db` — the SQLite database with schools, teachers, assessments,
+  reports and the growth paths.
 - `data/uploads/` — the school logos, the scanned pages and the paper
   library's PDFs.
 
@@ -339,11 +381,12 @@ server/
   papers.js         the question paper library: labels, suggestions, pack import
   results.js        section results, grades and the potential identifier
   reports.js        writing the teacher, management and school reports
+  training.js       growth paths, and each teacher's and the school's training plan
   generator.js      writing question papers with Gemini
   excel.js          the import template, and reading a filled-in one back
   uploads.js        file upload rules (types and size limits)
   seed.js           optional sample data
-  routes/           schools, teachers, tests, assessments, papers, reports, dashboard, generator
+  routes/           schools, teachers, tests, assessments, papers, reports, training, dashboard, generator
 public/
   index.html        the single page
   css/styles.css

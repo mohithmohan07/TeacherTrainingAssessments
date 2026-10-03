@@ -36,7 +36,9 @@ a { color: var(--accent); }
 
 .app {
   display: grid;
-  grid-template-columns: 248px 1fr;
+  /* minmax(0, …) so a wide table scrolls in its .table-wrap instead of
+     widening the page. */
+  grid-template-columns: 248px minmax(0, 1fr);
   min-height: 100vh;
 }
 
@@ -421,9 +423,9 @@ td.right, th.right { text-align: right; white-space: nowrap; }
 
 /* Screens only: a printed A4 page is narrower than this too. */
 @media screen and (max-width: 860px) {
-  .app { grid-template-columns: 1fr; }
-  .sidebar { flex-direction: row; align-items: center; gap: 16px; padding: 12px 16px; }
-  .nav { flex-direction: row; }
+  .app { grid-template-columns: minmax(0, 1fr); }
+  .sidebar { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 12px 16px; }
+  .nav { flex-direction: row; flex-wrap: wrap; }
   .sidebar-foot { display: none; }
   .view { padding: 20px 16px 48px; }
 }
@@ -587,6 +589,82 @@ td.right, th.right { text-align: right; white-space: nowrap; }
 .insight + .insight { margin-top: 12px; }
 .insight p { margin: 2px 0; }
 
+/* Parts of a report that start on a page of their own when printed: the
+   training plan and the answers question by question. */
+.report-page { margin-top: 40px; }
+.report-sheet h2.report-page-title { margin: 0 0 14px; padding-bottom: 8px; border-bottom: 2px solid var(--accent); font-size: 23px; color: #13212e; }
+.report-page-title small { display: block; margin-top: 3px; font-family: var(--font); font-size: 13.5px; font-weight: 500; color: var(--muted); }
+.report-sheet h4 { margin: 10px 0 3px; font-size: 13px; font-weight: 650; color: #3c4b5a; break-after: avoid; }
+
+/* Question by question. */
+.q-section { margin-top: 20px; }
+.q-section-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 4px 14px; flex-wrap: wrap; margin-bottom: 6px; break-after: avoid; }
+.report-sheet .q-section-head h3 { margin: 0; }
+.q-total { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+.report-sheet .q-table th, .report-sheet .q-table td { padding: 7px 10px; }
+.q-table td { font-size: 13px; line-height: 1.5; }
+.q-table th:nth-child(1) { width: 76px; }
+.q-table th:nth-child(2) { width: 92px; }
+.q-marks { display: inline-block; min-width: 62px; padding: 1px 8px; border-radius: 999px; font-size: 12.5px; font-weight: 650; text-align: center; }
+.q-marks.q-full { background: #dff3e8; color: #125c3f; }
+.q-marks.q-part { background: var(--warn-soft); color: var(--warn); }
+.q-marks.q-none { background: #f7e8f0; color: #7d2451; }
+.q-wrote { margin-top: 3px; font-size: 12px; line-height: 1.45; color: var(--muted); }
+.q-wrote-label { font-weight: 650; }
+
+/* Training: the recommendation under Need for Support, and the plan. Each
+   section keeps one colour across the plan. */
+.tone-A { background: #c6dbef; color: #1f4f7d; }
+.tone-B { background: #ddd5f3; color: #45358f; }
+.tone-C { background: #c4e6e1; color: #0f5e56; }
+.tone-paper { background: var(--accent-soft); color: var(--accent); }
+.tone-practice { background: #eed9b0; color: var(--warn); }
+.tone-review { background: #e2e8f0; color: #3c4b5a; }
+.tone-phase { background: var(--accent-soft); color: var(--accent); }
+
+.training-callout { margin-bottom: 12px; padding: 12px 16px; border: 1px solid #c6dbef; border-left: 4px solid var(--accent); border-radius: 0 8px 8px 0; background: #f5f8fc; break-inside: avoid; }
+.training-callout-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; }
+.training-callout-label { font-size: 12px; font-weight: 650; letter-spacing: 0.3px; color: #8a6116; }
+.training-callout-head strong { font-family: var(--serif); font-size: 17px; color: var(--accent); }
+.training-callout-days { font-weight: 650; color: #13212e; }
+.report-sheet .training-callout p { margin: 6px 0 0; }
+
+.plan-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin: 0 0 16px; }
+.plan-fact { padding: 10px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+.plan-fact span { display: block; font-size: 12px; font-weight: 600; color: var(--muted); }
+.plan-fact strong { display: block; font-family: var(--serif); font-size: 16.5px; line-height: 1.3; color: #13212e; }
+.plan-fact small { display: block; margin-top: 2px; font-size: 12px; color: var(--muted); }
+
+.day-strip-wrap { break-inside: avoid; }
+.day-strip { display: grid; gap: 2px; }
+.day { display: grid; place-items: center; height: 26px; border-radius: 3px; font-size: 11px; font-weight: 650; }
+.day-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px; font-size: 12.5px; color: #3c4b5a; }
+.day-legend i, .cohort-dot { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 2px; vertical-align: -1px; }
+
+.plan-block { margin: 10px 0; padding: 11px 16px 12px; border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 0 8px 8px 0; break-inside: avoid; }
+.plan-block.edge-A { border-left-color: #6b9bd1; }
+.plan-block.edge-B { border-left-color: #8b7bd8; }
+.plan-block.edge-C { border-left-color: #3fa597; }
+.plan-block.edge-practice { border-left-color: #e0a73a; }
+.plan-block.edge-review { border-left-color: #94a3b8; }
+.plan-block-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; }
+.plan-block-days { padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.plan-block-title { flex: 1; min-width: 200px; font-weight: 700; color: #13212e; }
+.plan-block-length { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.report-sheet .plan-block p { margin: 7px 0 0; }
+.report-sheet .plan-block ul { margin-bottom: 0; }
+.plan-part { break-inside: avoid; }
+.plan-steps li { margin-bottom: 7px; }
+
+/* The Training paths page. */
+.rules-list { margin: 4px 0 10px; padding-left: 20px; font-size: 13.5px; color: #35485a; }
+.paths-table td { vertical-align: middle; }
+.paths-table td input[type="text"] { min-width: 150px; }
+.paths-table td:nth-child(2) { width: 30%; }
+.paths-table td:nth-child(3) { width: 48%; }
+.days-pair { display: flex; align-items: center; gap: 6px; }
+.days-pair input[type="number"] { width: 72px; }
+
 /* Reports and papers print on pages with no margins, which is what keeps the
    browser from printing the page address, date and title on them. Their
    .print-frame puts the margins back on every page instead (see printFrame in
@@ -615,8 +693,11 @@ td.right, th.right { text-align: right; white-space: nowrap; }
   .report-lead { font-size: 14.5px; }
   .report-footer { position: fixed; left: 16mm; right: 16mm; bottom: 9mm; margin: 0; background: #fff; }
   .report-sheet a { color: inherit; text-decoration: none; }
-  .grade-chip, .potential, .potential-box, .report-details, .report-closing, .report-table th { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .grade-chip, .potential, .potential-box, .report-details, .report-closing, .report-table th,
+  .q-marks, .training-callout, .plan-fact, .day, .day-legend i, .cohort-dot, .plan-block-days { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   tbody tr:hover { background: none; }
+  .report-page { break-before: page; margin-top: 0; }
+  .report-sheet h2.report-page-title { margin-top: 2mm; }
 }
 
 @media screen and (max-width: 860px) {
