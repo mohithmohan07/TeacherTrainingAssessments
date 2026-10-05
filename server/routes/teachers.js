@@ -4,7 +4,7 @@ import { uploadScans, uploadWorkbook } from '../uploads.js';
 import { SCAN_KINDS, attachScans, discardUploads } from '../scans.js';
 import { buildTeacherTemplate, parseTeacherWorkbook } from '../excel.js';
 import { GRADES, potentialFor, teacherResults, testFor } from '../results.js';
-import { findReport, isStale } from '../reports.js';
+import { findReport, isOldLayout, isOutOfDate } from '../reports.js';
 import { PAPER_SECTIONS, allPapers, presentPaper, sittingPapers, suggestPapers, teacherProfile } from '../papers.js';
 
 const router = express.Router();
@@ -92,7 +92,7 @@ function withResults(row, testId, section, library) {
       ? suggestPapers(library, teacherProfile(row, { name: row.school_name }), section).map(presentPaper)
       : [],
     sections: sections.map(({ key, name, percent, grade, grade_label }) => ({ key, name, percent, grade, grade_label })),
-    report_status: report ? (report.status === 'done' && isStale(report, sections) ? 'stale' : report.status) : 'none',
+    report_status: report ? (report.status === 'done' && isOutOfDate(report, sections) ? 'stale' : report.status) : 'none',
   };
 }
 
@@ -186,7 +186,8 @@ router.get('/:id/profile', (req, res) => {
           status: report.status,
           error: report.error,
           written_at: report.written_at,
-          stale: isStale(report, sections),
+          stale: isOutOfDate(report, sections),
+          old_layout: isOldLayout(report),
           teacher: report.content?.teacher ?? null,
           management: report.content?.management ?? null,
         },

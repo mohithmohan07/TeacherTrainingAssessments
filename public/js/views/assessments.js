@@ -2,7 +2,7 @@ import {
   h, mount, field, input, textarea, select, toast, confirmAction, statusBadge,
   formatDate, formatBytes, emptyState, openLightbox, sectionChip,
 } from '../ui.js';
-import { schoolsApi, teachersApi, assessmentsApi, testsApi } from '../api.js';
+import { schoolsApi, teachersApi, assessmentsApi, testsApi, reportsApi } from '../api.js';
 import { choosePaper, paperFacts, paperThumb } from '../paper-picker.js';
 import {
   scanner, scanPages, connectScanner, stopScanning, checkScannerOnce, selectScanner, selectedScanner,
@@ -179,7 +179,7 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
         )
       ),
       teacherBoardCard(state, load, draw),
-      schoolReportCard(state),
+      schoolReportCard(state, load),
       historyCard(state)
     );
   }
@@ -610,10 +610,36 @@ function reportButton(state, teacher) {
   );
 }
 
-// The management report on all of the school's teachers, offered at the end.
-function schoolReportCard(state) {
-  const assessed = state.roster.filter((t) => t.sections.length).length;
+// The school report on all of the school's teachers, offered at the end,
+// and a button that builds every teacher report still missing or out of date.
+function schoolReportCard(state, reload) {
+  const assessed = state.roster.filter((t) => t.sections.length);
   if (!state.roster.length) return null;
+  const due = assessed.filter((t) => ['none', 'failed', 'stale'].includes(t.report_status)).length;
+  const writing = assessed.filter((t) => t.report_status === 'running').length;
+  const reports = (n) => `${n} teacher report${n === 1 ? '' : 's'}`;
+
+  const buildAll = h(
+    'button',
+    {
+      class: 'btn',
+      type: 'button',
+      disabled: !due,
+      onclick: async () => {
+        buildAll.disabled = true;
+        try {
+          const { started } = await reportsApi.buildAllTeachers(state.schoolId, state.testId);
+          toast(started ? `OpenAI is writing ${reports(started)}. Press Refresh to see how they are getting on.` : 'Every teacher report is up to date.', 'success');
+          await reload();
+        } catch (error) {
+          toast(error.message, 'error');
+          buildAll.disabled = false;
+        }
+      },
+    },
+    due ? `Build ${reports(due)}` : writing ? 'Writing teacher reports…' : 'Teacher reports up to date'
+  );
+
   return h(
     'div',
     { class: 'card' },
@@ -623,25 +649,36 @@ function schoolReportCard(state) {
       h(
         'div',
         {},
-        h('h2', { style: 'margin:0' }, 'Report on All Teachers'),
+        h('h2', { style: 'margin:0' }, 'Reports'),
         h(
           'p',
           { class: 'hint', style: 'margin:4px 0 0' },
-          assessed
-            ? `${assessed} of ${state.roster.length} teachers have results in this test. When you have evaluated everyone you want in it, build the management report on all of them.`
-            : 'Once teachers have been evaluated, build a management report on all of them here.'
+          assessed.length
+            ? [
+                `${assessed.length} of ${state.roster.length} teachers have results in this test.`,
+                due ? ` ${due === 1 ? 'One teacher report is' : `${due} teacher reports are`} missing or out of date.` : '',
+                writing ? ` ${reports(writing)} ${writing === 1 ? 'is' : 'are'} being written.` : '',
+                ' When you have evaluated everyone you want in it, build the school report on all of them.',
+              ].join('')
+            : 'Once teachers have been evaluated, build their reports and the school report on all of them here.'
         )
       ),
       h(
-        'a',
-        {
-          class: `btn ${assessed ? 'btn-primary' : ''}`,
-          href: `#/schools/${state.schoolId}/report/${state.testId}`,
-          'aria-disabled': assessed ? null : 'true',
-          onclick: assessed ? null : (event) => event.preventDefault(),
-          style: assessed ? null : 'opacity:.55;cursor:not-allowed',
-        },
-        'Management Report'
+        'div',
+        { class: 'page-actions' },
+        writing ? h('button', { class: 'btn', type: 'button', onclick: () => reload() }, 'Refresh') : null,
+        assessed.length ? buildAll : null,
+        h(
+          'a',
+          {
+            class: `btn ${assessed.length ? 'btn-primary' : ''}`,
+            href: `#/schools/${state.schoolId}/report/${state.testId}`,
+            'aria-disabled': assessed.length ? null : 'true',
+            onclick: assessed.length ? null : (event) => event.preventDefault(),
+            style: assessed.length ? null : 'opacity:.55;cursor:not-allowed',
+          },
+          'School Report'
+        )
       )
     )
   );

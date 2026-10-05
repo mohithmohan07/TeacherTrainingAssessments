@@ -1,29 +1,35 @@
 // Reports written by OpenAI from the marks (OpenAI does extraction and
 // evaluation in this app; Gemini only writes question papers).
 //
-// For each teacher in a test, one request writes two reports from the same
-// results: one for the teacher, supportive and practical, and one for the
-// school's management, factual and evidence-based. The management report on
-// all of a school's teachers is a separate request, made only when someone
-// asks for it. Percentages, grades and the potential identifier are worked
-// out here (results.js), never by the model, and each report keeps a copy of
-// the results it was written from, question by question. The management
-// reports also carry a training plan, whose path and days are worked out in
-// training.js and whose content OpenAI writes in the same request.
+// For each teacher in a test, one request writes two short reports in plain
+// words from the same results: one for the teacher, supportive and practical,
+// and one for the school's management, factual, with numbered findings that
+// its details and training plan refer back to. The school report, on all of a
+// school's teachers, is a separate request, made only when someone asks for
+// it. Percentages, grades, blank answers, school stages and the potential
+// identifier are worked out here (results.js), never by the model, and each
+// report keeps a copy of the results it was written from, question by
+// question. The management reports also carry a training plan, whose path
+// and days are worked out in training.js and whose content OpenAI writes in
+// the same request.
 import db from './db.js';
 import { OPENAI_MODEL, friendly, openaiConfigured, requestJson } from './openai.js';
 import {
   GRADES,
+  NEEDS,
   SECTION_TITLES,
+  STAGES,
   fingerprint,
+  isBlank,
+  needOf,
   potentialFor,
   resultsBasis,
-  sectionKey,
+  sectionName,
+  stageOf,
   teacherResults,
 } from './results.js';
 import {
   SCHOOL_PLAN_INSTRUCTIONS,
-  SCHOOL_PLAN_SCHEMA,
   TEACHER_PLAN_INSTRUCTIONS,
   TEACHER_PLAN_SCHEMA,
   describeSchoolTraining,
@@ -32,8 +38,11 @@ import {
   schoolTraining,
   trainingPlanFor,
   writtenPlan,
-  writtenSchoolPlan,
 } from './training.js';
+
+// The layout reports are written in. A report written in an earlier one is
+// not shown: it counts as out of date and the page asks for a rebuild.
+export const LAYOUT = 2;
 
 const selectTeacher = db.prepare(
   `SELECT t.*, s.name AS school_name FROM teachers t JOIN schools s ON s.id = t.school_id WHERE t.id = ?`
@@ -61,6 +70,26 @@ export function findReport(kind, testId, teacherId = null) {
   return { ...row, content: row.content ? JSON.parse(row.content) : null };
 }
 
+// At most this many reports are written at once, so building every report
+// in a test does not send OpenAI dozens of requests together. A report
+// waiting its turn shows as being written.
+const MAX_WRITING = 3;
+let writing = 0;
+const waiting = [];
+
+async function inTurn(work) {
+  if (writing < MAX_WRITING) writing += 1;
+  else await new Promise((resolve) => waiting.push(resolve));
+  try {
+    return await work();
+  } finally {
+    // The place goes straight to the next report waiting, if there is one.
+    const next = waiting.shift();
+    if (next) next();
+    else writing -= 1;
+  }
+}
+
 // Starts a report, or marks the one already being written to go round again
 // once it finishes, so marks that arrive mid-way are never left out.
 const building = new Map();
@@ -77,7 +106,7 @@ function queue(key, reportRow, work) {
       job.again = false;
       markRunning.run(reportRow.id);
       try {
-        await work();
+        await inTurn(work);
       } catch (error) {
         console.error(`Writing report ${reportRow.id} failed:`, error);
         markFailed.run(error.userMessage ?? `The report could not be written: ${error.message}`, reportRow.id);
@@ -96,29 +125,41 @@ function reportRowFor(kind, schoolId, testId, teacherId) {
 
 /* ------------------------------------------------------ one teacher's reports */
 
-const TEACHER_INSTRUCTIONS = `You write the feedback reports for a teacher training assessment programme run in Indian schools.
+const TEACHER_INSTRUCTIONS = `You write the reports for a teacher training assessment programme run in Indian schools.
 
-You are given one teacher's results in one test: the sections they sat, their percentage and grade in each, and for every question the marks, the examiner's feedback and a short extract of what the teacher wrote. The programme has up to three sections; teachers may sit only some of them, possibly on different dates.
+You are given one teacher's results in one test: the sections they sat, with marks, percentage and grade in each, and for every question the marks, the examiner's feedback and a short extract of what the teacher wrote. Questions left blank are marked as such. The programme has up to three sections; teachers may sit only some of them, possibly on different dates.
 
-Write two reports from the same results, both in English.
+Write two reports from the same results, in English. Keep both simple and short: plain, everyday words and short sentences that a busy principal or teacher can read in two minutes, with no jargon. Back each point with the evidence, citing questions and marks, such as "Section A questions 2 and 3 scored 3 out of 8". Write about the teacher by name or as "the teacher", never as "he" or "she". Refer to sections exactly as given, such as "Section A".
 
-1. teacher_report, addressed to the teacher as "you". Its purpose is to help the teacher get better, never to criticise them.
-- Begin by recognising the effort it takes to sit an assessment alongside a full teaching load.
-- Be realistic about the challenges teachers face: large and mixed-ability classes, heavy workloads, limited time and devices, answering in a language that may not be their first, and writing long answers by hand against the clock. Where the marks suggest one of these got in the way, say so kindly rather than treating it as a failing.
-- For each section sat, name what went well with specific examples from their answers, then give next steps: concrete things they can try in their own classroom next week, not general advice.
-- Never use words like poor, weak, fail, lacking or inadequate. Describe gaps as next steps.
-- practice_ideas: three to five small habits or activities the teacher can realistically fit into a normal school week.
-- Do not mention percentages beyond those given, rank the teacher, compare them to others, or mention sections they did not sit.
-- Write about the teacher without gender. Keep the whole report warm, respectful and easy to read.
+1. teacher_report, addressed to the teacher as "you". It helps the teacher get better and never criticises.
+- summary: two or three short sentences: thank the teacher for taking the test, then the main strength and the main next step.
+- went_well: two to four points. Each has a title of two to five words, such as "Clear examples", and one sentence of detail from their answers.
+- next_steps: two to four points in the same way. Each detail is one concrete thing to try in their own classroom next week.
+- practice_ideas: three short habits or activities that fit into a normal school week.
+- Never use words like poor, weak, fail, lacking or inadequate. Be realistic about large classes, heavy workloads, little time, answering in a language that may not be their first, and writing by hand against the clock.
+- Do not rank the teacher, compare them with others, or mention sections they did not sit.
 
-2. management_report, for the school's principal and management. Factual and neutral.
-- summary: two to four sentences on what the results show, naming the sections sat.
-- For each section sat: evidence (what the marks show, citing question numbers and marks), strengths and gaps as short factual points.
-- roles: responsibilities this teacher could take on that the evidence supports (for example mentoring colleagues in an area, leading parent communication, or championing digital teaching). Give the evidence for each. Leave it empty if the results do not support any.
-- support: specific training, mentoring or classroom support that would help, most useful first.
-- Do not speculate about the teacher's personal life, health or motives. Do not treat unsat sections as weaknesses. If only one or two sections were sat, say that the picture is partial.
+2. management_report, for the principal and management. Factual and neutral.
+- summary: two or three short sentences on what the results show, naming the sections sat, for example "The teacher did well in Section A and needs support in Section B. The classroom examples are practical, but several answers did not say how the idea would be taught." If questions were left blank, say how many. Do not mention training days; they are added after the summary.
+- findings: three to five findings, the most important first; the report numbers them. Each has:
+  - title: two to five words, such as "Checking understanding";
+  - summary: one or two sentences for the first page, citing questions and marks;
+  - details: two or three short points from the teacher's answers, for the details page;
+  - why_it_matters: one sentence on why it matters for the children or the school;
+  - action: one or two sentences on what will be done about it.
+  When questions were left blank, make one finding about them, such as "Questions left blank", listing them.
+- school_needs: two or three things the school needs to do, such as setting aside time for the training, arranging classroom visits by an UpSchool coach, or providing teaching materials.
+- roles: up to two responsibilities the evidence supports, such as mentoring colleagues in a section, each with its evidence. Leave it empty if the results do not support any.
+- support: up to three kinds of support that would help, most useful first.
+- Do not speculate about the teacher's personal life, health or motives. Do not treat sections not sat as weaknesses. If only one or two sections were sat, say that the picture is partial.`;
 
-Refer to sections exactly as given, for example "Section A".`;
+// A titled point: a few words, then a sentence.
+const POINT = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['title', 'detail'],
+  properties: { title: { type: 'string' }, detail: { type: 'string' } },
+};
 
 const TEACHER_SCHEMA = {
   type: 'object',
@@ -128,46 +169,36 @@ const TEACHER_SCHEMA = {
     teacher_report: {
       type: 'object',
       additionalProperties: false,
-      required: ['opening', 'sections', 'practice_ideas', 'closing'],
+      required: ['summary', 'went_well', 'next_steps', 'practice_ideas'],
       properties: {
-        opening: { type: 'string' },
-        sections: {
-          type: 'array',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            required: ['section', 'went_well', 'next_steps'],
-            properties: {
-              section: { type: 'string' },
-              went_well: { type: 'array', items: { type: 'string' } },
-              next_steps: { type: 'array', items: { type: 'string' } },
-            },
-          },
-        },
+        summary: { type: 'string' },
+        went_well: { type: 'array', items: POINT },
+        next_steps: { type: 'array', items: POINT },
         practice_ideas: { type: 'array', items: { type: 'string' } },
-        closing: { type: 'string' },
       },
     },
     management_report: {
       type: 'object',
       additionalProperties: false,
-      required: ['summary', 'sections', 'roles', 'support'],
+      required: ['summary', 'findings', 'school_needs', 'roles', 'support'],
       properties: {
         summary: { type: 'string' },
-        sections: {
+        findings: {
           type: 'array',
           items: {
             type: 'object',
             additionalProperties: false,
-            required: ['section', 'evidence', 'strengths', 'gaps'],
+            required: ['title', 'summary', 'details', 'why_it_matters', 'action'],
             properties: {
-              section: { type: 'string' },
-              evidence: { type: 'string' },
-              strengths: { type: 'array', items: { type: 'string' } },
-              gaps: { type: 'array', items: { type: 'string' } },
+              title: { type: 'string' },
+              summary: { type: 'string' },
+              details: { type: 'array', items: { type: 'string' } },
+              why_it_matters: { type: 'string' },
+              action: { type: 'string' },
             },
           },
         },
+        school_needs: { type: 'array', items: { type: 'string' } },
         roles: {
           type: 'array',
           items: {
@@ -188,6 +219,8 @@ const clip = (text, max) => {
   return value.length > max ? `${value.slice(0, max)}…` : value;
 };
 
+const marks = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
 // The schema with a training_plan to fill in as well, asked for only when
 // there is a plan to write.
 const withPlan = (schema, plan) => ({
@@ -198,6 +231,7 @@ const withPlan = (schema, plan) => ({
 
 // The results as the report writer sees them.
 function describeResults(teacher, test, sections) {
+  const blank = sections.flatMap((s) => s.questions.filter(isBlank));
   const lines = [
     `Teacher: ${teacher.name}`,
     teacher.grade ? `Teaches: ${teacher.grade}` : null,
@@ -210,6 +244,7 @@ function describeResults(teacher, test, sections) {
       .filter((key) => !sections.some((s) => s.key === key))
       .map((key) => `Section ${key}`)
       .join(', ') || 'none'}`,
+    `Questions left blank: ${blank.length ? `${blank.length}, worth ${marks(blank.reduce((sum, q) => sum + (Number(q.max_marks) || 0), 0))} marks in all` : 'none'}`,
     '',
   ];
   for (const section of sections) {
@@ -217,6 +252,10 @@ function describeResults(teacher, test, sections) {
       `== ${section.name}${section.title ? ` (${section.title})` : ''}: ${section.awarded} / ${section.max} marks, ${section.percent}%, grade ${section.grade} ${section.grade_label}${section.date ? `, sat on ${section.date}` : ''}`
     );
     for (const q of section.questions) {
+      if (isBlank(q)) {
+        lines.push(`Q${q.question}: 0 / ${q.max_marks}. Left blank.`);
+        continue;
+      }
       lines.push(`Q${q.question}: ${q.marks_awarded} / ${q.max_marks}. Examiner: ${clip(q.feedback, 400)}`);
       if (q.teacher_answer) lines.push(`   Teacher wrote: ${clip(q.teacher_answer, 300)}`);
     }
@@ -225,18 +264,13 @@ function describeResults(teacher, test, sections) {
   return lines.filter((line) => line !== null).join('\n');
 }
 
-// Keeps only sections the teacher actually sat, in their order, and fills in
-// the name each one should carry.
-function matchSections(items, sections) {
-  const byKey = new Map();
-  for (const item of items ?? []) {
-    const key = sectionKey(item.section);
-    if (!byKey.has(key)) byKey.set(key, item);
-  }
-  return sections.filter((s) => byKey.has(s.key)).map((s) => ({ ...byKey.get(s.key), section: s.name }));
-}
-
-const strings = (list) => (Array.isArray(list) ? list.map((item) => String(item).trim()).filter(Boolean) : []);
+const text = (value, max = 1200) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+const strings = (list, most = 8) => (Array.isArray(list) ? list.map((item) => text(item, 600)).filter(Boolean).slice(0, most) : []);
+const points = (list, most = 6) =>
+  (Array.isArray(list) ? list : [])
+    .map((p) => ({ title: text(p?.title, 120), detail: text(p?.detail, 600) }))
+    .filter((p) => p.title || p.detail)
+    .slice(0, most);
 
 // A section's questions as the reports show them: marks, the examiner's
 // feedback and the start of what the teacher wrote.
@@ -245,6 +279,7 @@ export function questionsOf(section) {
     question: String(q.question ?? ''),
     max_marks: Number(q.max_marks) || 0,
     marks_awarded: Number(q.marks_awarded) || 0,
+    blank: isBlank(q),
     feedback: String(q.feedback ?? '').trim(),
     teacher_answer: clip(q.teacher_answer, 400),
   }));
@@ -280,33 +315,39 @@ async function writeTeacherReports(teacherId, testId, reportId) {
 
   const t = raw.teacher_report ?? {};
   const m = raw.management_report ?? {};
+  const findings = (Array.isArray(m.findings) ? m.findings : [])
+    .map((f) => ({
+      title: text(f?.title, 120),
+      summary: text(f?.summary, 600),
+      details: strings(f?.details, 4),
+      why_it_matters: text(f?.why_it_matters, 400),
+      action: text(f?.action, 600),
+    }))
+    .filter((f) => f.title || f.summary)
+    .slice(0, 6);
   const content = {
+    layout: LAYOUT,
     test_name: test.name,
+    stage: stageOf(teacher.grade),
     sections: snapshot(sections, { questions: true }),
     potential: potentialFor(sections),
-    training: writtenPlan(plan, raw.training_plan, framework),
+    need: needOf(sections),
+    training: writtenPlan(plan, raw.training_plan, framework, findings.length),
     teacher: {
-      opening: String(t.opening ?? '').trim(),
-      sections: matchSections(t.sections, sections).map((s) => ({
-        section: s.section,
-        went_well: strings(s.went_well),
-        next_steps: strings(s.next_steps),
-      })),
-      practice_ideas: strings(t.practice_ideas),
-      closing: String(t.closing ?? '').trim(),
+      summary: text(t.summary),
+      went_well: points(t.went_well),
+      next_steps: points(t.next_steps),
+      practice_ideas: strings(t.practice_ideas, 5),
     },
     management: {
-      summary: String(m.summary ?? '').trim(),
-      sections: matchSections(m.sections, sections).map((s) => ({
-        section: s.section,
-        evidence: String(s.evidence ?? '').trim(),
-        strengths: strings(s.strengths),
-        gaps: strings(s.gaps),
-      })),
-      roles: (m.roles ?? [])
-        .map((r) => ({ role: String(r.role ?? '').trim(), evidence: String(r.evidence ?? '').trim() }))
-        .filter((r) => r.role),
-      support: strings(m.support),
+      summary: text(m.summary),
+      findings,
+      school_needs: strings(m.school_needs, 4),
+      roles: (Array.isArray(m.roles) ? m.roles : [])
+        .map((r) => ({ role: text(r?.role, 200), evidence: text(r?.evidence, 400) }))
+        .filter((r) => r.role)
+        .slice(0, 2),
+      support: strings(m.support, 4),
     },
   };
 
@@ -332,16 +373,82 @@ export function queueTeacherReports(teacherId, testId) {
   return null;
 }
 
+// Whether a written report is in an earlier layout, and needs rebuilding to
+// be shown.
+export const isOldLayout = (report) => Boolean(report?.content) && report.content.layout !== LAYOUT;
+
 // Whether the marks have changed since the report was written.
 export function isStale(report, sections) {
   return Boolean(report?.basis) && report.basis !== fingerprint(resultsBasis(sections));
 }
 
-/* ------------------------------------------------- the whole school's report */
+// Whether growth paths were added or changed after the report was written,
+// so its training plan is out of date.
+function pathsChanged(report, framework) {
+  return Boolean(report?.content && framework) && report.content.training?.version !== framework.version;
+}
 
-// Figures for the management report on all teachers, worked out from the
-// marks: each teacher's sections, how each section went across the school,
-// and who could help whom.
+// Whether a report needs rebuilding, for any of those reasons: the board, the
+// dashboard and the profile page go by this.
+export function isOutOfDate(report, sections, framework = getFramework()) {
+  return isOldLayout(report) || pathsChanged(report, framework) || isStale(report, sections);
+}
+
+// Builds every teacher report in a test that is missing, failed or out of
+// date, for the button on the Assessments page. Returns how many it started,
+// or the reason it could not.
+export function queueTestReports(schoolId, testId) {
+  const test = selectTest.get(testId);
+  if (!test || test.school_id !== schoolId) return { error: 'Test not found for this school.' };
+  if (!openaiConfigured()) return { error: 'OpenAI is not set up on the server: the OPENAI_API_KEY secret is missing.' };
+  const framework = getFramework();
+  let started = 0;
+  for (const teacher of selectTeachersOfSchool.all(schoolId)) {
+    const sections = teacherResults(teacher.id, testId);
+    if (!sections.length) continue;
+    const report = findReport('teacher', testId, teacher.id);
+    const due = !report || report.status === 'failed' || (report.status === 'done' && isOutOfDate(report, sections, framework));
+    if (due && !queueTeacherReports(teacher.id, testId)) started += 1;
+  }
+  return { started };
+}
+
+/* ------------------------------------------------------- the school report */
+
+// A group of teachers' figures: how many there are, their average in each
+// section among those who sat it, and how many are on track, developing or
+// in need of support.
+function groupFigures(members, keys) {
+  const averages = {};
+  const sat = {};
+  for (const key of keys) {
+    const percents = members.flatMap((t) => t.sections.filter((s) => s.key === key && s.percent !== null).map((s) => s.percent));
+    sat[key] = percents.length;
+    averages[key] = percents.length ? Math.round(percents.reduce((a, b) => a + b, 0) / percents.length) : null;
+  }
+  const needs = Object.fromEntries(NEEDS.map((n) => [n.key, members.filter((t) => t.need === n.key).length]));
+  return { teachers: members.length, averages, sat, needs };
+}
+
+// The school's stages, youngest first, each with its teachers' figures. Only
+// stages with assessed teachers are listed; teachers whose classes name no
+// stage come last.
+const NO_STAGE = { key: null, name: 'Stage Not Given', classes: '' };
+
+function stageStats(assessed, keys) {
+  return [...STAGES, NO_STAGE]
+    .map((stage) => {
+      const members = assessed.filter((t) => t.stage === stage.key);
+      return members.length ? { key: stage.key, name: stage.name, classes: stage.classes, ...groupFigures(members, keys) } : null;
+    })
+    .filter(Boolean);
+}
+
+const stageName = (key) => STAGES.find((stage) => stage.key === key)?.name ?? null;
+
+// Figures for the school report, worked out from the marks: each teacher's
+// sections, stage and need, how each section went across the school and in
+// each stage, and who could help whom.
 export function schoolOverview(schoolId, testId) {
   const teachers = selectTeachersOfSchool.all(schoolId).map((teacher) => {
     const sections = teacherResults(teacher.id, testId);
@@ -350,8 +457,10 @@ export function schoolOverview(schoolId, testId) {
       name: teacher.name,
       grade: teacher.grade,
       subjects: teacher.subjects,
+      stage: stageOf(teacher.grade),
       sections: snapshot(sections),
       potential: potentialFor(sections),
+      need: needOf(sections),
     };
   });
 
@@ -377,6 +486,8 @@ export function schoolOverview(schoolId, testId) {
   return {
     teachers,
     section_stats: sectionStats,
+    stage_stats: stageStats(assessed, keys),
+    whole: groupFigures(assessed, keys),
     assessed: assessed.length,
     not_assessed: teachers.filter((t) => !t.sections.length).map((t) => t.name),
     mentors: assessed.filter((t) => t.potential?.level === 'mentor').map((t) => t.name),
@@ -384,41 +495,48 @@ export function schoolOverview(schoolId, testId) {
   };
 }
 
-const SCHOOL_INSTRUCTIONS = `You write the management report on all the teachers of one school in a teacher training assessment programme run in Indian schools.
+const SCHOOL_INSTRUCTIONS = `You write the school report for a teacher training assessment programme run in Indian schools: one short report on all the teachers of one school, for the principal and management.
 
-You are given every assessed teacher's results in one test, section by section, with a rule-based potential identifier for each teacher and, where available, the gaps noted in their individual reports. Teachers may have sat only some sections, so only compare teachers within a section.
+You are given every assessed teacher's results in one test, with figures by section, by need and by school stage (Pre-Primary, Primary, Middle School, High School and PUC), a rule-based potential identifier for each teacher and, where available, the main findings from their own reports. Teachers may have sat only some sections, so only compare teachers within a section.
 
-Write for the principal and management, in English. Be factual and neutral, and base every statement on the figures given.
-- overview: one short paragraph on how the staff did overall in each section, and how complete the picture is.
-- section_insights: for each section with results, the pattern across teachers and the single most useful training priority for that section.
-- recommendations: four to six concrete actions for the school's professional development plan over the next term, most important first. Where some teachers are strong in a section and others need support in it, suggest peer mentoring by name.
+Write in English that is simple and short: plain, everyday words and short sentences that a busy principal can read in two minutes, with no jargon. Base every statement on the figures given and cite them, such as "In Primary, 5 of 9 teachers are at Grade C in Section C". Be factual and neutral. Write about teachers by name, never as "he" or "she". Refer to sections exactly as given, such as "Section A".
+- summary: two or three short sentences: how many teachers took the test, how many need support, and the main pattern by stage or section.
+- findings: three to five findings, the most important first; the report numbers them. Each has a title of three to eight words that states the finding, such as "Primary teachers are strong in Section C", and a detail of one or two sentences with the figures. Look for patterns by stage and by section, and name teachers who are strong in a section and could help others.
+- actions: three to five things UpSchool's team and the school will do, the most important first, each one sentence, such as "Hold workshops on Section B for the 6 teachers at Grade D, with Middle School and High School teachers in separate groups." Give each a timing such as "Weeks 1–2", or "" when there is none. Pair teachers strong in a section with those who need help in it, in the same stage where possible.
+- school_needs: two or three things the school needs to do, such as fixing the training calendar, freeing time for teachers who mentor colleagues, or arranging classroom visits by UpSchool coaches.
 - Do not rank teachers against each other beyond what the figures show, and do not speculate about personal circumstances.`;
 
 const SCHOOL_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['overview', 'section_insights', 'recommendations'],
+  required: ['summary', 'findings', 'actions', 'school_needs'],
   properties: {
-    overview: { type: 'string' },
-    section_insights: {
+    summary: { type: 'string' },
+    findings: { type: 'array', items: POINT },
+    actions: {
       type: 'array',
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['section', 'pattern', 'training_priority'],
-        properties: {
-          section: { type: 'string' },
-          pattern: { type: 'string' },
-          training_priority: { type: 'string' },
-        },
+        required: ['timing', 'action'],
+        properties: { timing: { type: 'string' }, action: { type: 'string' } },
       },
     },
-    recommendations: { type: 'array', items: { type: 'string' } },
+    school_needs: { type: 'array', items: { type: 'string' } },
   },
 };
 
+// What the school report is written from: each teacher's stage and results.
 function schoolBasis(overview) {
-  return fingerprint(overview.teachers.map((t) => [t.id, t.sections.map((s) => [s.key, s.assessment_id, s.percent])]));
+  return fingerprint(overview.teachers.map((t) => [t.id, t.stage, t.sections.map((s) => [s.key, s.assessment_id, s.percent])]));
+}
+
+// The main findings of a teacher's own report, for the school report.
+function findingsOf(report) {
+  const m = report?.content?.management;
+  if (!m) return [];
+  if (Array.isArray(m.findings)) return m.findings.map((f) => `${f.title}: ${f.summary}`);
+  return (m.sections ?? []).flatMap((s) => (s.gaps ?? []).map((g) => `${s.section}: ${g}`));
 }
 
 async function writeSchoolReport(schoolId, testId, reportId) {
@@ -427,6 +545,9 @@ async function writeSchoolReport(schoolId, testId, reportId) {
   const overview = schoolOverview(schoolId, testId);
   if (!overview.assessed) throw friendly('No teacher in this test has marked sections yet.');
 
+  const keys = overview.section_stats.map((s) => s.key);
+  const teachers = (n) => `${n} teacher${n === 1 ? '' : 's'}`;
+  const averages = (figures) => keys.map((key) => `${sectionName(key)} ${figures.averages[key] === null ? 'not sat' : `${figures.averages[key]}%`}`).join(', ');
   const lines = [
     `School: ${school.name}`,
     `Test: ${test.name}`,
@@ -438,16 +559,25 @@ async function writeSchoolReport(schoolId, testId, reportId) {
       (s) => `${s.name}${s.title ? ` (${s.title})` : ''}: ${s.sat} sat, average ${s.average}%, grades ${Object.entries(s.counts).map(([g, n]) => `${g}: ${n}`).join(', ')}`
     ),
     '',
+    'Teachers by need, from their lowest grade:',
+    ...NEEDS.map((n) => `- ${n.label} (${n.meaning}): ${overview.whole.needs[n.key]}`),
+    '',
+    'By school stage (stage averages are among that stage\'s teachers who sat the section):',
+    ...overview.stage_stats.map(
+      (s) => `- ${s.name}${s.classes ? ` (${s.classes})` : ''}: ${teachers(s.teachers)}; ${averages(s)}; ${NEEDS.map((n) => `${n.label} ${s.needs[n.key]}`).join(', ')}`
+    ),
+    `- Whole school: ${teachers(overview.whole.teachers)}; ${averages(overview.whole)}`,
+    '',
     'Teachers:',
   ];
   for (const teacher of overview.teachers.filter((t) => t.sections.length)) {
-    const report = findReport('teacher', testId, teacher.id);
-    const gaps = report?.content?.management?.sections?.flatMap((s) => s.gaps.map((g) => `${s.section}: ${g}`)) ?? [];
+    const found = findingsOf(findReport('teacher', testId, teacher.id));
+    const about = [stageName(teacher.stage), teacher.grade, teacher.subjects].filter(Boolean).join(', ');
     lines.push(
-      `- ${teacher.name}${teacher.subjects ? ` (${teacher.subjects}${teacher.grade ? `, ${teacher.grade}` : ''})` : ''}: ` +
+      `- ${teacher.name}${about ? ` (${about})` : ''}: ` +
         teacher.sections.map((s) => `${s.name} ${s.percent}% (${s.grade})`).join(', ') +
         `. Potential: ${teacher.potential?.headline ?? '—'}.` +
-        (gaps.length ? ` Noted gaps: ${gaps.slice(0, 4).map((g) => clip(g, 160)).join('; ')}` : '')
+        (found.length ? ` Main findings: ${found.slice(0, 4).map((f) => clip(f, 160)).join('; ')}` : '')
     );
   }
   if (overview.not_assessed.length) lines.push('', `Not yet assessed in this test: ${overview.not_assessed.join(', ')}`);
@@ -456,24 +586,25 @@ async function writeSchoolReport(schoolId, testId, reportId) {
   const planning = Boolean(training?.paths.length);
   const raw = await requestJson({
     instructions: SCHOOL_INSTRUCTIONS + (planning ? SCHOOL_PLAN_INSTRUCTIONS : ''),
-    content: [{ type: 'input_text', text: lines.join('\n') + describeSchoolTraining(training) }],
+    content: [{ type: 'input_text', text: lines.join('\n') + describeSchoolTraining(training, stageName) }],
     name: 'school_report',
-    schema: planning ? withPlan(SCHOOL_SCHEMA, SCHOOL_PLAN_SCHEMA) : SCHOOL_SCHEMA,
+    schema: SCHOOL_SCHEMA,
     task: 'write this report',
     retry: 'Press Build report to try again.',
   });
 
   const content = {
+    layout: LAYOUT,
     test_name: test.name,
     ...overview,
-    overview: String(raw.overview ?? '').trim(),
-    section_insights: matchSections(raw.section_insights, overview.section_stats).map((s) => ({
-      section: s.section,
-      pattern: String(s.pattern ?? '').trim(),
-      training_priority: String(s.training_priority ?? '').trim(),
-    })),
-    recommendations: strings(raw.recommendations),
-    training: writtenSchoolPlan(training, raw.training_plan),
+    summary: text(raw.summary),
+    findings: points(raw.findings),
+    actions: (Array.isArray(raw.actions) ? raw.actions : [])
+      .map((a) => ({ timing: text(a?.timing, 60), action: text(a?.action, 600) }))
+      .filter((a) => a.action)
+      .slice(0, 6),
+    school_needs: strings(raw.school_needs, 4),
+    training,
   };
   saveReport.run({ id: reportId, content: JSON.stringify(content), basis: schoolBasis(overview), model: OPENAI_MODEL });
 }

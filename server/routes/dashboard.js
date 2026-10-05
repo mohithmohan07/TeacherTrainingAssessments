@@ -1,7 +1,7 @@
 import express from 'express';
 import db from '../db.js';
 import { GRADES, testFor } from '../results.js';
-import { findReport, isStale, schoolOverview, schoolReportIsStale } from '../reports.js';
+import { findReport, isOldLayout, isOutOfDate, schoolOverview, schoolReportIsStale } from '../reports.js';
 
 const router = express.Router();
 
@@ -51,7 +51,7 @@ function schoolSummary(school, test) {
 
     if (hasResults) {
       const report = findReport('teacher', test.id, teacher.id);
-      if (!report || report.status === 'failed' || (report.status === 'done' && isStale(report, teacher.sections))) {
+      if (!report || report.status === 'failed' || (report.status === 'done' && isOutOfDate(report, teacher.sections))) {
         waiting.reports_to_build.push(person(teacher));
       }
     }
@@ -77,6 +77,7 @@ function schoolSummary(school, test) {
       status: schoolReport.status,
       written_at: schoolReport.written_at,
       stale: schoolReportIsStale(schoolReport, overview),
+      old_layout: isOldLayout(schoolReport),
     },
   };
 }

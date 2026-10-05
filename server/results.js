@@ -5,6 +5,7 @@
 // if a section was marked more than once, the latest marking counts.
 import crypto from 'node:crypto';
 import db from './db.js';
+import { levelsFromText } from './papers.js';
 
 // Grade bands, applied to each section's percentage.
 export const GRADES = [
@@ -87,6 +88,9 @@ function groupSections(aiResult) {
 }
 
 const answered = (q) => String(q.teacher_answer ?? '').trim() !== '' || Number(q.marks_awarded) > 0;
+
+// A question in a section the teacher sat with nothing written and no marks.
+export const isBlank = (q) => !answered(q);
 
 // A section with nothing written against any of its questions was not sat,
 // so it is left out rather than graded 0. This matters when the whole paper
@@ -192,8 +196,8 @@ export function potentialFor(sections) {
     headline = `Strength in ${sectionList(strengths)}`;
     meaning = [
       'A real strength to build on.',
-      developing.length ? `Still developing in ${names(developing)}.` : '',
-      support.length ? `Needs focused support in ${names(support)}.` : '',
+      developing.length ? `Still developing in ${sectionList(developing)}.` : '',
+      support.length ? `Needs focused support in ${sectionList(support)}.` : '',
     ].filter(Boolean).join(' ');
   } else if (!support.length) {
     level = 'developing';
@@ -202,7 +206,7 @@ export function potentialFor(sections) {
   } else {
     level = 'support';
     headline = 'Priority for Support';
-    meaning = `Needs focused support in ${names(support)} before other responsibilities.`;
+    meaning = `Needs focused support in ${sectionList(support)} before other responsibilities.`;
   }
 
   const areas = Object.keys(SECTION_TITLES);
@@ -218,6 +222,40 @@ export function potentialFor(sections) {
     evidence: sat && sat < areas.length ? `Based on ${sat} of ${areas.length} sections so far.` : `Based on ${graded.length} section${graded.length === 1 ? '' : 's'}.`,
     provisional: sat < areas.length,
   };
+}
+
+// How a teacher stands overall, from their lowest grade: on track when every
+// section sat is Proficient or better, developing when the lowest is C, and
+// in need of support with any section at D. These match the training rule:
+// a section at C or D is what puts a teacher on a growth path.
+export const NEEDS = [
+  { key: 'on_track', label: 'On Track', meaning: 'Grade B or better in every section taken' },
+  { key: 'developing', label: 'Developing', meaning: 'A section at Grade C, none at Grade D' },
+  { key: 'support', label: 'Needs Support', meaning: 'A section at Grade D' },
+];
+
+export function needOf(sections) {
+  const grades = sections.filter((s) => s.percent !== null && s.grade).map((s) => s.grade);
+  if (!grades.length) return null;
+  if (grades.includes('D')) return 'support';
+  return grades.includes('C') ? 'developing' : 'on_track';
+}
+
+// The school stages the report on all teachers is split by, youngest first.
+export const STAGES = [
+  { key: 'pre-primary', name: 'Pre-Primary', classes: 'Nursery to UKG' },
+  { key: 'primary', name: 'Primary', classes: 'Classes 1 to 5' },
+  { key: 'middle-school', name: 'Middle School', classes: 'Classes 6 to 8' },
+  { key: 'secondary', name: 'High School', classes: 'Classes 9 and 10' },
+  { key: 'senior-secondary', name: 'PUC', classes: 'I and II PUC' },
+];
+
+// A teacher's stage, read from the classes typed as their grade. Someone who
+// teaches across stages is counted in the highest; null when the grade names
+// no class.
+export function stageOf(gradeText) {
+  const levels = levelsFromText(gradeText);
+  return STAGES.findLast((stage) => levels.has(stage.key))?.key ?? null;
 }
 
 // A short fingerprint of results, so a report can tell whether the marks it

@@ -7,8 +7,8 @@
 // school. From a teacher's section grades the plan picks a path and shares
 // its days out between the sections that need support, classroom application
 // and a review day, by fixed rules, so every teacher is planned the same way
-// and the days always add up. OpenAI then writes what each block of days
-// covers for that teacher, and how UpSchool's team would run it.
+// and the days always add up. OpenAI then writes, in a few words each, what
+// the teacher works on in each block of days and how UpSchool's team runs it.
 import db from './db.js';
 import { friendly, requestJson } from './openai.js';
 import { GRADES, SECTION_TITLES, fingerprint } from './results.js';
@@ -24,7 +24,6 @@ const upsertSetting = db.prepare(
 const deleteSetting = db.prepare('DELETE FROM settings WHERE key = ?');
 
 const text = (value, max = 2000) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
-const strings = (list) => (Array.isArray(list) ? list.map((item) => text(item)).filter(Boolean) : []);
 const wholeNumber = (value) => {
   const n = Math.round(Number(value));
   return value === '' || value === null || value === undefined || !Number.isFinite(n) ? null : n;
@@ -155,7 +154,22 @@ export async function readFramework(buffer, filename) {
 // The days a section that needs support asks for before the plan is fitted
 // to its path: more for a section at Beginning than at Developing.
 const SECTION_DAYS = { D: 6, C: 4 };
-const TARGET = GRADES.find((band) => band.grade === 'B');
+
+// The goal for the exit assessment: one grade up in each section that needs
+// support, such as "At least 70% (Grade B) in Section C."
+export function goalFor(focus) {
+  const goals = new Map();
+  for (const s of focus) {
+    const next = GRADES[GRADES.findIndex((band) => band.grade === s.grade) - 1];
+    if (!next) continue;
+    if (!goals.has(next.grade)) goals.set(next.grade, { band: next, names: [] });
+    goals.get(next.grade).names.push(s.name);
+  }
+  const parts = [...goals.values()]
+    .sort((a, b) => a.band.min - b.band.min)
+    .map(({ band, names }) => `at least ${band.min}% (Grade ${band.grade}) in ${listing(names.sort())}`);
+  return parts.length ? `${parts.join(', and ').replace(/^a/, 'A')}.` : '';
+}
 
 // Shares `total` days out in proportion to `weights` (largest remainder), and
 // gives every block a day before any block gets a second.
@@ -194,13 +208,15 @@ export function trainingPlanFor(sections, framework) {
     .sort((a, b) => (a.grade !== b.grade ? (a.grade === 'D' ? -1 : 1) : a.percent - b.percent || a.key.localeCompare(b.key)));
   const strengths = graded.filter((s) => !(s.grade in SECTION_DAYS));
   const areas = Object.keys(SECTION_TITLES);
-  const sat = graded.filter((s) => areas.includes(s.key)).length;
+  const notSat = graded.some((s) => areas.includes(s.key)) ? areas.filter((key) => !graded.some((s) => s.key === key)).map((key) => `Section ${key}`) : [];
 
   const plan = {
     version: framework.version,
     focus: focus.map(summarise),
     strengths: strengths.map(summarise),
-    partial: sat && sat < areas.length ? `Based on ${sat} of ${areas.length} sections so far; the plan may change when the others are assessed.` : null,
+    partial: notSat.length
+      ? `${listing(notSat)} ${notSat.length === 1 ? 'is' : 'are'} not taken yet; the plan may change once ${notSat.length === 1 ? 'it is' : 'they are'}.`
+      : null,
   };
   if (!focus.length) {
     return {
@@ -248,7 +264,14 @@ export function trainingPlanFor(sections, framework) {
     reason:
       `${listing(focus.map(about))} ${focus.length === 1 ? 'needs' : 'need'} support` +
       (strengths.length ? `, while ${listing(strengths.map(about))} ${strengths.length === 1 ? 'is already a strength' : 'are already strengths'}.` : '.'),
-    target: `${TARGET.label} (${TARGET.min}% or more) or better in ${listing(focus.map((s) => s.name))} at the exit assessment.`,
+    // Why the plan starts where it does, when it covers more than one section.
+    order:
+      focus.length < 2
+        ? null
+        : focus[0].grade !== focus[1].grade
+          ? `We start with ${focus[0].name} because it is at Grade ${focus[0].grade}.`
+          : `We start with ${focus[0].name} because it had the lower score.`,
+    goal: goalFor(focus),
   };
 }
 
@@ -260,61 +283,48 @@ export function describeTeacherPlan(plan) {
     `TRAINING PLAN (fixed): ${plan.path.name}${plan.path.scope ? `, for ${plan.path.scope.replace(/\.$/, '').toLowerCase()}` : ''}. ${plan.days} days in all.`,
     `Why: ${plan.reason}`,
     ...plan.blocks.map((b) => `Block ${b.number}, ${dayRange(b.from, b.to)} (${plural(b.days, 'day')}): ${b.title}${b.grade ? `, grade ${b.grade} ${b.grade_label}` : ''}`),
+    `Goal for the exit assessment: ${plan.goal}`,
   ].join('\n');
 }
 
 export const TEACHER_PLAN_INSTRUCTIONS = `
 
-3. training_plan, for the management report, from the TRAINING PLAN given after the results. Its path, blocks and days are fixed: never change them.
-- blocks: for each block, by its number:
-  - focus: three to five specific things to work on in those days. For a section, take them from this teacher's answers and the examiner's feedback, citing question numbers where it helps. For classroom application, what the teacher will practise in their own lessons and what the coach will look for. For the review, how progress is checked before the exit assessment.
-  - delivery: how UpSchool's team runs those days, in one or two sentences: for example workshops in school led by UpSchool trainers, demonstration lessons, lessons observed by an UpSchool coach with feedback, or online practice tasks.
-  - outcome: what the teacher should be able to do by the end of the block, in one sentence.
-- summary: two or three sentences for management on why this path suits the teacher and what it should achieve. Do not repeat the day counts.
-- execution: four to six steps for how UpSchool's team would carry out the plan with the school, from agreeing the dates to the exit assessment, each with a short stage name and one or two sentences of detail.
-- exit_focus: what the exit assessment should look for in this teacher, in one or two sentences.
-- With a training plan, management_report.support lists only support beyond the plan, such as mentoring by a colleague, classroom resources or arrangements the school can make: two to four items.
-- Never mention a proposal, a framework document, prices, fees or payments.`;
+3. training_plan, for the management report, from the TRAINING PLAN given after the results. Its path, blocks and days are fixed: never change them. For each block, by its number:
+- summary: one short sentence, starting with a verb, on what happens in those days, for a list headed "What We Will Do". For example: "Plan short lessons that check what pupils have understood at each step." For classroom application, what an UpSchool coach does in the teacher's own classes; for the review, how progress is checked before the exit assessment.
+- works_on: what the teacher works on in those days, as a few topics in under 15 words, taken from this teacher's answers. For example: "Lesson openings, questioning, checking understanding".
+- how: how UpSchool's team runs those days, in under 12 words. For example: "UpSchool trainer at school: demonstrations, role-play, short practice".
+- points: the numbers of the management_report findings these days work on, counting from 1.
+With a training plan, each finding's action says what UpSchool's team will do about it during the plan, without day numbers, and management_report.support lists only support beyond the plan, such as mentoring by a colleague or classroom resources.
+Never mention a proposal, a framework document, prices, fees or payments.`;
 
 export const TEACHER_PLAN_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['summary', 'blocks', 'execution', 'exit_focus'],
+  required: ['blocks'],
   properties: {
-    summary: { type: 'string' },
     blocks: {
       type: 'array',
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['block', 'focus', 'delivery', 'outcome'],
+        required: ['block', 'summary', 'works_on', 'how', 'points'],
         properties: {
           block: { type: 'integer' },
-          focus: { type: 'array', items: { type: 'string' } },
-          delivery: { type: 'string' },
-          outcome: { type: 'string' },
+          summary: { type: 'string' },
+          works_on: { type: 'string' },
+          how: { type: 'string' },
+          points: { type: 'array', items: { type: 'integer' } },
         },
       },
     },
-    execution: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['stage', 'detail'],
-        properties: { stage: { type: 'string' }, detail: { type: 'string' } },
-      },
-    },
-    exit_focus: { type: 'string' },
   },
 };
 
-const steps = (list) =>
-  (Array.isArray(list) ? list : []).map((step) => ({ stage: text(step?.stage, 120), detail: text(step?.detail) })).filter((step) => step.detail);
-
 // The plan as the report keeps it: the fixed path and days, what OpenAI wrote
 // for each block, and the framework's own words on what follows the plan.
-export function writtenPlan(plan, written, framework) {
+// `findings` is how many findings the report has, so a block only points at
+// ones that are there.
+export function writtenPlan(plan, written, framework, findings = 0) {
   if (!plan) return null;
   const byNumber = new Map((written?.blocks ?? []).map((block) => [Number(block.block), block]));
   return {
@@ -322,13 +332,11 @@ export function writtenPlan(plan, written, framework) {
     programme: framework?.programme ?? '',
     exit_assessment: framework?.exit_assessment ?? '',
     continuity: framework?.continuity ?? '',
-    summary: text(written?.summary),
     blocks: plan.blocks.map((block) => {
       const w = byNumber.get(block.number) ?? {};
-      return { ...block, focus: strings(w.focus), delivery: text(w.delivery), outcome: text(w.outcome) };
+      const points = (Array.isArray(w.points) ? w.points : []).map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= findings);
+      return { ...block, summary: text(w.summary, 400), works_on: text(w.works_on, 240), how: text(w.how, 240), points: [...new Set(points)].sort((a, b) => a - b) };
     }),
-    execution: steps(written?.execution),
-    exit_focus: text(written?.exit_focus),
   };
 }
 
@@ -340,17 +348,20 @@ export function schoolTraining(teachers, framework) {
   if (!framework?.paths?.length) return null;
   const planned = teachers
     .filter((t) => t.sections.length)
-    .map((t) => ({ id: t.id, name: t.name, plan: trainingPlanFor(t.sections, framework) }))
+    .map((t) => ({ id: t.id, name: t.name, stage: t.stage ?? null, plan: trainingPlanFor(t.sections, framework) }))
     .filter((t) => t.plan);
   const onPath = planned.filter((t) => t.plan.path);
 
   const paths = framework.paths
     .map((path, index) => {
       const members = onPath.filter((t) => t.plan.path_index === index);
+      const days = members.map((t) => t.plan.days);
       return {
         ...path,
-        teachers: members.map((t) => ({ id: t.id, name: t.name, days: t.plan.days, focus: t.plan.focus.map((f) => f.name) })),
-        teacher_days: members.reduce((sum, t) => sum + t.plan.days, 0),
+        teachers: members.map((t) => ({ id: t.id, name: t.name, stage: t.stage, days: t.plan.days, focus: t.plan.focus.map((f) => f.name) })),
+        teacher_days: days.reduce((a, b) => a + b, 0),
+        days_min: days.length ? Math.min(...days) : 0,
+        days_max: days.length ? Math.max(...days) : 0,
       };
     })
     .filter((path) => path.teachers.length);
@@ -364,7 +375,7 @@ export function schoolTraining(teachers, framework) {
       key,
       name: members[0].focus.name,
       title: members[0].focus.title ?? '',
-      teachers: members.map(({ t, focus, block }) => ({ id: t.id, name: t.name, grade: focus.grade, days: block?.days ?? 0 })),
+      teachers: members.map(({ t, focus, block }) => ({ id: t.id, name: t.name, stage: t.stage, grade: focus.grade, days: block?.days ?? 0 })),
     };
   });
 
@@ -386,18 +397,21 @@ export function schoolTraining(teachers, framework) {
   };
 }
 
-export function describeSchoolTraining(training) {
+// `stageName` turns a teacher's stage key into its name.
+export function describeSchoolTraining(training, stageName = () => null) {
   if (!training?.paths.length) return '';
+  const who = (t) => `${t.name}${stageName(t.stage) ? ` (${stageName(t.stage)})` : ''}`;
   return [
     '',
     'TRAINING PATHS (fixed for each teacher):',
     ...training.paths.map(
-      (p) => `- ${p.name}${p.scope ? ` (${p.scope.replace(/\.$/, '')})` : ''}: ${p.teachers.map((t) => `${t.name}, ${plural(t.days, 'day')} on ${listing(t.focus)}`).join('; ')}`
+      (p) => `- ${p.name}${p.scope ? ` (${p.scope.replace(/\.$/, '')})` : ''}: ${p.teachers.map((t) => `${who(t)}, ${plural(t.days, 'day')} on ${listing(t.focus)}`).join('; ')}`
     ),
     training.none.length ? `- No growth path needed: ${training.none.map((t) => t.name).join(', ')}` : null,
+    `In all: ${plural(training.on_path, 'teacher')} on a path, ${plural(training.teacher_days, 'training day')} added up across them.`,
     'Teachers who need support in the same section:',
     ...training.cohorts.map(
-      (c) => `- ${c.name}${c.title ? ` (${c.title})` : ''}: ${c.teachers.map((t) => `${t.name}, grade ${t.grade}, ${plural(t.days, 'day')}`).join('; ')}`
+      (c) => `- ${c.name}${c.title ? ` (${c.title})` : ''}: ${c.teachers.map((t) => `${who(t)}, grade ${t.grade}, ${plural(t.days, 'day')}`).join('; ')}`
     ),
     training.exit_assessment ? `Exit assessment: ${training.exit_assessment}` : null,
     training.continuity ? `Support after the training: ${training.continuity}` : null,
@@ -407,45 +421,5 @@ export function describeSchoolTraining(training) {
 }
 
 export const SCHOOL_PLAN_INSTRUCTIONS = `
-- training_plan, from the TRAINING PATHS given at the end. Each teacher's path and days are fixed: never change them.
-  - summary: two or three sentences on the training the staff needs as a whole.
-  - phases: four to six phases of a plan of action for the school, in order. Train teachers who need support in the same section together as a cohort where their plans allow. For each: timing (for example "Weeks 1–2"), a short title, who takes part (named teachers or a cohort), what they work on, and how UpSchool's team delivers it.
-  - execution: four to six steps for how UpSchool's team would carry out the plan with the school, from agreeing the timetable to the exit assessments, each with a short stage name and one or two sentences of detail.
-  - Never mention a proposal, a framework document, prices, fees or payments.`;
-
-export const SCHOOL_PLAN_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['summary', 'phases', 'execution'],
-  properties: {
-    summary: { type: 'string' },
-    phases: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['timing', 'title', 'who', 'what', 'delivery'],
-        properties: {
-          timing: { type: 'string' },
-          title: { type: 'string' },
-          who: { type: 'string' },
-          what: { type: 'string' },
-          delivery: { type: 'string' },
-        },
-      },
-    },
-    execution: TEACHER_PLAN_SCHEMA.properties.execution,
-  },
-};
-
-export function writtenSchoolPlan(training, written) {
-  if (!training) return null;
-  return {
-    ...training,
-    summary: text(written?.summary),
-    phases: (Array.isArray(written?.phases) ? written.phases : [])
-      .map((p) => ({ timing: text(p?.timing, 60), title: text(p?.title, 120), who: text(p?.who), what: text(p?.what), delivery: text(p?.delivery) }))
-      .filter((p) => p.title || p.what),
-    execution: steps(written?.execution),
-  };
-}
+- With the TRAINING PATHS given at the end, actions are the plan of action for that training, in order. Each teacher's path and days are fixed: never change them. Train teachers who need support in the same section together as a group, split by stage where that helps (for example Pre-Primary and Primary teachers in one group and the higher classes in another). Give each action a timing such as "Weeks 1–2", and say in a few words how UpSchool's team runs it: workshops in school led by UpSchool trainers, lessons observed by an UpSchool coach, or online practice.
+- Never mention a proposal, a framework document, prices, fees or payments.`;

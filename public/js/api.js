@@ -71,6 +71,7 @@ export const reportsApi = {
   buildTeacher: (teacherId, testId) => api.postJson('/api/reports/teacher', { teacher_id: teacherId, test_id: testId }),
   school: (schoolId, testId) => api.get(`/api/reports/school?school_id=${schoolId}&test_id=${testId}`),
   buildSchool: (schoolId, testId) => api.postJson('/api/reports/school', { school_id: schoolId, test_id: testId }),
+  buildAllTeachers: (schoolId, testId) => api.postJson('/api/reports/teachers', { school_id: schoolId, test_id: testId }),
 };
 
 export const assessmentsApi = {
