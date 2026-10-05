@@ -74,23 +74,44 @@ export function sectionName(key) {
 
 const round = (n) => Math.round(n * 100) / 100;
 
-function groupSections(aiResult) {
-  const sections = new Map();
-  for (const q of aiResult?.questions ?? []) {
-    const key = sectionKey(q.section);
-    if (!sections.has(key)) sections.set(key, { key, awarded: 0, max: 0, questions: [] });
-    const section = sections.get(key);
-    section.awarded += Number(q.marks_awarded) || 0;
-    section.max += Number(q.max_marks) || 0;
-    section.questions.push(q);
-  }
-  return [...sections.values()];
-}
+// How a sitting's marks are counted, chosen each time Evaluate is pressed.
+// Standard counts every question, so one not attempted scores 0 out of its
+// marks. Lenient leaves the questions the teacher did not attempt out of both
+// the marks and the total. Marking the answers is the same either way.
+export const MARKINGS = [
+  { key: 'standard', label: 'Standard', meaning: 'Every question counts. A question not attempted scores 0 and stays in the total.' },
+  { key: 'lenient', label: 'Lenient', meaning: 'Questions not attempted are left out of the marks and the total.' },
+];
+
+// The kind of a marking; markings made before there was a choice are standard.
+export const markingOf = (value) => (value === 'lenient' ? 'lenient' : 'standard');
 
 const answered = (q) => String(q.teacher_answer ?? '').trim() !== '' || Number(q.marks_awarded) > 0;
 
 // A question in a section the teacher sat with nothing written and no marks.
 export const isBlank = (q) => !answered(q);
+
+// Whether a question counts towards the marks and the total.
+export const counts = (q, marking) => markingOf(marking) !== 'lenient' || answered(q);
+
+function groupSections(aiResult) {
+  const marking = markingOf(aiResult?.marking);
+  const sections = new Map();
+  for (const q of aiResult?.questions ?? []) {
+    const key = sectionKey(q.section);
+    if (!sections.has(key)) sections.set(key, { key, awarded: 0, max: 0, marking, left_out: 0, left_out_marks: 0, questions: [] });
+    const section = sections.get(key);
+    section.questions.push(q);
+    if (!counts(q, marking)) {
+      section.left_out += 1;
+      section.left_out_marks += Number(q.max_marks) || 0;
+      continue;
+    }
+    section.awarded += Number(q.marks_awarded) || 0;
+    section.max += Number(q.max_marks) || 0;
+  }
+  return [...sections.values()];
+}
 
 // A section with nothing written against any of its questions was not sat,
 // so it is left out rather than graded 0. This matters when the whole paper
@@ -103,7 +124,7 @@ const sectionWasSat = (section) => section.questions.some(answered);
 export function sittingSections(aiResult) {
   return groupSections(aiResult)
     .filter(sectionWasSat)
-    .map((s) => describe({ ...s, awarded: round(s.awarded), max: round(s.max) }));
+    .map((s) => describe({ ...s, awarded: round(s.awarded), max: round(s.max), left_out_marks: round(s.left_out_marks) }));
 }
 
 // Sections on the paper that the teacher left entirely unanswered.

@@ -79,7 +79,7 @@ export const assessmentsApi = {
   get: (id) => api.get(`/api/assessments/${id}`),
   create: (body) => api.postJson('/api/assessments', body),
   update: (id, body) => api.putJson(`/api/assessments/${id}`, body),
-  evaluate: (id) => api.postJson(`/api/assessments/${id}/evaluate`, {}),
+  evaluate: (id, marking = 'standard') => api.postJson(`/api/assessments/${id}/evaluate`, { marking }),
   saveMarks: (id, marks) => api.putJson(`/api/assessments/${id}/marks`, { marks }),
   swap: (id) => api.postJson(`/api/assessments/${id}/swap`, {}),
   setPapers: (id, paperIds) => api.putJson(`/api/assessments/${id}/papers`, { paper_ids: paperIds }),

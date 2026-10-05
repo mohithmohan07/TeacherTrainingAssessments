@@ -4,6 +4,7 @@ import {
 } from '../ui.js';
 import { schoolsApi, teachersApi, assessmentsApi, testsApi, reportsApi } from '../api.js';
 import { choosePaper, paperFacts, paperThumb } from '../paper-picker.js';
+import { chooseMarking } from '../marking-choice.js';
 import {
   scanner, scanPages, connectScanner, stopScanning, checkScannerOnce, selectScanner, selectedScanner,
   scanBothSides, setScanBothSides, HELPER_DOWNLOAD_URL,
@@ -269,7 +270,7 @@ function teacherBoardCard(state, reload, redraw) {
                 'td',
                 {},
                 teacher.sections.length
-                  ? h('div', { class: 'chips' }, teacher.sections.map((section) => sectionChip(section, { short: true })))
+                  ? [h('div', { class: 'chips' }, teacher.sections.map((section) => sectionChip(section, { short: true }))), lenientNote(teacher.sections)]
                   : h('span', { class: 'hint' }, '—')
               ),
               h(
@@ -565,9 +566,19 @@ function scannerPanel(redraw) {
   }
 }
 
-// Evaluate marks the teacher's scans with OpenAI, then opens the evaluation
-// screen, which shows the marking as it finishes. Without both sets of scans it
-// just opens the screen. If this teacher has no assessment yet, one is created.
+// "Lenient marking" under a teacher's results, naming the sections when only
+// some of them were marked leniently.
+function lenientNote(sections) {
+  const lenient = sections.filter((s) => s.marking === 'lenient');
+  if (!lenient.length) return null;
+  const which = lenient.length < sections.length ? `: ${lenient.map((s) => (/^Section [A-Z]$/.test(s.name) ? s.name.slice(8) : s.name)).join(', ')}` : '';
+  return h('div', { class: 'hint' }, `Lenient marking${which}`);
+}
+
+// Evaluate asks how to count the marks, has OpenAI mark the teacher's scans,
+// then opens the evaluation screen, which shows the marking as it finishes.
+// Without both sets of scans it just opens the screen. If this teacher has no
+// assessment yet, one is created.
 function evaluateButton(state, teacher) {
   const evaluated = teacher.assessment_status === 'evaluated';
   const running = teacher.ai_status === 'running';
@@ -580,11 +591,19 @@ function evaluateButton(state, teacher) {
   button.addEventListener('click', async () => {
     button.disabled = true;
     try {
-      const id = teacher.assessment_id ?? (await teachersApi.currentAssessment(teacher.id, state.testId, state.section)).id;
       const ready = (teacher.question_paper_count > 0 || teacher.papers.length > 0) && teacher.response_count > 0;
+      let marking = null;
       if (!evaluated && !running && ready) {
+        marking = await chooseMarking({ teacherName: teacher.name });
+        if (!marking) {
+          button.disabled = false;
+          return;
+        }
+      }
+      const id = teacher.assessment_id ?? (await teachersApi.currentAssessment(teacher.id, state.testId, state.section)).id;
+      if (marking) {
         try {
-          await assessmentsApi.evaluate(id);
+          await assessmentsApi.evaluate(id, marking);
         } catch (error) {
           toast(error.message, 'error');
         }
@@ -718,7 +737,7 @@ function historyCard(state) {
                     'td',
                     {},
                     row.sections.length
-                      ? h('div', { class: 'chips' }, row.sections.map((section) => sectionChip(section, { short: true })))
+                      ? [h('div', { class: 'chips' }, row.sections.map((section) => sectionChip(section, { short: true }))), lenientNote(row.sections)]
                       : row.score === null
                         ? '—'
                         : `${row.score}${row.max_score ? ` / ${row.max_score}` : ''}`
@@ -773,9 +792,9 @@ export async function renderAssessmentDetail(root, id) {
     polling = false;
   };
 
-  const runEvaluation = async () => {
+  const runEvaluation = async (marking) => {
     try {
-      assessment = await assessmentsApi.evaluate(assessment.id);
+      assessment = await assessmentsApi.evaluate(assessment.id, marking);
       draw();
       watchMarking();
     } catch (error) {
@@ -1066,11 +1085,12 @@ function markingCard(assessment, runEvaluation, onSaved) {
     { class: `btn ${result ? '' : 'btn-primary'}`, type: 'button', disabled: running || !hasScans },
     running ? 'Marking…' : result ? 'Evaluate again' : 'Evaluate'
   );
-  button.addEventListener('click', () => {
-    if (result && !confirmAction('Mark this again with OpenAI? The new marks replace the current ones, including any you corrected.')) return;
+  button.addEventListener('click', async () => {
+    const marking = await chooseMarking({ teacherName: assessment.teacher_name, current: result ? (result.marking ?? 'standard') : null, again: Boolean(result) });
+    if (!marking) return;
     button.disabled = true;
     button.textContent = 'Starting…';
-    runEvaluation();
+    runEvaluation(marking);
   });
 
   let body;
@@ -1093,9 +1113,26 @@ function markingCard(assessment, runEvaluation, onSaved) {
   );
 }
 
+const notAttempted = (q) => !String(q.teacher_answer ?? '').trim() && !(Number(q.marks_awarded) > 0);
+
+// How the marks were counted, chosen when Evaluate was pressed.
+function markingNote(result, sections) {
+  if (result.marking !== 'lenient') return h('p', { class: 'hint' }, 'Standard marking: every question counts, including any not attempted.');
+  const count = sections.reduce((n, s) => n + (s.left_out || 0), 0);
+  const worth = Math.round(sections.reduce((n, s) => n + (s.left_out_marks || 0), 0) * 100) / 100;
+  return h(
+    'p',
+    { class: 'notice' },
+    count
+      ? `Lenient marking: ${count === 1 ? 'one question' : `${count} questions`} not attempted, worth ${worth} marks, ${count === 1 ? 'is' : 'are'} left out of the marks and the total.`
+      : 'Lenient marking: every question was attempted, so nothing is left out.'
+  );
+}
+
 // Each section is graded on its own; there is no overall percentage. Every
 // question's marks can be corrected, and the section grades and reports follow.
 function markingResult(assessment, result, onSaved) {
+  const lenient = result.marking === 'lenient';
   const list = (title, items) =>
     items.length ? h('div', {}, h('h3', {}, title), h('ul', {}, items.map((item) => h('li', {}, item)))) : null;
 
@@ -1122,6 +1159,7 @@ function markingResult(assessment, result, onSaved) {
     { class: 'marking-result' },
     h('div', { class: 'marking-total chips' }, assessment.sections.map((section) => sectionChip(section))),
     h('p', { class: 'hint' }, assessment.sections.map((s) => `${s.name}: ${s.awarded} / ${s.max}${s.grade_label ? ` (${s.grade_label})` : ''}`).join(' · ')),
+    markingNote(result, assessment.sections),
     result.pages_swapped
       ? h(
           'p',
@@ -1155,7 +1193,13 @@ function markingResult(assessment, result, onSaved) {
               {},
               h('td', {}, q.section || '—'),
               h('td', {}, q.question),
-              h('td', { style: 'white-space:nowrap' }, markInputs[i], ` / ${q.max_marks}`),
+              h(
+                'td',
+                { style: 'white-space:nowrap' },
+                markInputs[i],
+                ` / ${q.max_marks}`,
+                notAttempted(q) ? h('span', { class: 'q-blank' }, lenient ? 'not counted' : 'not attempted') : null
+              ),
               h(
                 'td',
                 {},

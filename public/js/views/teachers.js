@@ -118,7 +118,7 @@ function testCard(teacher, entry) {
                   { style: 'cursor:pointer', onclick: () => window.navigate(`/assessments/${s.assessment_id}`) },
                   h('td', {}, h('strong', {}, titleCase(s.name)), s.title ? h('div', { class: 'hint' }, s.title) : null),
                   h('td', {}, formatDate(s.date) || '—'),
-                  h('td', { class: 'right' }, `${s.awarded} / ${s.max}`),
+                  h('td', { class: 'right' }, `${s.awarded} / ${s.max}`, s.marking === 'lenient' ? h('div', { class: 'hint' }, s.left_out ? `Lenient: ${s.left_out} not attempted left out` : 'Lenient') : null),
                   h('td', {}, percentChip(s), s.grade_label ? h('span', { class: 'hint' }, ` ${s.grade_label}`) : null)
                 )
               )

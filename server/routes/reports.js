@@ -56,7 +56,7 @@ function teacherPayload(teacher, test) {
     test,
     grades: GRADES,
     section_titles: SECTION_TITLES,
-    sections: sections.map(({ questions, ...rest }) => ({ ...rest, questions: questionsOf({ questions }) })),
+    sections: sections.map(({ questions, ...rest }) => ({ ...rest, questions: questionsOf({ questions, marking: rest.marking }) })),
     potential: potentialFor(sections),
     report: report && { ...report, stale: isStale(report, sections), old_layout: isOldLayout(report) },
     training: trainingState(),

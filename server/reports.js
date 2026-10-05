@@ -19,6 +19,7 @@ import {
   NEEDS,
   SECTION_TITLES,
   STAGES,
+  counts,
   fingerprint,
   isBlank,
   needOf,
@@ -129,6 +130,8 @@ const TEACHER_INSTRUCTIONS = `You write the reports for a teacher training asses
 
 You are given one teacher's results in one test: the sections they sat, with marks, percentage and grade in each, and for every question the marks, the examiner's feedback and a short extract of what the teacher wrote. Questions left blank are marked as such. The programme has up to three sections; teachers may sit only some of them, possibly on different dates.
 
+A section may be marked leniently: the questions the teacher did not attempt are then left out of both the marks and the total, so its percentage covers only the questions attempted. When you give such a section's marks or percentage, say that they cover the questions attempted, and still mention the questions left blank.
+
 Write two reports from the same results, in English. Keep both simple and short: plain, everyday words and short sentences that a busy principal or teacher can read in two minutes, with no jargon. Back each point with the evidence, citing questions and marks, such as "Section A questions 2 and 3 scored 3 out of 8". Write about the teacher by name or as "the teacher", never as "he" or "she". Refer to sections exactly as given, such as "Section A".
 
 1. teacher_report, addressed to the teacher as "you". It helps the teacher get better and never criticises.
@@ -232,6 +235,7 @@ const withPlan = (schema, plan) => ({
 // The results as the report writer sees them.
 function describeResults(teacher, test, sections) {
   const blank = sections.flatMap((s) => s.questions.filter(isBlank));
+  const leftOut = sections.flatMap((s) => s.questions.filter((q) => !counts(q, s.marking)));
   const lines = [
     `Teacher: ${teacher.name}`,
     teacher.grade ? `Teaches: ${teacher.grade}` : null,
@@ -245,15 +249,18 @@ function describeResults(teacher, test, sections) {
       .map((key) => `Section ${key}`)
       .join(', ') || 'none'}`,
     `Questions left blank: ${blank.length ? `${blank.length}, worth ${marks(blank.reduce((sum, q) => sum + (Number(q.max_marks) || 0), 0))} marks in all` : 'none'}`,
+    leftOut.length ? `Of those, left out of the marks and totals by lenient marking: ${leftOut.length}` : null,
     '',
   ];
   for (const section of sections) {
+    const lenient = section.marking === 'lenient';
     lines.push(
-      `== ${section.name}${section.title ? ` (${section.title})` : ''}: ${section.awarded} / ${section.max} marks, ${section.percent}%, grade ${section.grade} ${section.grade_label}${section.date ? `, sat on ${section.date}` : ''}`
+      `== ${section.name}${section.title ? ` (${section.title})` : ''}: ${section.awarded} / ${section.max} marks, ${section.percent}%, grade ${section.grade} ${section.grade_label}${section.date ? `, sat on ${section.date}` : ''}` +
+        (lenient ? `. Marked leniently: ${section.left_out ? `${section.left_out === 1 ? 'the one question' : `the ${section.left_out} questions`} not attempted (${marks(section.left_out_marks)} marks) ${section.left_out === 1 ? 'is' : 'are'} left out of the marks and the total` : 'every question was attempted'}` : '')
     );
     for (const q of section.questions) {
       if (isBlank(q)) {
-        lines.push(`Q${q.question}: 0 / ${q.max_marks}. Left blank.`);
+        lines.push(`Q${q.question}: 0 / ${q.max_marks}. Left blank.${counts(q, section.marking) ? '' : ' Not counted (lenient marking).'}`);
         continue;
       }
       lines.push(`Q${q.question}: ${q.marks_awarded} / ${q.max_marks}. Examiner: ${clip(q.feedback, 400)}`);
@@ -273,13 +280,15 @@ const points = (list, most = 6) =>
     .slice(0, most);
 
 // A section's questions as the reports show them: marks, the examiner's
-// feedback and the start of what the teacher wrote.
+// feedback and the start of what the teacher wrote, and whether each counts
+// towards the section's marks (lenient marking leaves out those not attempted).
 export function questionsOf(section) {
   return (section.questions ?? []).map((q) => ({
     question: String(q.question ?? ''),
     max_marks: Number(q.max_marks) || 0,
     marks_awarded: Number(q.marks_awarded) || 0,
     blank: isBlank(q),
+    counted: counts(q, section.marking),
     feedback: String(q.feedback ?? '').trim(),
     teacher_answer: clip(q.teacher_answer, 400),
   }));
@@ -289,9 +298,9 @@ export function questionsOf(section) {
 // A teacher's own reports keep the questions too, so a printed report always
 // shows the marks it was written from.
 function snapshot(sections, { questions = false } = {}) {
-  return sections.map(({ key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at, ...rest }) => ({
-    key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at,
-    ...(questions ? { questions: questionsOf(rest) } : {}),
+  return sections.map(({ key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at, marking, left_out, left_out_marks, ...rest }) => ({
+    key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at, marking, left_out, left_out_marks,
+    ...(questions ? { questions: questionsOf({ ...rest, marking }) } : {}),
   }));
 }
 
@@ -497,7 +506,7 @@ export function schoolOverview(schoolId, testId) {
 
 const SCHOOL_INSTRUCTIONS = `You write the school report for a teacher training assessment programme run in Indian schools: one short report on all the teachers of one school, for the principal and management.
 
-You are given every assessed teacher's results in one test, with figures by section, by need and by school stage (Pre-Primary, Primary, Middle School, High School and PUC), a rule-based potential identifier for each teacher and, where available, the main findings from their own reports. Teachers may have sat only some sections, so only compare teachers within a section.
+You are given every assessed teacher's results in one test, with figures by section, by need and by school stage (Pre-Primary, Primary, Middle School, High School and PUC), a rule-based potential identifier for each teacher and, where available, the main findings from their own reports. Teachers may have sat only some sections, so only compare teachers within a section. Sections marked leniently leave out the questions the teacher did not attempt, so their percentages cover only the questions attempted.
 
 Write in English that is simple and short: plain, everyday words and short sentences that a busy principal can read in two minutes, with no jargon. Base every statement on the figures given and cite them, such as "In Primary, 5 of 9 teachers are at Grade C in Section C". Be factual and neutral. Write about teachers by name, never as "he" or "she". Refer to sections exactly as given, such as "Section A".
 - summary: two or three short sentences: how many teachers took the test, how many need support, and the main pattern by stage or section.
@@ -575,7 +584,7 @@ async function writeSchoolReport(schoolId, testId, reportId) {
     const about = [stageName(teacher.stage), teacher.grade, teacher.subjects].filter(Boolean).join(', ');
     lines.push(
       `- ${teacher.name}${about ? ` (${about})` : ''}: ` +
-        teacher.sections.map((s) => `${s.name} ${s.percent}% (${s.grade})`).join(', ') +
+        teacher.sections.map((s) => `${s.name} ${s.percent}% (${s.grade}${s.marking === 'lenient' ? ', marked leniently' : ''})`).join(', ') +
         `. Potential: ${teacher.potential?.headline ?? '—'}.` +
         (found.length ? ` Main findings: ${found.slice(0, 4).map((f) => clip(f, 160)).join('; ')}` : '')
     );

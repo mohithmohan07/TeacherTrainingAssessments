@@ -91,7 +91,7 @@ function withResults(row, testId, section, library) {
     suggested_papers: needsPaper && library?.length
       ? suggestPapers(library, teacherProfile(row, { name: row.school_name }), section).map(presentPaper)
       : [],
-    sections: sections.map(({ key, name, percent, grade, grade_label }) => ({ key, name, percent, grade, grade_label })),
+    sections: sections.map(({ key, name, percent, grade, grade_label, marking }) => ({ key, name, percent, grade, grade_label, marking })),
     report_status: report ? (report.status === 'done' && isOutOfDate(report, sections) ? 'stale' : report.status) : 'none',
   };
 }

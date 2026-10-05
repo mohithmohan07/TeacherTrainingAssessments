@@ -64,12 +64,29 @@ const marks = (n) => String(Math.round(Number(n) * 100) / 100);
 const share = (n, total) => (total ? Math.round((100 * n) / total) : 0);
 const gradeChip = (s) => (s.grade ? h('span', { class: `grade-chip grade-${s.grade}` }, `${s.grade} · ${s.grade_label}`) : '—');
 
+// "Lenient marking: questions not attempted are left out of the marks and
+// the total. Left out: Section B, 2 questions worth 5 marks." Only when a
+// section was marked leniently.
+function lenientKey(sections, { forTeacher = false } = {}) {
+  const lenient = sections.filter((s) => s.marking === 'lenient');
+  if (!lenient.length) return null;
+  const which = lenient.filter((s) => s.left_out).map((s) => `${titleCase(s.name)}, ${plural(s.left_out, 'question')} worth ${marks(s.left_out_marks)} marks`);
+  return h(
+    'p',
+    { class: 'report-note' },
+    h('strong', {}, 'Lenient marking: '),
+    forTeacher ? 'questions you did not attempt are left out of your marks and the total' : 'questions not attempted are left out of the marks and the total',
+    lenient.length < sections.length ? ` in ${listing(lenient.map((s) => titleCase(s.name)))}.` : '.',
+    which.length ? ` Left out: ${which.join('; ')}.` : ' Every question was attempted, so nothing is left out.'
+  );
+}
+
 // Each section's result as a bar on the grade bands. Sections of the
 // programme the teacher has not taken yet are listed too.
-function resultsTable(sections, { grades, section_titles: titles = {} }) {
+function resultsTable(sections, { grades, section_titles: titles = {} }, { forTeacher = false } = {}) {
   const sectioned = sections.length > 0 && sections.every((s) => SECTION_KEYS.includes(s.key));
   const notTaken = sectioned ? SECTION_KEYS.filter((key) => !sections.some((s) => s.key === key)) : [];
-  return h(
+  return [h(
     'div',
     { class: 'table-wrap' },
     h(
@@ -84,7 +101,7 @@ function resultsTable(sections, { grades, section_titles: titles = {} }) {
             'tr',
             {},
             h('td', {}, h('strong', {}, titleCase(s.name)), s.title ? h('div', { class: 'hint' }, s.title) : null, s.date ? h('div', { class: 'hint' }, `Taken ${formatDate(s.date)}`) : null),
-            h('td', { class: 'right nowrap' }, `${marks(s.awarded)} / ${marks(s.max)}`),
+            h('td', { class: 'right nowrap' }, `${marks(s.awarded)} / ${marks(s.max)}`, s.marking === 'lenient' ? h('div', { class: 'hint' }, 'Lenient') : null),
             h('td', { class: 'score-col' }, scoreBar(s.percent, grades, { label: s.name })),
             h('td', {}, gradeChip(s))
           )
@@ -99,7 +116,7 @@ function resultsTable(sections, { grades, section_titles: titles = {} }) {
         )
       )
     )
-  );
+  ), lenientKey(sections, { forTeacher })];
 }
 
 // One printed report: the school's letterhead (at the top of every printed
@@ -163,8 +180,10 @@ function withQuestions(sections, live) {
   return sections.map((s) => (s.questions ? s : { ...s, questions: live.find((l) => l.key === s.key)?.questions ?? [] }));
 }
 
-const markTone = (q) => (q.max_marks > 0 && q.marks_awarded >= q.max_marks ? 'q-full' : q.marks_awarded > 0 ? 'q-part' : 'q-none');
 const isBlank = (q) => q.blank ?? (!String(q.teacher_answer ?? '').trim() && !(Number(q.marks_awarded) > 0));
+// Lenient marking leaves the questions not attempted out of the totals.
+const notCounted = (q) => q.counted === false;
+const markTone = (q) => (notCounted(q) ? 'q-skip' : q.max_marks > 0 && q.marks_awarded >= q.max_marks ? 'q-full' : q.marks_awarded > 0 ? 'q-part' : 'q-none');
 const questionLabel = (q) => q.question || '—';
 
 // The marks for every question as one grid, a row per question and a column
@@ -178,7 +197,7 @@ function marksGrid(sections) {
   const unique = shown.every((s) => new Set(s.questions.map(questionLabel)).size === s.questions.length);
   const cell = (q) =>
     q
-      ? [h('span', { class: `q-marks ${markTone(q)}` }, `${marks(q.marks_awarded)} / ${marks(q.max_marks)}`), isBlank(q) ? h('span', { class: 'q-blank' }, 'blank') : null]
+      ? [h('span', { class: `q-marks ${markTone(q)}` }, `${marks(q.marks_awarded)} / ${marks(q.max_marks)}`), isBlank(q) ? h('span', { class: 'q-blank' }, notCounted(q) ? 'not counted' : 'blank') : null]
       : h('span', { class: 'hint' }, '—');
   const total = (s) => h('strong', {}, `${marks(s.awarded)} / ${marks(s.max)}`);
 
@@ -221,7 +240,10 @@ function marksGrid(sections) {
 function marksSection(sections, { forTeacher }) {
   const grid = marksGrid(sections);
   if (!grid) return null;
-  const blanks = sections.flatMap((s) => (s.questions ?? []).filter(isBlank));
+  const all = sections.flatMap((s) => s.questions ?? []);
+  const blanks = all.filter((q) => isBlank(q) && !notCounted(q));
+  const skipped = all.filter(notCounted);
+  const worth = (list) => marks(list.reduce((sum, q) => sum + (Number(q.max_marks) || 0), 0));
   return h(
     'section',
     { class: 'report-marks' },
@@ -234,8 +256,12 @@ function marksSection(sections, { forTeacher }) {
       h('span', { class: 'q-marks q-part' }, 'Some marks'),
       ' ',
       h('span', { class: 'q-marks q-none' }, 'No marks'),
+      skipped.length ? [' ', h('span', { class: 'q-marks q-skip' }, 'Not counted')] : null,
       blanks.length
-        ? ` ${forTeacher ? `You left ${plural(blanks.length, 'question')}` : `${plural(blanks.length, 'question')} ${blanks.length === 1 ? 'was' : 'were'} left`} blank, worth ${marks(blanks.reduce((sum, q) => sum + (Number(q.max_marks) || 0), 0))} marks.`
+        ? ` ${forTeacher ? `You left ${plural(blanks.length, 'question')}` : `${plural(blanks.length, 'question')} ${blanks.length === 1 ? 'was' : 'were'} left`} blank, worth ${worth(blanks)} marks.`
+        : '',
+      skipped.length
+        ? ` ${plural(skipped.length, 'question')} ${forTeacher ? 'you did not attempt' : 'not attempted'}, worth ${worth(skipped)} marks, ${skipped.length === 1 ? 'is' : 'are'} not counted (lenient marking).`
         : ''
     ),
     grid
@@ -428,7 +454,7 @@ function teacherSheet(data, content) {
     { school, audience: 'For the Teacher', title: 'Teacher Report', details: teacherDetails(teacher, test, report) },
     h('h2', {}, 'Summary'),
     t.summary ? h('p', { class: 'report-lead' }, t.summary) : null,
-    resultsTable(content.sections, data),
+    resultsTable(content.sections, data, { forTeacher: true }),
     t.went_well.length ? [h('h2', {}, 'What Went Well'), numbered(t.went_well, point)] : null,
     t.next_steps.length ? [h('h2', {}, 'Your Next Steps'), numbered(t.next_steps, point)] : null,
     t.practice_ideas.length ? [h('h2', {}, 'Ideas to Practise'), bullets(t.practice_ideas)] : null,
@@ -633,6 +659,23 @@ function trainingTotal(training) {
   );
 }
 
+// The teachers whose sections were marked leniently, so their percentages
+// cover only the questions they attempted.
+function lenientTeachers(figures) {
+  const lenient = figures.teachers
+    .map((t) => ({ t, keys: t.sections.filter((s) => s.marking === 'lenient').map((s) => s.key || 'paper') }))
+    .filter(({ keys }) => keys.length);
+  if (!lenient.length) return null;
+  return h(
+    'p',
+    { class: 'report-note' },
+    h('strong', {}, 'Lenient marking: '),
+    'questions not attempted are left out of the marks and the total for ',
+    lenient.map(({ t, keys }, i) => [i ? ', ' : '', t.name, h('span', { class: 'hint' }, ` (${keys.join(', ')})`)]),
+    '.'
+  );
+}
+
 // Who is on track, developing or in need of support in each stage, with the
 // sections that put them there.
 function teachersByStage(figures, needs, test) {
@@ -737,6 +780,7 @@ export async function renderSchoolReport(root, schoolId, testId) {
       written?.school_needs.length ? [h('h3', {}, 'What We Need from the School'), bullets(written.school_needs)] : null,
       !written && !running ? h('p', { class: 'hint no-print' }, 'The charts and figures are live. Press Build report to add the summary, findings and plan of action.') : null,
       teachersByStage(figures, data.needs, test),
+      lenientTeachers(figures),
       figures.not_assessed.length ? h('p', { class: 'report-note' }, `Not yet assessed in this test: ${figures.not_assessed.join(', ')}.`) : null,
       gradeKey(data.grades)
     );

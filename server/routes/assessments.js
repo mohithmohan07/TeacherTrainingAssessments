@@ -3,7 +3,7 @@ import db from '../db.js';
 import { uploadScans } from '../uploads.js';
 import { SCAN_KINDS, attachScans, discardUploads, removeStoredFile, swapScanKinds } from '../scans.js';
 import { normalise, startEvaluation } from '../evaluate.js';
-import { sittingSections, testFor, unansweredSections } from '../results.js';
+import { MARKINGS, sittingSections, testFor, unansweredSections } from '../results.js';
 import { PAPER_SECTIONS, presentPaper, setSittingPapers, sittingPapers } from '../papers.js';
 
 const router = express.Router();
@@ -41,10 +41,13 @@ function withFiles(assessment) {
   };
 }
 
-// Each section's marks, percentage and grade in one sitting.
+// Each section's marks, percentage and grade in one sitting, and how its
+// marks were counted.
 function sectionSummary(aiResult) {
   return aiResult
-    ? sittingSections(aiResult).map(({ key, name, awarded, max, percent, grade, grade_label }) => ({ key, name, awarded, max, percent, grade, grade_label }))
+    ? sittingSections(aiResult).map(({ key, name, awarded, max, percent, grade, grade_label, marking, left_out, left_out_marks }) => ({
+        key, name, awarded, max, percent, grade, grade_label, marking, left_out, left_out_marks,
+      }))
     : [];
 }
 
@@ -147,11 +150,14 @@ router.put('/:id', (req, res) => {
 
 // Mark the scanned response with OpenAI. Starts the marking and returns at
 // once; the page polls GET /:id until ai_status is 'done' or 'failed'.
+// { marking: 'standard' | 'lenient' } says how the marks are counted.
 router.post('/:id/evaluate', (req, res) => {
   const assessment = selectAssessmentRow.get(req.params.id);
   if (!assessment) return res.status(404).json({ error: 'Assessment not found.' });
+  const marking = req.body?.marking ?? 'standard';
+  if (!MARKINGS.some((m) => m.key === marking)) return res.status(400).json({ error: 'Choose Standard or Lenient marking.' });
 
-  const problem = startEvaluation(assessment.id);
+  const problem = startEvaluation(assessment.id, marking);
   if (problem) return res.status(400).json({ error: problem });
 
   res.status(202).json(withFiles(selectAssessmentRow.get(assessment.id)));

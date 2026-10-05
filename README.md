@@ -162,6 +162,22 @@ and the answer paper were plainly uploaded the wrong way round, OpenAI marks
 them the right way round and the app swaps the pages back, saying so above the
 marks.
 
+Evaluate first asks how the marks are counted. OpenAI marks every answer the
+same way in both:
+
+- **Standard**: every question counts. A question the teacher did not attempt
+  scores 0 and stays in the total, so 20 marks out of a 35-mark section is 57%.
+- **Lenient**: questions the teacher did not attempt (nothing written, no
+  marks) are left out of both the marks and the total. If 10 of those 35 marks
+  were not attempted, 20 out of the remaining 25 is 80%.
+
+The dialog starts on the last choice made on that computer, or on how the
+sitting was marked when you press Evaluate again. Lenient sittings say so on
+the board, the assessment page, the teacher's profile and every report, with
+how many questions and marks were left out. Changing a question's mark from 0
+counts it again. To switch an evaluated sitting between the two, press
+Evaluate again and choose the other.
+
 It needs the `OPENAI_API_KEY` secret on the server (on Fly:
 `fly secrets set OPENAI_API_KEY=... -a teachertrainingassessments`). The model
 is `gpt-6-luna` unless `OPENAI_MODEL` says otherwise. OpenAI reads JPG, PNG,
