@@ -9,11 +9,14 @@
 // it. Percentages, grades, blank answers, school stages and the potential
 // identifier are worked out here (results.js), never by the model, and each
 // report keeps a copy of the results it was written from, question by
-// question. The management reports also carry a training plan, whose path
-// and days are worked out in training.js and whose content OpenAI writes in
-// the same request.
+// question: what was asked, what the teacher wrote and what should have been
+// answered (answers.js fills that in first for papers marked before the
+// marking wrote it down). The management reports also carry a training plan,
+// whose path and days are worked out in training.js and whose content OpenAI
+// writes in the same request.
 import db from './db.js';
 import { OPENAI_MODEL, friendly, openaiConfigured, requestJson } from './openai.js';
+import { addMissingAnswers } from './answers.js';
 import {
   GRADES,
   NEEDS,
@@ -128,7 +131,7 @@ function reportRowFor(kind, schoolId, testId, teacherId) {
 
 const TEACHER_INSTRUCTIONS = `You write the reports for a teacher training assessment programme run in Indian schools.
 
-You are given one teacher's results in one test: the sections they sat, with marks, percentage and grade in each, and for every question the marks, the examiner's feedback and a short extract of what the teacher wrote. Questions left blank are marked as such. The programme has up to three sections; teachers may sit only some of them, possibly on different dates.
+You are given one teacher's results in one test: the sections they sat, with marks, percentage and grade in each, and for every question what was asked, the marks, the examiner's feedback, a short extract of what the teacher wrote and, where marks were lost, what a full-marks answer contains. Questions left blank are marked as such. The programme has up to three sections; teachers may sit only some of them, possibly on different dates.
 
 A section may be marked leniently: the questions the teacher did not attempt are then left out of both the marks and the total, so its percentage covers only the questions attempted. When you give such a section's marks or percentage, say that they cover the questions attempted, and still mention the questions left blank.
 
@@ -259,12 +262,15 @@ function describeResults(teacher, test, sections) {
         (lenient ? `. Marked leniently: ${section.left_out ? `${section.left_out === 1 ? 'the one question' : `the ${section.left_out} questions`} not attempted (${marks(section.left_out_marks)} marks) ${section.left_out === 1 ? 'is' : 'are'} left out of the marks and the total` : 'every question was attempted'}` : '')
     );
     for (const q of section.questions) {
+      const asked = q.question_text ? `   Asked: ${clip(q.question_text, 300)}` : null;
+      const expected = q.expected_answer && Number(q.marks_awarded) < Number(q.max_marks) ? `   Full-marks answer: ${clip(q.expected_answer, 400)}` : null;
       if (isBlank(q)) {
-        lines.push(`Q${q.question}: 0 / ${q.max_marks}. Left blank.${counts(q, section.marking) ? '' : ' Not counted (lenient marking).'}`);
+        lines.push(`Q${q.question}: 0 / ${q.max_marks}. Left blank.${counts(q, section.marking) ? '' : ' Not counted (lenient marking).'}`, asked, expected);
         continue;
       }
-      lines.push(`Q${q.question}: ${q.marks_awarded} / ${q.max_marks}. Examiner: ${clip(q.feedback, 400)}`);
+      lines.push(`Q${q.question}: ${q.marks_awarded} / ${q.max_marks}. Examiner: ${clip(q.feedback, 400)}`, asked);
       if (q.teacher_answer) lines.push(`   Teacher wrote: ${clip(q.teacher_answer, 300)}`);
+      lines.push(expected);
     }
     lines.push('');
   }
@@ -279,18 +285,21 @@ const points = (list, most = 6) =>
     .filter((p) => p.title || p.detail)
     .slice(0, most);
 
-// A section's questions as the reports show them: marks, the examiner's
-// feedback and the start of what the teacher wrote, and whether each counts
-// towards the section's marks (lenient marking leaves out those not attempted).
+// A section's questions as the reports show them: what was asked, the marks,
+// the examiner's feedback, the start of what the teacher wrote and what should
+// have been answered, and whether each counts towards the section's marks
+// (lenient marking leaves out those not attempted).
 export function questionsOf(section) {
   return (section.questions ?? []).map((q) => ({
     question: String(q.question ?? ''),
+    question_text: clip(q.question_text, 300),
     max_marks: Number(q.max_marks) || 0,
     marks_awarded: Number(q.marks_awarded) || 0,
     blank: isBlank(q),
     counted: counts(q, section.marking),
     feedback: String(q.feedback ?? '').trim(),
     teacher_answer: clip(q.teacher_answer, 400),
+    expected_answer: clip(q.expected_answer, 700),
   }));
 }
 
@@ -307,8 +316,13 @@ function snapshot(sections, { questions = false } = {}) {
 async function writeTeacherReports(teacherId, testId, reportId) {
   const teacher = selectTeacher.get(teacherId);
   const test = selectTest.get(testId);
-  const sections = teacherResults(teacherId, testId);
   if (!teacher || !test) throw friendly('This teacher or test no longer exists.');
+  if (!teacherResults(teacherId, testId).length) throw friendly('There are no marked sections for this teacher in this test yet. Press Evaluate first.');
+
+  // Papers marked before the marking said what should have been answered get
+  // it now; the results are then read again to take it in.
+  const answerProblems = await addMissingAnswers(teacherResults(teacherId, testId));
+  const sections = teacherResults(teacherId, testId);
   if (!sections.length) throw friendly('There are no marked sections for this teacher in this test yet. Press Evaluate first.');
 
   const framework = getFramework();
@@ -336,6 +350,10 @@ async function writeTeacherReports(teacherId, testId, reportId) {
     .slice(0, 6);
   const content = {
     layout: LAYOUT,
+    // Written with what should have been answered for each question, and why
+    // it is missing for any sitting where it could not be worked out.
+    answers: true,
+    answers_problems: answerProblems,
     test_name: test.name,
     stage: stageOf(teacher.grade),
     sections: snapshot(sections, { questions: true }),
@@ -391,6 +409,10 @@ export function isStale(report, sections) {
   return Boolean(report?.basis) && report.basis !== fingerprint(resultsBasis(sections));
 }
 
+// Whether a teacher's report was written before reports showed what the
+// teacher answered and what should have been answered for each question.
+export const lacksAnswers = (report) => report?.kind === 'teacher' && Boolean(report.content) && !report.content.answers;
+
 // Whether growth paths were added or changed after the report was written,
 // so its training plan is out of date.
 function pathsChanged(report, framework) {
@@ -400,7 +422,7 @@ function pathsChanged(report, framework) {
 // Whether a report needs rebuilding, for any of those reasons: the board, the
 // dashboard and the profile page go by this.
 export function isOutOfDate(report, sections, framework = getFramework()) {
-  return isOldLayout(report) || pathsChanged(report, framework) || isStale(report, sections);
+  return isOldLayout(report) || lacksAnswers(report) || pathsChanged(report, framework) || isStale(report, sections);
 }
 
 // Builds every teacher report in a test that is missing, failed or out of

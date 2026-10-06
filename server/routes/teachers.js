@@ -4,7 +4,7 @@ import { uploadScans, uploadWorkbook } from '../uploads.js';
 import { SCAN_KINDS, attachScans, discardUploads } from '../scans.js';
 import { buildTeacherTemplate, parseTeacherWorkbook } from '../excel.js';
 import { GRADES, potentialFor, teacherResults, testFor } from '../results.js';
-import { findReport, isOldLayout, isOutOfDate } from '../reports.js';
+import { findReport, isOldLayout, isOutOfDate, lacksAnswers } from '../reports.js';
 import { PAPER_SECTIONS, allPapers, presentPaper, sittingPapers, suggestPapers, teacherProfile } from '../papers.js';
 
 const router = express.Router();
@@ -188,6 +188,7 @@ router.get('/:id/profile', (req, res) => {
           written_at: report.written_at,
           stale: isOutOfDate(report, sections),
           old_layout: isOldLayout(report),
+          no_answers: lacksAnswers(report),
           teacher: report.content?.teacher ?? null,
           management: report.content?.management ?? null,
         },

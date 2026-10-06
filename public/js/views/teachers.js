@@ -86,11 +86,13 @@ function testCard(teacher, entry) {
         ? `The last report could not be written: ${report.error}`
         : report.old_layout
           ? 'These reports were written in the earlier layout; open them to rebuild in the simpler one.'
-          : report.stale
-            ? 'These reports are out of date: new marks have come in or the growth paths have changed. Open them to rebuild.'
-            : report.written_at
-              ? `Reports written ${formatDate(report.written_at)}.`
-              : null;
+          : report.no_answers
+            ? 'These reports were written before they showed each question’s answers; open them to rebuild.'
+            : report.stale
+              ? 'These reports are out of date: new marks have come in or the growth paths have changed. Open them to rebuild.'
+              : report.written_at
+                ? `Reports written ${formatDate(report.written_at)}.`
+                : null;
 
   return h(
     'div',
