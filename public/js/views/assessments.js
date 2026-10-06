@@ -1203,7 +1203,7 @@ function markingCard(assessment, runEvaluation, onSaved) {
 
   let body;
   if (running) {
-    body = h('div', { class: 'marking-state' }, h('span', { class: 'spinner' }), 'OpenAI is reading the scans and marking each question. This usually takes a minute or two; you can leave this page and come back.');
+    body = h('div', { class: 'marking-state' }, h('span', { class: 'spinner' }), 'OpenAI is marking each question. Answers not all in English are read by Gemini first. This usually takes a few minutes; you can leave this page and come back.');
   } else if (assessment.ai_status === 'failed') {
     body = h('div', { class: 'marking-state error' }, assessment.ai_error || 'The marking did not finish.');
   } else if (!hasScans) {
@@ -1329,7 +1329,7 @@ function markingResult(assessment, result, onSaved) {
     h(
       'p',
       { class: 'hint' },
-      `Marked by OpenAI (${assessment.ai_model})${assessment.ai_evaluated_at ? ` on ${formatDate(assessment.ai_evaluated_at.slice(0, 10))}` : ''}. If you disagree with a mark, change it in the Marks column and save.`
+      `Marked by OpenAI (${assessment.ai_model})${assessment.ai_evaluated_at ? ` on ${formatDate(assessment.ai_evaluated_at.slice(0, 10))}` : ''}. ${readingNote(result.reading)}If you disagree with a mark, change it in the Marks column and save.`
     ),
     h(
       'p',
@@ -1337,6 +1337,18 @@ function markingResult(assessment, result, onSaved) {
       h('a', { class: 'btn btn-sm', href: `#/teachers/${assessment.teacher_id}/report/${assessment.test_id}` }, 'Open the teacher’s reports')
     )
   );
+}
+
+// Which model read the answers, from the language they are in. Sittings
+// marked before the language check say nothing.
+function readingNote(reading) {
+  if (!reading) return '';
+  const names = reading.languages ?? [];
+  const languages = names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+  if (reading.read_by === 'gemini') {
+    return `The answers are ${languages ? `in ${languages}` : 'not all in English'}, so Gemini (${reading.model}) read them first. `;
+  }
+  return 'The answers are in English, so OpenAI read them itself. ';
 }
 
 function detailsCard(assessment, refresh) {

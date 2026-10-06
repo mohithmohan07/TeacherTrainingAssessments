@@ -25,13 +25,13 @@ const outputFormats = {
   legacy: (schema) => ({ responseMimeType: 'application/json', responseJsonSchema: schema }),
 };
 
-async function callGemini(key, prompt, generationConfig, timeoutMs) {
+async function callGemini(key, parts, generationConfig, timeoutMs) {
   let response;
   try {
     response = await fetch(`${API_BASE}/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
-      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig }),
+      body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig }),
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (error) {
@@ -41,17 +41,27 @@ async function callGemini(key, prompt, generationConfig, timeoutMs) {
   return { response, payload: await response.json().catch(() => null) };
 }
 
-// Sends one prompt and returns the model's reply parsed as JSON. `schema` is a
-// JSON Schema that Gemini shapes its output to.
-export async function generateJson({ prompt, schema, timeoutMs = 240_000 }) {
+// Sends one prompt, followed by any other `parts` such as scanned pages, and
+// returns the model's reply parsed as JSON. `schema` is a JSON Schema that
+// Gemini shapes its output to. `nothing` (given Gemini's reason) and `garbled`
+// say in the caller's words that the reply was empty or not the JSON asked for.
+export async function generateJson({
+  prompt,
+  parts = [],
+  schema,
+  timeoutMs = 240_000,
+  nothing = (reason) => `Gemini returned no paper (${reason}). Try again, or change the topic wording.`,
+  garbled = 'Gemini returned something that was not a complete paper. Please try again.',
+}) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) {
     throw new GeminiError('The Gemini API key is not set up yet. Add GEMINI_API_KEY as a Fly secret, then try again.', 503);
   }
 
-  let { response, payload } = await callGemini(key, prompt, outputFormats.current(schema), timeoutMs);
+  const content = [{ text: prompt }, ...parts];
+  let { response, payload } = await callGemini(key, content, outputFormats.current(schema), timeoutMs);
   if (response.status === 400 && /responseFormat|unknown name|invalid json payload/i.test(payload?.error?.message ?? '')) {
-    ({ response, payload } = await callGemini(key, prompt, outputFormats.legacy(schema), timeoutMs));
+    ({ response, payload } = await callGemini(key, content, outputFormats.legacy(schema), timeoutMs));
   }
 
   if (!response.ok) {
@@ -76,12 +86,12 @@ export async function generateJson({ prompt, schema, timeoutMs = 240_000 }) {
     .join('');
   if (!text) {
     const reason = candidate?.finishReason ?? payload?.promptFeedback?.blockReason ?? 'no content';
-    throw new GeminiError(`Gemini returned no paper (${reason}). Try again, or change the topic wording.`);
+    throw new GeminiError(nothing(reason));
   }
 
   try {
     return JSON.parse(text);
   } catch {
-    throw new GeminiError('Gemini returned something that was not a complete paper. Please try again.');
+    throw new GeminiError(garbled);
   }
 }
