@@ -165,6 +165,15 @@ and the answer paper were plainly uploaded the wrong way round, OpenAI marks
 them the right way round and the app swaps the pages back, saying so above the
 marks.
 
+Before marking, OpenAI looks at the answer pages and says what language the
+answers are written in. Answers all in English are read and marked by OpenAI
+from the scans, as above. Answers in another language, or in English mixed
+with another (even a word or a line), are read by Gemini first: it writes down
+each page in the teacher's own language and script, without translating or
+correcting it, and OpenAI marks that reading the same way. The note under the
+marks says which it was and names the languages. A sitting marked before this
+check keeps its marks until you press **Evaluate again**.
+
 Evaluate first asks how the marks are counted. OpenAI marks every answer the
 same way in both:
 
@@ -185,6 +194,10 @@ It needs the `OPENAI_API_KEY` secret on the server (on Fly:
 `fly secrets set OPENAI_API_KEY=... -a teachertrainingassessments`). The model
 is `gpt-6-luna` unless `OPENAI_MODEL` says otherwise. OpenAI reads JPG, PNG,
 WEBP and GIF pages only, which covers everything the scanner helper produces.
+Answers that are not all in English also need the `GEMINI_API_KEY` secret, the
+one the assessment generator uses; Gemini is `gemini-3.8-flash` unless
+`GEMINI_MODEL` says otherwise. Gemini cannot read GIF pages, and takes answer
+pages of up to 12 MB each.
 
 ## Tests, sections and grades
 
@@ -430,6 +443,7 @@ server/
   db.js             database connection and schema
   openai.js         the one OpenAI request, shared by marking and reports
   evaluate.js       marking the scans with OpenAI
+  reading.js        the answers' language, and Gemini reading those not all in English
   answers.js        what should have been answered, for papers marked before the marking said
   paper-inputs.js   a sitting's papers as OpenAI input, for marking and answers
   papers.js         the question paper library: labels, suggestions, pack import

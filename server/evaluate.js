@@ -1,7 +1,10 @@
-// Marking an assessment with the OpenAI API. Evaluate sends the question
-// paper (scanned pages, or PDFs confirmed from the paper library) and the
-// teacher's scanned response to the model, which reads both and marks every
-// question. It runs in the background: the request that
+// Marking an assessment with the OpenAI API. Evaluate first has OpenAI check
+// what language the teacher's answers are in (reading.js). Answers all in
+// English go to the model as the scanned pages, with the question paper
+// (scanned pages, or PDFs confirmed from the paper library), and it reads both
+// and marks every question. Answers in another language, or mixed with one,
+// are read by Gemini first, and the model marks Gemini's reading of them
+// instead of the scans. It runs in the background: the request that
 // starts it returns straight away and the page polls the assessment until the
 // marking is done or has failed. Once it is done, the teacher's reports for
 // the test are rebuilt (reports.js). Evaluate also says how the marks are
@@ -11,6 +14,8 @@
 // which the teacher's reports show beside what the teacher wrote.
 import db from './db.js';
 import { OPENAI_MODEL, friendly, openaiConfigured, requestJson } from './openai.js';
+import { GEMINI_MODEL } from './gemini.js';
+import { answerLanguage, readAnswers } from './reading.js';
 import { queueTeacherReports } from './reports.js';
 import { swapScanKinds } from './scans.js';
 import { sittingPapers } from './papers.js';
@@ -18,13 +23,16 @@ import { counts, markingOf, sectionKey } from './results.js';
 import { OPENAI_IMAGE_TYPES, pageInputs, questionPaperInputs } from './paper-inputs.js';
 import { EXPECTED_ANSWER_RULE, QUESTION_TEXT_RULE } from './answers.js';
 
-const INSTRUCTIONS = `You are an experienced examiner marking a teacher training assessment.
+const EXAMINER = 'You are an experienced examiner marking a teacher training assessment.';
 
-You are given two groups: first the QUESTION PAPER (scanned pages, or the paper itself as a PDF), then the TEACHER'S RESPONSE (scanned pages of the answers the teacher wrote on separate sheets, usually by hand). Each page or file is labelled with its group just before it.
+const SCANNED_RESPONSE = `You are given two groups: first the QUESTION PAPER (scanned pages, or the paper itself as a PDF), then the TEACHER'S RESPONSE (scanned pages of the answers the teacher wrote on separate sheets, usually by hand). Each page or file is labelled with its group just before it.
 
-Pages are sometimes filed under the wrong group. If every page labelled QUESTION PAPER is plainly the teacher's own handwritten answers, and the pages labelled TEACHER'S RESPONSE are plainly the printed question paper, the two groups were swapped: mark them the right way round and set pages_swapped to true. In every other case, including when you are unsure or the teacher wrote on the question paper itself, use the groups as labelled and set pages_swapped to false.
+Pages are sometimes filed under the wrong group. If every page labelled QUESTION PAPER is plainly the teacher's own handwritten answers, and the pages labelled TEACHER'S RESPONSE are plainly the printed question paper, the two groups were swapped: mark them the right way round and set pages_swapped to true. In every other case, including when you are unsure or the teacher wrote on the question paper itself, use the groups as labelled and set pages_swapped to false.`;
 
-The paper and the answers may be in English or any Indian language, in any script: for example Hindi, Marathi, Sanskrit, Kannada, Tamil, Telugu, Malayalam, Bengali, Assamese, Urdu or Kashmiri (Urdu and Kashmiri are written right to left). Read everything in the language it is written in, and never take marks off for the language an answer is written in.
+// For answers Gemini read first because they are not all in English.
+const READ_RESPONSE = `You are given two groups: first the QUESTION PAPER (scanned pages, or the paper itself as a PDF), then the TEACHER'S RESPONSE. The teacher's answers are not all in English, so they were read from the scanned pages for you, and the TEACHER'S RESPONSE is that reading, page by page: what the teacher wrote, in the language and script they wrote it in, with [illegible] for a word that could not be read and drawings described in square brackets. Mark it as you would mark the scanned pages, and take teacher_answer from it. The two groups have already been checked and are the right way round, so set pages_swapped to false.`;
+
+const MARKING_RULES = `The paper and the answers may be in English or any Indian language, in any script: for example Hindi, Marathi, Sanskrit, Kannada, Tamil, Telugu, Malayalam, Bengali, Assamese, Urdu or Kashmiri (Urdu and Kashmiri are written right to left). Read everything in the language it is written in, and never take marks off for the language an answer is written in.
 
 Mark the response against the question paper:
 - Work through every question on the question paper in order, including questions the teacher did not answer (award 0 for those). The teacher may have sat only some sections of the paper on this date: still list every question of every section, with an empty teacher_answer where nothing was written.
@@ -38,6 +46,8 @@ Mark the response against the question paper:
 - If handwriting is illegible, mark only what you can read and say what you could not read in the feedback.
 - Keep feedback short and specific: what was right, what was missing.
 - Write the feedback, summary, strengths and areas to improve in English, for the teacher's trainer.`;
+
+const instructionsFor = (read) => [EXAMINER, read ? READ_RESPONSE : SCANNED_RESPONSE, MARKING_RULES].join('\n\n');
 
 const RESULT_SCHEMA = {
   type: 'object',
@@ -124,26 +134,43 @@ export function startEvaluation(assessmentId, marking = 'standard') {
 
 async function evaluate(assessment, { paper, library, response }, marking) {
   const assessmentId = assessment.id;
-  const content = [
-    ...(await questionPaperInputs({ paper, library })),
-    { type: 'input_text', text: `TEACHER'S RESPONSE (${response.length} page${response.length === 1 ? '' : 's'}):` },
-    ...(await pageInputs("TEACHER'S RESPONSE", response)),
-  ];
+  // Only scanned pages can have been filed the wrong way round.
+  const canSwap = paper.length > 0 && !library.length;
+  const language = await answerLanguage({ paper: canSwap ? paper : [], response });
 
-  const marks = await requestJson({
-    instructions: INSTRUCTIONS + sectionInstructions(assessment.section),
-    content,
-    name: 'assessment_marks',
-    schema: RESULT_SCHEMA,
-    task: 'mark this',
-    retry: 'Press Evaluate to try again.',
-  });
+  let marks;
+  let pagesSwapped;
+  let reading;
+  if (language.language === 'english') {
+    marks = await markAnswers(assessment, false, [
+      ...(await questionPaperInputs({ paper, library })),
+      { type: 'input_text', text: `TEACHER'S RESPONSE (${response.length} page${response.length === 1 ? '' : 's'}):` },
+      ...(await pageInputs("TEACHER'S RESPONSE", response)),
+    ]);
+    pagesSwapped = canSwap && marks.pages_swapped === true;
+    reading = { ...language, read_by: 'openai', model: OPENAI_MODEL };
+  } else {
+    // Gemini reads the pages the answers are on, which are the other group
+    // when the two were filed the wrong way round.
+    const [questionPages, answerPages] = language.pages_swapped ? [response, paper] : [paper, response];
+    const pages = await readAnswers(answerPages, language.languages);
+    marks = await markAnswers(assessment, true, [
+      ...(await questionPaperInputs({ paper: questionPages, library })),
+      { type: 'input_text', text: `TEACHER'S RESPONSE (${pages.length} page${pages.length === 1 ? '' : 's'}), as read from the scans:` },
+      ...pages.map((text, i) => ({
+        type: 'input_text',
+        text: `TEACHER'S RESPONSE, page ${i + 1} of ${pages.length}:\n${text || '(nothing written on this page)'}`,
+      })),
+    ]);
+    pagesSwapped = language.pages_swapped;
+    reading = { ...language, read_by: 'gemini', model: GEMINI_MODEL };
+  }
   const result = normalise({
     ...marks,
     marking,
+    reading,
     questions: scopeToSection(marks.questions ?? [], assessment.section),
-    // Only scanned pages can have been filed the wrong way round.
-    pages_swapped: marks.pages_swapped === true && paper.length > 0 && !library.length,
+    pages_swapped: pagesSwapped,
   });
   if (!result.questions.length) {
     throw friendly('OpenAI found no questions to mark. Check the question paper pages are readable and the right way up, then press Evaluate again.');
@@ -155,6 +182,19 @@ async function evaluate(assessment, { paper, library, response }, marking) {
   // marking that started on its own.
   const saved = selectAssessment.get(assessmentId);
   if (saved.test_id) queueTeacherReports(saved.teacher_id, saved.test_id);
+}
+
+// `read` says the response is Gemini's reading of the answers rather than the
+// scanned pages.
+function markAnswers(assessment, read, content) {
+  return requestJson({
+    instructions: instructionsFor(read) + sectionInstructions(assessment.section),
+    content,
+    name: 'assessment_marks',
+    schema: RESULT_SCHEMA,
+    task: 'mark this',
+    retry: 'Press Evaluate to try again.',
+  });
 }
 
 // A sitting of one section is marked on that section alone, even when the
@@ -211,6 +251,7 @@ export function normalise(raw) {
   const sum = (key) => Math.round(counted.reduce((total, q) => total + q[key], 0) * 100) / 100;
   return {
     marking,
+    reading: readingOf(raw.reading),
     pages_swapped: raw.pages_swapped === true,
     questions,
     total_score: sum('marks_awarded'),
@@ -218,5 +259,18 @@ export function normalise(raw) {
     summary: String(raw.summary ?? '').trim(),
     strengths: (raw.strengths ?? []).map(String),
     areas_to_improve: (raw.areas_to_improve ?? []).map(String),
+  };
+}
+
+// How the answers were read: the language they are in, and whether OpenAI
+// read them from the scans or Gemini read them first. Sittings marked before
+// the language check have none.
+function readingOf(reading) {
+  if (!reading || typeof reading !== 'object') return null;
+  return {
+    language: String(reading.language ?? ''),
+    languages: (reading.languages ?? []).map(String),
+    read_by: reading.read_by === 'gemini' ? 'gemini' : 'openai',
+    model: String(reading.model ?? ''),
   };
 }
