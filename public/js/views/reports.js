@@ -5,7 +5,8 @@
 // figures by school stage, Pre-Primary to PUC. Each prints on its own, with
 // the school's logo at the top of every page and UpSchool's at the foot. The
 // management reports carry a training plan when growth paths are set up, and
-// a teacher's reports end with the marks for every question.
+// a teacher's reports end with the marks for every question, then what the
+// teacher answered and what should have been answered, question by question.
 import { h, mount, toast, formatDate, logoFor, potentialBadge, emptyState, titleCase, upschoolLogo, printFrame } from '../ui.js';
 import { reportsApi } from '../api.js';
 import { donut, legend, scoreBar, stackedBar } from '../charts.js';
@@ -40,13 +41,16 @@ function pollWhileRunning(container, load, isRunning, onDone) {
 function reportState(report, { building, what }) {
   if (!report) return null;
   if (report.status === 'running') {
-    return h('div', { class: 'marking-state no-print' }, h('span', { class: 'spinner' }), `OpenAI is writing ${what}. This usually takes under a minute; you can leave this page and come back.`);
+    return h('div', { class: 'marking-state no-print' }, h('span', { class: 'spinner' }), `OpenAI is writing ${what}. This usually takes a minute or two; you can leave this page and come back.`);
   }
   if (report.status === 'failed') {
     return h('div', { class: 'marking-state error no-print' }, report.error || 'The report could not be written.', ' ', building);
   }
   if (report.old_layout) {
     return h('div', { class: 'notice no-print' }, 'This report was written in the earlier, longer layout. Rebuild it to get the simpler one. ', building);
+  }
+  if (report.no_answers) {
+    return h('div', { class: 'notice no-print' }, 'This report was written before reports showed what the teacher answered and what should have been answered for each question. Rebuild it to add them. ', building);
   }
   if (report.stale) {
     return h('div', { class: 'notice no-print' }, 'Marks have changed or new sections have been evaluated since this report was written. Rebuild it to take them in. ', building);
@@ -268,6 +272,86 @@ function marksSection(sections, { forTeacher }) {
   );
 }
 
+/* ------------------------------------------- answers, question by question */
+
+const expectedOf = (q) => String(q.expected_answer ?? '').trim();
+const answerCount = (sections) => sections.flatMap((s) => s.questions ?? []).filter((q) => expectedOf(q)).length;
+
+// What the teacher answered beside what should have been answered, for every
+// question, in a table per section. A report written since reports showed it
+// always has it, and so do results whose marking says what should have been
+// answered. A question where that could not be worked out shows the
+// examiner's feedback instead.
+function answersSection(sections, { forTeacher, written = false }) {
+  const shown = sections.filter((s) => s.questions?.length);
+  if (!shown.length || (!written && !answerCount(shown))) return null;
+  const answered = forTeacher ? 'What You Answered' : 'What the Teacher Answered';
+  const expected = 'What Should Have Been Answered';
+  const theirs = (q) => {
+    if (isBlank(q)) return h('span', { class: 'answer-blank' }, notCounted(q) ? 'Left blank (not counted)' : 'Left blank');
+    return q.teacher_answer ? h('div', { class: 'answer-text', dir: 'auto' }, q.teacher_answer) : h('span', { class: 'hint' }, '—');
+  };
+  const model = (q) => {
+    if (expectedOf(q)) return h('div', { class: 'answer-text', dir: 'auto' }, expectedOf(q));
+    return q.feedback ? [h('span', { class: 'hint' }, 'Examiner’s note: '), q.feedback] : h('span', { class: 'hint' }, '—');
+  };
+  return h(
+    'section',
+    { class: 'report-answers' },
+    h('h2', {}, 'Question by Question', h('small', {}, forTeacher ? 'What you answered, and what should have been answered' : 'What the teacher answered, and what should have been answered')),
+    shown.map((s) =>
+      h(
+        'div',
+        { class: 'answers-block' },
+        h('h3', {}, titleCase(s.name), s.title ? h('span', { class: 'answers-title' }, s.title) : null),
+        h(
+          'div',
+          { class: 'table-wrap' },
+          h(
+            'table',
+            { class: 'report-table answers-table' },
+            h('thead', {}, h('tr', {}, h('th', {}, 'Question'), h('th', {}, answered), h('th', {}, expected))),
+            h(
+              'tbody',
+              {},
+              s.questions.map((q) =>
+                h(
+                  'tr',
+                  {},
+                  h(
+                    'td',
+                    { class: 'answer-q' },
+                    h('div', { class: 'answer-q-head' }, h('strong', {}, questionLabel(q)), h('span', { class: `q-marks ${markTone(q)}` }, `${marks(q.marks_awarded)} / ${marks(q.max_marks)}`)),
+                    q.question_text ? h('div', { class: 'answer-asked', dir: 'auto' }, q.question_text) : null
+                  ),
+                  h('td', { 'data-label': answered }, theirs(q)),
+                  h('td', { 'data-label': expected }, model(q))
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  );
+}
+
+// When what should have been answered could not be worked out for some
+// questions of a written report: which, and why. Screen only.
+function answersNotice(content, sections, rebuild) {
+  if (!content?.answers) return null;
+  const missing = sections.flatMap((s) => s.questions ?? []).filter((q) => !expectedOf(q)).length;
+  if (!missing) return null;
+  const problems = content.answers_problems ?? [];
+  return h(
+    'div',
+    { class: 'notice no-print' },
+    `What should have been answered could not be worked out for ${plural(missing, 'question')}, so the examiner’s note is shown for ${missing === 1 ? 'it' : 'them'}. `,
+    problems.length ? `${problems.join(' ')} ` : '',
+    rebuild
+  );
+}
+
 /* ------------------------------------------------------------- training */
 
 const dayRange = (b) => (b.from === b.to ? `Day ${b.from}` : `Days ${b.from}–${b.to}`);
@@ -415,7 +499,8 @@ export async function renderTeacherReport(root, teacherId, testId, query = new U
         resultsTable(data.sections, data),
         running || report?.content ? null : h('p', { class: 'hint no-print' }, 'The written report has not been built yet. Press Build report.'),
         marksSection(data.sections, { forTeacher: audience === 'teacher' }),
-        gradeKey(data.grades)
+        gradeKey(data.grades),
+        answersSection(data.sections, { forTeacher: audience === 'teacher' })
       );
     } else {
       sheet = audience === 'teacher' ? teacherSheet(data, content) : managementSheet(data, content);
@@ -437,6 +522,7 @@ export async function renderTeacherReport(root, teacherId, testId, query = new U
         h('div', { class: 'page-actions' }, toggle, buildButton, h('button', { class: 'btn btn-primary', onclick: () => window.print(), disabled: !data.sections.length }, 'Print'))
       ),
       reportState(report, { building: inlineBuild, what: `${teacher.name}’s reports` }),
+      !running && content ? answersNotice(content, withQuestions(content.sections, data.sections), h('button', { class: 'btn-link', type: 'button', onclick: build }, 'Rebuild report')) : null,
       audience === 'management' && !running ? trainingNotice(data.training, content, h('button', { class: 'btn-link', type: 'button', onclick: build }, 'Rebuild report')) : null,
       sheet
     );
@@ -459,7 +545,8 @@ function teacherSheet(data, content) {
     t.next_steps.length ? [h('h2', {}, 'Your Next Steps'), numbered(t.next_steps, point)] : null,
     t.practice_ideas.length ? [h('h2', {}, 'Ideas to Practise'), bullets(t.practice_ideas)] : null,
     marksSection(withQuestions(content.sections, data.sections), { forTeacher: true }),
-    gradeKey(data.grades)
+    gradeKey(data.grades),
+    answersSection(withQuestions(content.sections, data.sections), { forTeacher: true, written: Boolean(content.answers) })
   );
 }
 
@@ -531,7 +618,8 @@ function managementSheet(data, content) {
     findingDetails(m.findings, plan),
     planSection(plan),
     marksSection(withQuestions(content.sections, data.sections), { forTeacher: false }),
-    gradeKey(data.grades)
+    gradeKey(data.grades),
+    answersSection(withQuestions(content.sections, data.sections), { forTeacher: false, written: Boolean(content.answers) })
   );
 }
 

@@ -1192,7 +1192,7 @@ function markingResult(assessment, result, onSaved) {
               'tr',
               {},
               h('td', {}, q.section || '—'),
-              h('td', {}, q.question),
+              h('td', {}, q.question, q.question_text ? h('div', { class: 'hint question-asked', dir: 'auto' }, q.question_text) : null),
               h(
                 'td',
                 { style: 'white-space:nowrap' },
@@ -1206,6 +1206,9 @@ function markingResult(assessment, result, onSaved) {
                 q.feedback,
                 q.teacher_answer
                   ? h('details', { class: 'teacher-answer' }, h('summary', {}, 'What the teacher wrote'), h('div', { dir: 'auto' }, q.teacher_answer))
+                  : null,
+                q.expected_answer
+                  ? h('details', { class: 'teacher-answer' }, h('summary', {}, 'What should have been answered'), h('div', { dir: 'auto' }, q.expected_answer))
                   : null
               )
             )

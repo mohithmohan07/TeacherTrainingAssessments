@@ -445,6 +445,7 @@ td.right, th.right { text-align: right; white-space: nowrap; }
 .teacher-answer { margin-top: 6px; font-size: 13px; }
 .teacher-answer summary { cursor: pointer; color: var(--muted); }
 .teacher-answer div { margin-top: 4px; padding: 8px 10px; border-radius: 8px; background: var(--surface-2); white-space: pre-wrap; }
+.question-asked { min-width: 150px; max-width: 260px; margin-top: 3px; font-size: 12.5px; line-height: 1.4; }
 
 /* ---------- section results, reports and profiles ---------- */
 
@@ -596,6 +597,27 @@ td.right, th.right { text-align: right; white-space: nowrap; }
 .report-table .total-row td { border-top: 2px solid var(--border); background: var(--surface-2); }
 .report-note .q-marks { min-width: 0; margin-right: 2px; }
 
+/* Question by question: what the teacher answered beside what should have
+   been answered. On a phone each question stacks, with its labels. */
+.answers-block { margin-top: 14px; }
+.report-sheet .answers-block h3 { margin-bottom: 8px; }
+.answers-title { margin-left: 8px; font-size: 13px; font-weight: 500; color: var(--muted); }
+.answers-table { table-layout: fixed; }
+.answers-table th:first-child { width: 25%; }
+.report-sheet .answers-table td { font-size: 13.5px; line-height: 1.5; }
+.answer-q-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 8px; }
+.answer-q .q-marks { min-width: 0; }
+.answer-asked { margin-top: 5px; font-size: 12.5px; line-height: 1.45; color: var(--muted); }
+.answer-text { white-space: pre-line; overflow-wrap: anywhere; }
+.answer-blank { font-style: italic; color: var(--muted); }
+@media screen and (max-width: 640px) {
+  .answers-table, .answers-table tbody, .answers-table tr, .answers-table td { display: block; width: 100%; }
+  .answers-table thead { display: none; }
+  .answers-table tr { padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .report-sheet .answers-table td { padding: 3px 0; border: none; }
+  .answers-table td[data-label]::before { content: attr(data-label); display: block; margin-top: 4px; font-size: 12px; font-weight: 650; color: #3c4b5a; }
+}
+
 /* Training: the plan's days, and a table of what happens in them. Each
    section keeps one colour across the plan. */
 .tone-A { background: #c6dbef; color: #1f4f7d; }
@@ -626,7 +648,7 @@ td.right, th.right { text-align: right; white-space: nowrap; }
 .report-sheet .finding h3 { margin-top: 18px; font-family: var(--serif); font-size: 16px; color: var(--accent); }
 .report-sheet .finding-label { margin-bottom: 2px; }
 .results-table .not-taken td { color: var(--muted); }
-.report-plan, .report-findings, .report-marks, .report-teachers { margin-top: 8px; }
+.report-plan, .report-findings, .report-marks, .report-answers, .report-teachers { margin-top: 8px; }
 .report-sheet h2 small { display: block; margin-top: 2px; font-family: var(--font); font-size: 13px; font-weight: 500; color: var(--muted); }
 
 /* Charts. Bars sit on a track tinted with the grade bands (the chip colours),
@@ -722,6 +744,13 @@ td.right, th.right { text-align: right; white-space: nowrap; }
   .report-sheet h2 { margin-top: 24px; }
   .report-lead { font-size: 14.5px; }
   .report-footer { position: fixed; left: 16mm; right: 16mm; bottom: 9mm; margin: 0; background: #fff; }
+  /* The answers, question by question, start on a page of their own, in
+     slightly smaller type so more questions fit on each page. */
+  .report-answers { break-before: page; }
+  .report-answers > h2 { margin-top: 0; }
+  .report-sheet .answers-table th, .report-sheet .answers-table td { padding: 6px 8px; }
+  .report-sheet .answers-table td { font-size: 12.5px; line-height: 1.45; }
+  .answer-asked { font-size: 11.5px; }
   .report-sheet a { color: inherit; text-decoration: none; }
   .grade-chip, .potential, .potential-box, .report-details, .report-callout, .report-table th, .report-table .total-row td,
   .q-marks, .q-blank, .day, .day-legend i, .plan-block-days, .score-track, .score-track span, .stack-part, .chart-legend i,

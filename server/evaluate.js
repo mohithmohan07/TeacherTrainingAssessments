@@ -6,18 +6,17 @@
 // marking is done or has failed. Once it is done, the teacher's reports for
 // the test are rebuilt (reports.js). Evaluate also says how the marks are
 // counted: standard, or lenient, which leaves the questions the teacher did
-// not attempt out of the marks and the total (results.js).
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import db, { UPLOADS_DIR } from './db.js';
+// not attempt out of the marks and the total (results.js). For every question
+// the marking also says what was asked and what a full-marks answer contains,
+// which the teacher's reports show beside what the teacher wrote.
+import db from './db.js';
 import { OPENAI_MODEL, friendly, openaiConfigured, requestJson } from './openai.js';
 import { queueTeacherReports } from './reports.js';
 import { swapScanKinds } from './scans.js';
 import { sittingPapers } from './papers.js';
 import { counts, markingOf, sectionKey } from './results.js';
-
-// Types the OpenAI API accepts as image input. The scanner helper saves JPEG.
-const OPENAI_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+import { OPENAI_IMAGE_TYPES, pageInputs, questionPaperInputs } from './paper-inputs.js';
+import { EXPECTED_ANSWER_RULE, QUESTION_TEXT_RULE } from './answers.js';
 
 const INSTRUCTIONS = `You are an experienced examiner marking a teacher training assessment.
 
@@ -31,7 +30,9 @@ Mark the response against the question paper:
 - Work through every question on the question paper in order, including questions the teacher did not answer (award 0 for those). The teacher may have sat only some sections of the paper on this date: still list every question of every section, with an empty teacher_answer where nothing was written.
 - Questions usually have lettered parts (A, B, C, D) with the marks for each part printed beside it in brackets, for example "(3)". Mark every part as its own row, numbered like "1A", "1B", with those printed marks as max_marks. A question without lettered parts is one row, numbered like "4", out of the marks printed for it (for example "[Total Marks: 10]"). If no marks are printed at all, use 1 and say so in the feedback.
 - Give each row the section it is in, written in English as "Section A", "Section B" and so on, even when the paper names it in another language (for example खंड 'ख' is Section B). If the paper has no sections, use an empty string.
+- ${QUESTION_TEXT_RULE}
 - In teacher_answer, write down what the teacher wrote for that row, in the language and script they wrote it in, copied faithfully including mistakes. If it is long, give the first 500 characters or so and end with "…". Write [illegible] for words you cannot read, and use an empty string if the teacher did not answer.
+- ${EXPECTED_ANSWER_RULE} Mark the teacher's answer against it.
 - For multiple-choice or one-word questions, award full marks for the correct answer and 0 otherwise.
 - For written answers, award marks for each correct and relevant point, the way a fair examiner following a marking scheme would. Partial marks are allowed in steps of 0.5. Never award more than max_marks.
 - If handwriting is illegible, mark only what you can read and say what you could not read in the feedback.
@@ -49,11 +50,13 @@ const RESULT_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['section', 'question', 'teacher_answer', 'max_marks', 'marks_awarded', 'feedback'],
+        required: ['section', 'question', 'question_text', 'teacher_answer', 'expected_answer', 'max_marks', 'marks_awarded', 'feedback'],
         properties: {
           section: { type: 'string', description: 'Section in English, e.g. "Section A", or "".' },
           question: { type: 'string', description: 'Question and part as printed, e.g. "1A", "2B", "4".' },
+          question_text: { type: 'string', description: 'What the row asks, briefly, in English.' },
           teacher_answer: { type: 'string', description: 'What the teacher wrote, in their own language, or "".' },
+          expected_answer: { type: 'string', description: 'What a full-marks answer contains.' },
           max_marks: { type: 'number' },
           marks_awarded: { type: 'number' },
           feedback: { type: 'string' },
@@ -122,13 +125,7 @@ export function startEvaluation(assessmentId, marking = 'standard') {
 async function evaluate(assessment, { paper, library, response }, marking) {
   const assessmentId = assessment.id;
   const content = [
-    ...(await libraryInputs(library)),
-    ...(paper.length
-      ? [
-          { type: 'input_text', text: `QUESTION PAPER (${paper.length} scanned page${paper.length === 1 ? '' : 's'}):` },
-          ...(await pageInputs('QUESTION PAPER', paper)),
-        ]
-      : []),
+    ...(await questionPaperInputs({ paper, library })),
     { type: 'input_text', text: `TEACHER'S RESPONSE (${response.length} page${response.length === 1 ? '' : 's'}):` },
     ...(await pageInputs("TEACHER'S RESPONSE", response)),
   ];
@@ -177,39 +174,6 @@ export function scopeToSection(questions, section) {
   return (inSection.length ? inSection : questions).map((q) => ({ ...q, section: `Section ${section}` }));
 }
 
-// Papers confirmed from the library go to OpenAI as the PDFs themselves,
-// each introduced with what it is.
-async function libraryInputs(papers) {
-  const inputs = await Promise.all(
-    papers.map(async (paper) => {
-      const data = await fs.readFile(path.join(UPLOADS_DIR, paper.stored_name));
-      const sections = String(paper.sections).split(',').filter(Boolean);
-      const about = [
-        sections.length ? `Section${sections.length > 1 ? 's' : ''} ${sections.join(' and ')}` : '',
-        paper.subject,
-        paper.language && paper.language !== 'English' ? `in ${paper.language}` : '',
-      ].filter(Boolean).join(', ');
-      return [
-        { type: 'input_text', text: `QUESTION PAPER from the paper library: "${paper.title}"${about ? ` (${about})` : ''}. It is a PDF:` },
-        { type: 'input_file', filename: `${paper.title.replace(/[^\w .-]+/g, ' ').trim() || 'question paper'}.pdf`, file_data: `data:application/pdf;base64,${data.toString('base64')}` },
-      ];
-    })
-  );
-  return inputs.flat();
-}
-
-// Every page carries its group and number, so a long run of images cannot
-// blur where the question paper ends and the response begins.
-async function pageInputs(group, files) {
-  const pages = await Promise.all(files.map(imageInput));
-  return pages.flatMap((page, i) => [{ type: 'input_text', text: `${group}, page ${i + 1} of ${files.length}:` }, page]);
-}
-
-async function imageInput(file) {
-  const data = await fs.readFile(path.join(UPLOADS_DIR, file.stored_name));
-  return { type: 'input_image', image_url: `data:${file.mime_type};base64,${data.toString('base64')}`, detail: 'high' };
-}
-
 // When the marking found the question paper and the response filed the wrong
 // way round, it marked them the right way round, and the stored pages are
 // swapped back to match, so the evaluation screen shows them correctly.
@@ -235,7 +199,9 @@ export function normalise(raw) {
     return {
       section: String(q.section ?? '').trim(),
       question: String(q.question ?? '').trim(),
+      question_text: String(q.question_text ?? '').trim(),
       teacher_answer: String(q.teacher_answer ?? '').trim(),
+      expected_answer: String(q.expected_answer ?? '').trim(),
       max_marks: max,
       marks_awarded: awarded,
       feedback: String(q.feedback ?? '').trim(),
