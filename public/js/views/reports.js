@@ -6,10 +6,12 @@
 // the school's logo at the top of every page and UpSchool's at the foot. The
 // management reports carry a training plan when growth paths are set up, and
 // a teacher's reports end with the marks for every question, then what the
-// teacher answered and what should have been answered, question by question.
-import { h, mount, toast, formatDate, logoFor, potentialBadge, emptyState, titleCase, upschoolLogo, printFrame } from '../ui.js';
+// teacher answered and what should have been answered, question by question,
+// then the question paper and the answer paper as evidence.
+import { h, mount, toast, formatDate, logoFor, potentialBadge, emptyState, titleCase, upschoolLogo, printFrame, openLightbox } from '../ui.js';
 import { reportsApi } from '../api.js';
 import { donut, legend, scoreBar, stackedBar } from '../charts.js';
+import { keepOnly, pagesOf } from '../evidence.js';
 
 const SECTION_KEYS = ['A', 'B', 'C'];
 
@@ -352,6 +354,127 @@ function answersNotice(content, sections, rebuild) {
   );
 }
 
+/* ------------------------------------------------------------- evidence */
+
+// Scans in a type browsers cannot show. They are noted in the report instead.
+const UNSHOWN_TYPES = new Set(['image/tiff']);
+
+// "Section A", "Sections A and B", or the parts' own names.
+function partsNamed(sections) {
+  const keys = sections.map((s) => s.key);
+  return keys.length > 1 && keys.every((key) => /^[A-Z]$/.test(key)) ? `Sections ${listing(keys)}` : listing(sections.map((s) => titleCase(s.name)));
+}
+
+// A sitting's papers in the order they print: the question paper (papers
+// confirmed from the library, then any scanned pages), then the answer paper.
+// A library paper is named by its sections only when the sitting has several.
+function sittingDocuments(sitting) {
+  const several = sitting.papers.length > 1;
+  return [
+    ...sitting.papers.map((paper) => ({
+      name: 'Question Paper',
+      part: several && paper.sections.length ? partsNamed(paper.sections.map((key) => ({ key, name: `Section ${key}` }))) : '',
+      files: [{ url: paper.url, pdf: true }],
+    })),
+    sitting.question_paper.length ? { name: 'Question Paper', part: sitting.papers.length ? 'Scanned' : '', files: sitting.question_paper } : null,
+    sitting.response.length ? { name: 'Answer Paper', part: '', files: sitting.response } : null,
+  ].filter(Boolean);
+}
+
+// One page of a paper: small on screen, a click shows it larger; a printed
+// page of its own, captioned with what it is.
+function evidencePage(page, { doc, index, total, sitting, lead }) {
+  const name = doc.part ? `${doc.name}, ${doc.part}` : doc.name;
+  const alt = `${name}, page ${index} of ${total}`;
+  return h(
+    'figure',
+    { class: `evidence-page${lead ? ' evidence-lead' : ''}` },
+    page.src
+      ? h('button', { class: 'evidence-thumb', type: 'button', title: 'See this page larger', onclick: () => openLightbox(page.original ?? page.src, alt) }, h('img', { src: page.src, alt }))
+      : h('div', { class: 'evidence-missing' }, page.note),
+    h('figcaption', {}, h('span', { class: 'evidence-context' }, `${name} · `), `Page ${index} of ${total}`, h('span', { class: 'evidence-context' }, ` · ${sitting}`))
+  );
+}
+
+// Makes a paper's pages and puts them in its box, ready to print.
+async function fillDocument(box, doc, sitting, lead) {
+  const results = await Promise.allSettled(
+    doc.files.map((file) => (UNSHOWN_TYPES.has(file.type) ? Promise.reject(new Error('unshown')) : pagesOf(file)))
+  );
+  const pages = results.flatMap((result, i) => {
+    const file = doc.files[i];
+    if (result.status === 'fulfilled') return result.value.map((src) => ({ src, original: file.pdf ? null : file.url }));
+    if (UNSHOWN_TYPES.has(file.type)) return [{ note: 'This page is a TIFF file, which a report cannot show. Upload it again as a JPG or PNG to show it here.' }];
+    console.error(`Could not show ${file.url}:`, result.reason);
+    return [{ note: file.pdf ? 'The question paper could not be shown.' : 'This page could not be shown.' }];
+  });
+  if (!box.isConnected) return;
+  mount(box, pages.map((page, i) => evidencePage(page, { doc, index: i + 1, total: pages.length, sitting, lead: lead && i === 0 })));
+  // Loaded, not decoded: decoding every page at full size would only hold
+  // memory the printing does not need.
+  const loaded = (img) =>
+    img.complete ||
+    new Promise((resolve) => {
+      img.addEventListener('load', resolve, { once: true });
+      img.addEventListener('error', resolve, { once: true });
+    });
+  await Promise.all([...box.querySelectorAll('img')].map(loaded));
+}
+
+// The papers the marks came from, at the end of a teacher's reports: for each
+// sitting behind the sections shown, the question paper and the teacher's
+// answer paper. `ready` settles, and data-evidence turns "ready", once every
+// page is in place.
+function evidenceSection(sections, evidence, { forTeacher }) {
+  const sittings = (evidence ?? [])
+    .map((sitting) => ({ sitting, shown: sections.filter((s) => s.assessment_id === sitting.assessment_id), docs: sittingDocuments(sitting) }))
+    .filter(({ shown, docs }) => shown.length && docs.length);
+  if (!sittings.length) return null;
+
+  const filling = [];
+  const blocks = sittings.map(({ sitting, shown, docs }, n) => {
+    const label = [partsNamed(shown), sitting.date ? `taken ${formatDate(sitting.date)}` : ''].filter(Boolean).join(', ');
+    return h(
+      'div',
+      { class: 'evidence-sitting' },
+      h('h3', {}, partsNamed(shown), sitting.date ? h('span', { class: 'answers-title' }, `Taken ${formatDate(sitting.date)}`) : null),
+      docs.map((doc, d) => {
+        const box = h('div', { class: 'evidence-pages' }, h('p', { class: 'hint' }, 'Preparing the pages…'));
+        filling.push(fillDocument(box, doc, label, n === 0 && d === 0));
+        return h('div', { class: 'evidence-doc' }, h('h4', {}, doc.part ? `${doc.name}, ${doc.part}` : doc.name), box);
+      })
+    );
+  });
+
+  const section = h(
+    'section',
+    { class: 'report-evidence', 'data-evidence': 'loading' },
+    h('h2', {}, 'Evidence', h('small', {}, forTeacher ? 'The question paper and your answer paper' : 'The question paper and the teacher’s answer paper')),
+    h('p', { class: 'report-note no-print' }, 'Each page prints on a page of its own. Click a page to see it larger.'),
+    blocks
+  );
+  section.ready = Promise.allSettled(filling).then(() => {
+    section.dataset.evidence = 'ready';
+  });
+  return section;
+}
+
+const evidenceUrls = (evidence) => (evidence ?? []).flatMap((s) => [...s.papers, ...s.question_paper, ...s.response].map((file) => file.url));
+
+// Prints once the evidence pages are in place, so none prints half made.
+async function printWhenReady(container, button) {
+  const pending = [...container.querySelectorAll('.report-evidence[data-evidence="loading"]')];
+  if (pending.length) {
+    button.disabled = true;
+    button.textContent = 'Preparing pages…';
+    await Promise.all(pending.map((section) => section.ready));
+    button.disabled = false;
+    button.textContent = 'Print';
+    if (!button.isConnected) return;
+  }
+  window.print();
+}
+
 /* ------------------------------------------------------------- training */
 
 const dayRange = (b) => (b.from === b.to ? `Day ${b.from}` : `Days ${b.from}–${b.to}`);
@@ -442,6 +565,7 @@ function planSection(plan) {
 
 export async function renderTeacherReport(root, teacherId, testId, query = new URLSearchParams()) {
   let data = await reportsApi.teacher(teacherId, testId);
+  keepOnly(evidenceUrls(data.evidence));
   let audience = query.get('for') === 'management' ? 'management' : 'teacher';
   const container = h('div', {});
 
@@ -474,6 +598,7 @@ export async function renderTeacherReport(root, teacherId, testId, query = new U
       running ? 'Writing…' : report?.content ? 'Rebuild report' : 'Build report'
     );
     const inlineBuild = h('button', { class: 'btn-link', type: 'button', onclick: build }, 'Rebuild report');
+    const printButton = h('button', { class: 'btn btn-primary', type: 'button', disabled: !data.sections.length, onclick: () => printWhenReady(container, printButton) }, 'Print');
 
     const toggle = h(
       'div',
@@ -500,7 +625,8 @@ export async function renderTeacherReport(root, teacherId, testId, query = new U
         running || report?.content ? null : h('p', { class: 'hint no-print' }, 'The written report has not been built yet. Press Build report.'),
         marksSection(data.sections, { forTeacher: audience === 'teacher' }),
         gradeKey(data.grades),
-        answersSection(data.sections, { forTeacher: audience === 'teacher' })
+        answersSection(data.sections, { forTeacher: audience === 'teacher' }),
+        evidenceSection(data.sections, data.evidence, { forTeacher: audience === 'teacher' })
       );
     } else {
       sheet = audience === 'teacher' ? teacherSheet(data, content) : managementSheet(data, content);
@@ -519,7 +645,7 @@ export async function renderTeacherReport(root, teacherId, testId, query = new U
         'div',
         { class: 'page-head no-print' },
         h('div', {}, h('h1', {}, `${teacher.name}: Reports`), h('p', {}, `${test.name}${report?.written_at ? ` · written ${formatDate(report.written_at)}` : ''}`)),
-        h('div', { class: 'page-actions' }, toggle, buildButton, h('button', { class: 'btn btn-primary', onclick: () => window.print(), disabled: !data.sections.length }, 'Print'))
+        h('div', { class: 'page-actions' }, toggle, buildButton, printButton)
       ),
       reportState(report, { building: inlineBuild, what: `${teacher.name}’s reports` }),
       !running && content ? answersNotice(content, withQuestions(content.sections, data.sections), h('button', { class: 'btn-link', type: 'button', onclick: build }, 'Rebuild report')) : null,
@@ -546,7 +672,8 @@ function teacherSheet(data, content) {
     t.practice_ideas.length ? [h('h2', {}, 'Ideas to Practise'), bullets(t.practice_ideas)] : null,
     marksSection(withQuestions(content.sections, data.sections), { forTeacher: true }),
     gradeKey(data.grades),
-    answersSection(withQuestions(content.sections, data.sections), { forTeacher: true, written: Boolean(content.answers) })
+    answersSection(withQuestions(content.sections, data.sections), { forTeacher: true, written: Boolean(content.answers) }),
+    evidenceSection(content.sections, data.evidence, { forTeacher: true })
   );
 }
 
@@ -619,7 +746,8 @@ function managementSheet(data, content) {
     planSection(plan),
     marksSection(withQuestions(content.sections, data.sections), { forTeacher: false }),
     gradeKey(data.grades),
-    answersSection(withQuestions(content.sections, data.sections), { forTeacher: false, written: Boolean(content.answers) })
+    answersSection(withQuestions(content.sections, data.sections), { forTeacher: false, written: Boolean(content.answers) }),
+    evidenceSection(content.sections, data.evidence, { forTeacher: false })
   );
 }
 

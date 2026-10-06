@@ -19,7 +19,7 @@ on your machine.
 
 ## Running it
 
-You need [Node.js](https://nodejs.org) 20 or newer. Check with `node --version`.
+You need [Node.js](https://nodejs.org) 22.13 or newer. Check with `node --version`.
 
 ```bash
 npm install     # once, to fetch the dependencies
@@ -42,6 +42,10 @@ npm start
 The app has no login when you run it locally. If you ever want one — because
 you are running it somewhere other people can reach — set `APP_PASSWORD` and
 it will ask for that password before showing anything.
+
+**Download all reports** prints the reports with Chrome, Edge or Chromium,
+which it looks for where they are usually installed. If yours is somewhere
+else, set `CHROMIUM_PATH` to the program.
 
 ## Importing teachers from Excel
 
@@ -221,7 +225,12 @@ among the grade bands. Both end with **Marks for Every Question**, a compact
 grid of every question's marks with the blank answers marked, and a key to the
 grades, then **Question by Question**, which starts on a new page when
 printed: for every question, what was asked and its marks, what the teacher
-answered and what should have been answered.
+answered and what should have been answered. Last comes **Evidence**: for
+each sitting behind the results, the question paper (the library paper
+confirmed for it, or its scanned pages) and the teacher's answer paper, each
+page printed on a page of its own. The pages are made smaller in the browser
+first, so a printed report stays a few megabytes. A page uploaded as a TIFF
+file cannot be shown; the report says so in its place.
 
 - **For the teacher**: warm and practical. What went well, the teacher's next
   steps and a few ideas to practise in their own classroom. It never
@@ -241,6 +250,16 @@ are evaluated or the growth paths change afterwards, the report says so and
 **Rebuild report** brings it up to date. Reports written in the earlier,
 longer layout show only the results until they are rebuilt, and the button
 picks them up too.
+
+**Download all reports** in the same card puts every written report in the
+test into one zip named after the test. `Test 1 results.zip` holds a
+`Test 1 results` folder with each teacher's own report in
+`Reports for Teachers`, each management report in `Reports for Management`,
+and `Overall School Report.pdf`. The server prints them to PDF with Chromium,
+a few seconds a report, and the zip downloads when it is ready. The card then
+lists any teacher left out because their report has not been written or is in
+the earlier layout, and any report in the zip that is out of date. The zip can
+be downloaded again for an hour.
 
 Papers marked before the marking said what should have been answered get it
 when their reports are next built: OpenAI reads the question paper again with
@@ -345,6 +364,12 @@ Two things are different from running it on your laptop:
   needs you to sign in once. Without it the app is wide open, which is fine on
   your own laptop and not fine on the internet.
 
+The image also has Chromium's headless shell in it, which prints the reports
+for **Download all reports**. While it prints, Chromium needs up to about
+250 MB besides the app's own 150 MB or so, which fits in the machine's 512 MB.
+If a zip ever fails for lack of memory, give the machine 1 GB
+(`memory = '1gb'` under `[[vm]]` in `fly.toml`).
+
 First install the Fly command line tool, if you have not already:
 
 ```bash
@@ -420,6 +445,9 @@ Plain and deliberately boring, so it keeps working:
 - **ExcelJS** for the .xlsx template and import.
 - **Plain HTML, CSS and JavaScript** for the front end (`public/`) — no build
   step, so what is in the folder is what runs in the browser.
+- **PDF.js** draws the library's question papers in the reports' evidence
+  pages, and **Puppeteer** has Chromium print the reports for Download all
+  reports.
 
 ```
 Dockerfile          builds the container image for Fly
@@ -435,6 +463,8 @@ server/
   papers.js         the question paper library: labels, suggestions, pack import
   results.js        section results, grades and the potential identifier
   reports.js        writing the teacher, management and school reports
+  bundle.js         Download all reports: every report printed to PDF, in one zip
+  zip.js            writing zip files
   training.js       growth paths, and each teacher's and the school's training plan
   generator.js      writing question papers with Gemini
   excel.js          the import template, and reading a filled-in one back
@@ -445,5 +475,5 @@ public/
   index.html        the single page
   css/styles.css
   img/              UpSchool's logo, for reports and question papers
-  js/               router, API client, the report charts, and one file per screen
+  js/               router, API client, the report charts, the evidence pages, and one file per screen
 ```

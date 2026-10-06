@@ -14,12 +14,16 @@ import {
   schoolReportIsStale,
 } from '../reports.js';
 import { getFramework, schoolTraining } from '../training.js';
+import { sittingPapers } from '../papers.js';
+import { startZip, zipFile, zipState } from '../bundle.js';
 
 const router = express.Router();
 
 const selectTeacher = db.prepare('SELECT * FROM teachers WHERE id = ?');
 const selectSchool = db.prepare('SELECT id, name, logo_path, city, state FROM schools WHERE id = ?');
 const selectTest = db.prepare('SELECT * FROM tests WHERE id = ?');
+const selectSitting = db.prepare('SELECT id, assessment_date FROM assessments WHERE id = ? AND teacher_id = ?');
+const selectSittingFiles = db.prepare('SELECT kind, stored_name, mime_type FROM assessment_files WHERE assessment_id = ? ORDER BY position, id');
 
 function lookupTeacher(req, res) {
   const teacher = selectTeacher.get(Number(req.query.teacher_id ?? req.body?.teacher_id));
@@ -48,6 +52,28 @@ function trainingState() {
   return { set: Boolean(framework), version: framework?.version ?? null };
 }
 
+// The papers behind a teacher's results, for the evidence at the end of the
+// reports: for each sitting, the question paper (any confirmed from the
+// library, then any scanned) and the teacher's answer paper. The sittings are
+// those behind the results now and behind the written report, so the page
+// has them whichever it shows.
+function evidenceFor(teacherId, ...sectionLists) {
+  const ids = [...new Set(sectionLists.flat().map((s) => s.assessment_id).filter(Boolean))];
+  return ids.flatMap((id) => {
+    const sitting = selectSitting.get(id, teacherId);
+    if (!sitting) return [];
+    const files = selectSittingFiles.all(id);
+    const pages = (kind) => files.filter((f) => f.kind === kind).map((f) => ({ url: `/uploads/${f.stored_name}`, type: f.mime_type }));
+    return [{
+      assessment_id: id,
+      date: sitting.assessment_date,
+      papers: sittingPapers(id).map((p) => ({ url: `/uploads/${p.stored_name}`, sections: String(p.sections).split(',').filter(Boolean) })),
+      question_paper: pages('question_paper'),
+      response: pages('response'),
+    }];
+  });
+}
+
 function teacherPayload(teacher, test) {
   const sections = teacherResults(teacher.id, test.id);
   const report = findReport('teacher', test.id, teacher.id);
@@ -61,6 +87,7 @@ function teacherPayload(teacher, test) {
     potential: potentialFor(sections),
     report: report && { ...report, stale: isStale(report, sections), old_layout: isOldLayout(report), no_answers: lacksAnswers(report) },
     training: trainingState(),
+    evidence: evidenceFor(teacher.id, sections, report?.content?.sections ?? []),
   };
 }
 
@@ -118,6 +145,40 @@ router.post('/teachers', (req, res) => {
   const result = queueTestReports(found.school.id, found.test.id);
   if (result.error) return res.status(400).json({ error: result.error });
   res.status(202).json(result);
+});
+
+// Every report of the test in one zip, printed to PDF on the server. GET says
+// how the zip is getting on, POST starts it, and /file downloads it once
+// ready. POST /api/reports/zip { school_id, test_id, time_zone, locale }
+router.get('/zip', (req, res) => {
+  const found = lookupSchool(req, res);
+  if (found) res.json({ job: zipState(found.school.id, found.test.id) });
+});
+
+router.post('/zip', (req, res) => {
+  const found = lookupSchool(req, res);
+  if (!found) return;
+  const problem = startZip(found.school.id, found.test.id, { time_zone: req.body?.time_zone, locale: req.body?.locale });
+  if (problem) return res.status(400).json({ error: problem });
+  res.status(202).json({ job: zipState(found.school.id, found.test.id) });
+});
+
+router.get('/zip/file', (req, res) => {
+  const found = lookupSchool(req, res);
+  if (!found) return;
+  const gone = () =>
+    res.status(404).json({
+      error:
+        zipState(found.school.id, found.test.id)?.status === 'running'
+          ? 'The zip is still being made. It downloads from the Assessments page when it is ready.'
+          : 'This zip is no longer on the server. Press Download all reports to make it again.',
+    });
+  const zip = zipFile(found.school.id, found.test.id);
+  if (!zip) return gone();
+  res.set('Cache-Control', 'no-store');
+  res.download(zip.file, zip.name, (error) => {
+    if (error && !res.headersSent) gone();
+  });
 });
 
 export default router;
