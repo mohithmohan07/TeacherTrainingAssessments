@@ -1,12 +1,14 @@
 import express from 'express';
 import db from '../db.js';
-import { GRADES, potentialFor, teacherResults } from '../results.js';
+import { GRADES, NEEDS, SECTION_TITLES, potentialFor, teacherResults } from '../results.js';
 import {
   findReport,
+  isOldLayout,
   isStale,
   questionsOf,
   queueSchoolReport,
   queueTeacherReports,
+  queueTestReports,
   schoolOverview,
   schoolReportIsStale,
 } from '../reports.js';
@@ -53,9 +55,10 @@ function teacherPayload(teacher, test) {
     school: selectSchool.get(teacher.school_id),
     test,
     grades: GRADES,
-    sections: sections.map(({ questions, ...rest }) => ({ ...rest, questions: questionsOf({ questions }) })),
+    section_titles: SECTION_TITLES,
+    sections: sections.map(({ questions, ...rest }) => ({ ...rest, questions: questionsOf({ questions, marking: rest.marking }) })),
     potential: potentialFor(sections),
-    report: report && { ...report, stale: isStale(report, sections) },
+    report: report && { ...report, stale: isStale(report, sections), old_layout: isOldLayout(report) },
     training: trainingState(),
   };
 }
@@ -83,10 +86,12 @@ function schoolPayload(school, test) {
     school,
     test,
     grades: GRADES,
+    needs: NEEDS,
+    section_titles: SECTION_TITLES,
     ...overview,
     training: schoolTraining(overview.teachers, getFramework()),
     training_state: trainingState(),
-    report: report && { ...report, stale: schoolReportIsStale(report, overview) },
+    report: report && { ...report, stale: schoolReportIsStale(report, overview), old_layout: isOldLayout(report) },
   };
 }
 
@@ -102,6 +107,16 @@ router.post('/school', (req, res) => {
   const problem = queueSchoolReport(found.school.id, found.test.id);
   if (problem) return res.status(400).json({ error: problem });
   res.status(202).json(schoolPayload(found.school, found.test));
+});
+
+// Builds every teacher report in the test that is missing, failed or out of
+// date. POST /api/reports/teachers { school_id, test_id }
+router.post('/teachers', (req, res) => {
+  const found = lookupSchool(req, res);
+  if (!found) return;
+  const result = queueTestReports(found.school.id, found.test.id);
+  if (result.error) return res.status(400).json({ error: result.error });
+  res.status(202).json(result);
 });
 
 export default router;

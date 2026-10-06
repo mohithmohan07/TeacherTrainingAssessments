@@ -30,7 +30,7 @@ export async function renderTraining(root) {
           h(
             'p',
             {},
-            'The growth paths UpSchool offers. Each teacher’s management report recommends one from their section grades, with a day-by-day training plan, and the report on all teachers plans the training for the whole school. These are kept on this server only.'
+            'The growth paths UpSchool offers. Each teacher’s management report recommends one from their section grades, with a day-by-day training plan, and the school report plans the training for the whole school. These are kept on this server only.'
           )
         )
       ),

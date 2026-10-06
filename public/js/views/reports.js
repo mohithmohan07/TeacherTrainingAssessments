@@ -1,13 +1,21 @@
 // The reports written from the marks: a teacher's own report and the
-// management report on that teacher (one page, two versions), and the
-// management report on all of a school's teachers. Each prints on its own,
-// with the school's logo at the top of every page and UpSchool's at the foot.
-// A teacher's reports end with their answers question by question, and the
-// management reports carry a training plan on pages of its own.
-import { h, mount, toast, formatDate, logoFor, percentChip, potentialBadge, emptyState, titleCase, upschoolLogo, printFrame } from '../ui.js';
+// management report on that teacher (one page, two versions), and the school
+// report on all of a school's teachers. Each is short and in plain words, with
+// bar charts of the scores; the school report adds a pie chart and splits the
+// figures by school stage, Pre-Primary to PUC. Each prints on its own, with
+// the school's logo at the top of every page and UpSchool's at the foot. The
+// management reports carry a training plan when growth paths are set up, and
+// a teacher's reports end with the marks for every question.
+import { h, mount, toast, formatDate, logoFor, potentialBadge, emptyState, titleCase, upschoolLogo, printFrame } from '../ui.js';
 import { reportsApi } from '../api.js';
+import { donut, legend, scoreBar, stackedBar } from '../charts.js';
 
 const SECTION_KEYS = ['A', 'B', 'C'];
+
+// The layout the server writes reports in (LAYOUT in server/reports.js). A
+// report in an earlier layout is not shown; the page asks for a rebuild.
+const LAYOUT = 2;
+const writtenContent = (report) => (report?.content?.layout === LAYOUT ? report.content : null);
 
 // Checks back every few seconds while OpenAI is writing, then redraws.
 function pollWhileRunning(container, load, isRunning, onDone) {
@@ -37,20 +45,54 @@ function reportState(report, { building, what }) {
   if (report.status === 'failed') {
     return h('div', { class: 'marking-state error no-print' }, report.error || 'The report could not be written.', ' ', building);
   }
+  if (report.old_layout) {
+    return h('div', { class: 'notice no-print' }, 'This report was written in the earlier, longer layout. Rebuild it to get the simpler one. ', building);
+  }
   if (report.stale) {
     return h('div', { class: 'notice no-print' }, 'Marks have changed or new sections have been evaluated since this report was written. Rebuild it to take them in. ', building);
   }
   return null;
 }
 
-function resultsTable(sections) {
+const bullets = (items) => (items?.length ? h('ul', {}, items.map((item) => h('li', {}, item))) : null);
+const numbered = (items, render) => (items?.length ? h('ol', { class: 'report-points' }, items.map((item) => h('li', {}, render(item)))) : null);
+// "Checking Understanding. In Section A…"
+const point = (p) => [p.title ? h('strong', {}, `${titleCase(p.title.replace(/[.:]$/, ''))}. `) : null, p.detail ?? ''];
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const listing = (items) => (items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}` : items[0] ?? '');
+const marks = (n) => String(Math.round(Number(n) * 100) / 100);
+const share = (n, total) => (total ? Math.round((100 * n) / total) : 0);
+const gradeChip = (s) => (s.grade ? h('span', { class: `grade-chip grade-${s.grade}` }, `${s.grade} · ${s.grade_label}`) : '—');
+
+// "Lenient marking: questions not attempted are left out of the marks and
+// the total. Left out: Section B, 2 questions worth 5 marks." Only when a
+// section was marked leniently.
+function lenientKey(sections, { forTeacher = false } = {}) {
+  const lenient = sections.filter((s) => s.marking === 'lenient');
+  if (!lenient.length) return null;
+  const which = lenient.filter((s) => s.left_out).map((s) => `${titleCase(s.name)}, ${plural(s.left_out, 'question')} worth ${marks(s.left_out_marks)} marks`);
   return h(
+    'p',
+    { class: 'report-note' },
+    h('strong', {}, 'Lenient marking: '),
+    forTeacher ? 'questions you did not attempt are left out of your marks and the total' : 'questions not attempted are left out of the marks and the total',
+    lenient.length < sections.length ? ` in ${listing(lenient.map((s) => titleCase(s.name)))}.` : '.',
+    which.length ? ` Left out: ${which.join('; ')}.` : ' Every question was attempted, so nothing is left out.'
+  );
+}
+
+// Each section's result as a bar on the grade bands. Sections of the
+// programme the teacher has not taken yet are listed too.
+function resultsTable(sections, { grades, section_titles: titles = {} }, { forTeacher = false } = {}) {
+  const sectioned = sections.length > 0 && sections.every((s) => SECTION_KEYS.includes(s.key));
+  const notTaken = sectioned ? SECTION_KEYS.filter((key) => !sections.some((s) => s.key === key)) : [];
+  return [h(
     'div',
     { class: 'table-wrap' },
     h(
       'table',
-      { class: 'report-table' },
-      h('thead', {}, h('tr', {}, h('th', {}, 'Section'), h('th', {}, 'Date Sat'), h('th', { class: 'right' }, 'Marks'), h('th', { class: 'right' }, 'Percentage'), h('th', {}, 'Grade'))),
+      { class: 'report-table results-table' },
+      h('thead', {}, h('tr', {}, h('th', {}, 'Part of the Test'), h('th', { class: 'right' }, 'Marks'), h('th', { class: 'score-col' }, 'Score'), h('th', {}, 'Grade'))),
       h(
         'tbody',
         {},
@@ -58,16 +100,23 @@ function resultsTable(sections) {
           h(
             'tr',
             {},
-            h('td', {}, h('strong', {}, titleCase(s.name)), s.title ? h('div', { class: 'hint' }, s.title) : null),
-            h('td', { class: 'nowrap' }, formatDate(s.date) || '—'),
-            h('td', { class: 'right' }, `${s.awarded} / ${s.max}`),
-            h('td', { class: 'right' }, s.percent === null ? '—' : `${s.percent}%`),
-            h('td', {}, s.grade ? h('span', { class: `grade-chip grade-${s.grade}` }, `${s.grade} · ${s.grade_label}`) : '—')
+            h('td', {}, h('strong', {}, titleCase(s.name)), s.title ? h('div', { class: 'hint' }, s.title) : null, s.date ? h('div', { class: 'hint' }, `Taken ${formatDate(s.date)}`) : null),
+            h('td', { class: 'right nowrap' }, `${marks(s.awarded)} / ${marks(s.max)}`, s.marking === 'lenient' ? h('div', { class: 'hint' }, 'Lenient') : null),
+            h('td', { class: 'score-col' }, scoreBar(s.percent, grades, { label: s.name })),
+            h('td', {}, gradeChip(s))
+          )
+        ),
+        notTaken.map((key) =>
+          h(
+            'tr',
+            { class: 'not-taken' },
+            h('td', {}, h('strong', {}, `Section ${key}`), titles[key] ? h('div', { class: 'hint' }, titles[key]) : null),
+            h('td', { class: 'hint', colspan: 3 }, 'Not taken yet')
           )
         )
       )
     )
-  );
+  ), lenientKey(sections, { forTeacher })];
 }
 
 // One printed report: the school's letterhead (at the top of every printed
@@ -110,32 +159,20 @@ const teacherDetails = (teacher, test, report) => [
   ['Report Date', formatDate(report?.written_at)],
 ];
 
-// A section's heading: "Section A", with the programme's title for it below.
-// OpenAI names the sections in what it writes, so its name is matched to the
-// results to find the title.
-function sectionHeading(name, sections, tag = 'h2') {
-  const letter = /^(?:section|part)\s*([a-z])\b/i.exec(String(name ?? '').trim())?.[1]?.toUpperCase();
-  const known = sections.find((s) => s.name === name || (letter && s.key === letter));
-  return h(tag, { class: 'report-section-head' }, titleCase(known ? known.name : name), known?.title ? h('small', {}, known.title) : null);
-}
-
-const bullets = (items) => (items?.length ? h('ul', {}, items.map((item) => h('li', {}, item))) : null);
-const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
-const listing = (items) => (items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}` : items[0] ?? '');
-const clipText = (text, max) => (text.length > max ? `${text.slice(0, max).trimEnd()}…` : text);
-const marks = (n) => String(Math.round(Number(n) * 100) / 100);
-
+// "A Exemplary, 85% and above · B Proficient, 70–84% · …"
 function gradeKey(grades) {
+  const bands = [...grades].sort((a, b) => b.min - a.min);
+  const range = (g, i) => (i === 0 ? `${g.min}% and above` : g.min === 0 ? `below ${bands[i - 1].min}%` : `${g.min}–${bands[i - 1].min - 1}%`);
   return h(
     'p',
     { class: 'report-key' },
     h('strong', {}, 'Grades: '),
-    grades.map((g) => `${g.grade} ${g.label} (${g.min}%+)`).join(' · '),
+    bands.map((g, i) => `${g.grade} ${g.label}, ${range(g, i)}`).join(' · '),
     '. Each section is graded on its own; there is no overall percentage.'
   );
 }
 
-/* ---------------------------------------------------- question by question */
+/* ---------------------------------------------------- marks for every question */
 
 // The questions behind each section: from the report when it kept them, so a
 // printed report shows the marks it was written from, otherwise as marked now.
@@ -143,85 +180,103 @@ function withQuestions(sections, live) {
   return sections.map((s) => (s.questions ? s : { ...s, questions: live.find((l) => l.key === s.key)?.questions ?? [] }));
 }
 
-const markTone = (q) => (q.max_marks > 0 && q.marks_awarded >= q.max_marks ? 'q-full' : q.marks_awarded > 0 ? 'q-part' : 'q-none');
+const isBlank = (q) => q.blank ?? (!String(q.teacher_answer ?? '').trim() && !(Number(q.marks_awarded) > 0));
+// Lenient marking leaves the questions not attempted out of the totals.
+const notCounted = (q) => q.counted === false;
+const markTone = (q) => (notCounted(q) ? 'q-skip' : q.max_marks > 0 && q.marks_awarded >= q.max_marks ? 'q-full' : q.marks_awarded > 0 ? 'q-part' : 'q-none');
+const questionLabel = (q) => q.question || '—';
 
-// Every question the teacher was marked on, section by section, as on the
-// marking screen: the marks, the examiner's feedback and what they wrote.
-function questionPages(sections, { forTeacher }) {
+// The marks for every question as one grid, a row per question and a column
+// per section, when the sections share their numbering as the programme's
+// papers do; otherwise a small table per section, side by side.
+function marksGrid(sections) {
   const shown = sections.filter((s) => s.questions?.length);
   if (!shown.length) return null;
+  const labels = [...new Set(shown.flatMap((s) => s.questions.map(questionLabel)))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+  const shared = labels.filter((l) => shown.filter((s) => s.questions.some((q) => questionLabel(q) === l)).length > 1);
+  const unique = shown.every((s) => new Set(s.questions.map(questionLabel)).size === s.questions.length);
+  const cell = (q) =>
+    q
+      ? [h('span', { class: `q-marks ${markTone(q)}` }, `${marks(q.marks_awarded)} / ${marks(q.max_marks)}`), isBlank(q) ? h('span', { class: 'q-blank' }, notCounted(q) ? 'not counted' : 'blank') : null]
+      : h('span', { class: 'hint' }, '—');
+  const total = (s) => h('strong', {}, `${marks(s.awarded)} / ${marks(s.max)}`);
+
+  if (unique && (shown.length === 1 || shared.length * 2 >= labels.length)) {
+    return h(
+      'div',
+      { class: 'table-wrap' },
+      h(
+        'table',
+        { class: 'report-table marks-grid' },
+        h('thead', {}, h('tr', {}, h('th', {}, 'Question'), shown.map((s) => h('th', {}, titleCase(s.name))))),
+        h(
+          'tbody',
+          {},
+          labels.map((l) => h('tr', {}, h('td', {}, h('strong', {}, l)), shown.map((s) => h('td', {}, cell(s.questions.find((q) => questionLabel(q) === l)))))),
+          h('tr', { class: 'total-row' }, h('td', {}, h('strong', {}, 'Total')), shown.map((s) => h('td', {}, total(s))))
+        )
+      )
+    );
+  }
   return h(
-    'section',
-    { class: 'report-page' },
-    h('h2', { class: 'report-page-title' }, forTeacher ? 'Your Answers, Question by Question' : 'Question by Question'),
-    h(
-      'p',
-      { class: 'report-note' },
-      forTeacher
-        ? 'The examiner’s note on each of your answers: what earned marks, and what would have earned more.'
-        : 'The examiner’s note on each answer, with the start of what the teacher wrote.'
-    ),
+    'div',
+    { class: 'marks-grids' },
     shown.map((s) =>
       h(
-        'div',
-        { class: 'q-section' },
+        'table',
+        { class: 'report-table marks-grid' },
+        h('thead', {}, h('tr', {}, h('th', {}, titleCase(s.name)), h('th', {}, 'Marks'))),
         h(
-          'div',
-          { class: 'q-section-head' },
-          sectionHeading(s.name, sections, 'h3'),
-          h(
-            'span',
-            { class: 'q-total' },
-            `${marks(s.awarded)} / ${marks(s.max)} marks${s.percent === null ? '' : ` · ${s.percent}%`}`,
-            s.grade ? h('span', { class: `grade-chip grade-${s.grade}` }, `${s.grade} · ${s.grade_label}`) : null
-          )
-        ),
-        h(
-          'div',
-          { class: 'table-wrap' },
-          h(
-            'table',
-            { class: 'report-table q-table' },
-            h('thead', {}, h('tr', {}, h('th', {}, 'Question'), h('th', { class: 'right' }, 'Marks'), h('th', {}, 'Feedback'))),
-            h(
-              'tbody',
-              {},
-              s.questions.map((q) =>
-                h(
-                  'tr',
-                  {},
-                  h('td', { class: 'nowrap' }, h('strong', {}, q.question || '—')),
-                  h('td', { class: 'right' }, h('span', { class: `q-marks ${markTone(q)}` }, `${marks(q.marks_awarded)} / ${marks(q.max_marks)}`)),
-                  h(
-                    'td',
-                    {},
-                    q.feedback || '—',
-                    q.teacher_answer
-                      ? h('div', { class: 'q-wrote' }, h('span', { class: 'q-wrote-label' }, forTeacher ? 'You wrote: ' : 'Teacher wrote: '), h('span', { dir: 'auto' }, clipText(q.teacher_answer, 200)))
-                      : null
-                  )
-                )
-              )
-            )
-          )
+          'tbody',
+          {},
+          s.questions.map((q) => h('tr', {}, h('td', {}, h('strong', {}, questionLabel(q))), h('td', {}, cell(q)))),
+          h('tr', { class: 'total-row' }, h('td', {}, h('strong', {}, 'Total')), h('td', {}, total(s)))
         )
       )
     )
   );
 }
 
+function marksSection(sections, { forTeacher }) {
+  const grid = marksGrid(sections);
+  if (!grid) return null;
+  const all = sections.flatMap((s) => s.questions ?? []);
+  const blanks = all.filter((q) => isBlank(q) && !notCounted(q));
+  const skipped = all.filter(notCounted);
+  const worth = (list) => marks(list.reduce((sum, q) => sum + (Number(q.max_marks) || 0), 0));
+  return h(
+    'section',
+    { class: 'report-marks' },
+    h('h2', {}, 'Marks for Every Question'),
+    h(
+      'p',
+      { class: 'report-note' },
+      h('span', { class: 'q-marks q-full' }, 'Full marks'),
+      ' ',
+      h('span', { class: 'q-marks q-part' }, 'Some marks'),
+      ' ',
+      h('span', { class: 'q-marks q-none' }, 'No marks'),
+      skipped.length ? [' ', h('span', { class: 'q-marks q-skip' }, 'Not counted')] : null,
+      blanks.length
+        ? ` ${forTeacher ? `You left ${plural(blanks.length, 'question')}` : `${plural(blanks.length, 'question')} ${blanks.length === 1 ? 'was' : 'were'} left`} blank, worth ${worth(blanks)} marks.`
+        : '',
+      skipped.length
+        ? ` ${plural(skipped.length, 'question')} ${forTeacher ? 'you did not attempt' : 'not attempted'}, worth ${worth(skipped)} marks, ${skipped.length === 1 ? 'is' : 'are'} not counted (lenient marking).`
+        : ''
+    ),
+    grid
+  );
+}
+
 /* ------------------------------------------------------------- training */
 
 const dayRange = (b) => (b.from === b.to ? `Day ${b.from}` : `Days ${b.from}–${b.to}`);
+const dayNumbers = (b) => (b.from === b.to ? `${b.from}` : `${b.from}–${b.to}`);
+// "Days 1–9 and 18–20", for the blocks that work on one finding.
+const daysOf = (blocks) => (!blocks.length ? '' : blocks.length === 1 ? dayRange(blocks[0]) : `Days ${listing(blocks.map(dayNumbers))}`);
 // Each section keeps its colour across the plan; the shared blocks have their own.
 const toneOf = (b) => (b.kind === 'section' ? `tone-${b.key || 'paper'}` : `tone-${b.kind}`);
 const shortTitle = (b) => (b.kind === 'section' ? b.title.split(':')[0] : b.title);
-const pathLength = (p) => (p.min_days === p.max_days ? plural(p.min_days, 'day') : `${p.min_days} to ${p.max_days} days`);
-const asClause = (text) => String(text ?? '').trim().replace(/\.$/, '').replace(/^\p{Lu}(?!\p{Lu})/u, (c) => c.toLowerCase());
-
-function fact(label, value, note) {
-  return h('div', { class: 'plan-fact' }, h('span', {}, label), h('strong', {}, value), note ? h('small', {}, note) : null);
-}
 
 // What the report says about training when the growth paths are missing or
 // have changed since it was written. Screen only.
@@ -235,31 +290,15 @@ function trainingNotice(state, written, rebuild) {
   return null;
 }
 
-// "Need for Support" in the management report on one teacher: the training
-// the plan recommends, then any other support.
-function needForSupport(plan, support) {
-  const callout = plan
-    ? h(
-        'div',
-        { class: 'training-callout' },
-        h(
-          'div',
-          { class: 'training-callout-head' },
-          h('span', { class: 'training-callout-label' }, 'Recommended Training'),
-          h('strong', {}, plan.path ? plan.path.name : 'No Growth Path Needed'),
-          plan.path ? h('span', { class: 'training-callout-days' }, plural(plan.days, 'day')) : null
-        ),
-        h('p', {}, plan.reason, plan.partial ? h('span', { class: 'hint' }, ` ${plan.partial}`) : null),
-        plan.path ? h('p', { class: 'report-note' }, 'The day-by-day plan of action follows in the Training Plan.') : plan.continuity ? h('p', {}, plan.continuity) : null
-      )
-    : null;
-  if (!callout && !support.length) return null;
+// The training the plan recommends, in one line under the summary.
+function trainingLine(plan) {
+  if (!plan) return null;
   return h(
-    'section',
-    { class: 'report-section' },
-    h('h2', {}, 'Need for Support'),
-    callout,
-    support.length ? [plan?.path ? h('h3', {}, 'Alongside the Training') : null, bullets(support)] : null
+    'p',
+    { class: 'report-callout' },
+    h('strong', {}, 'Recommended Training: '),
+    plan.path ? `${plan.path.name}, ${plural(plan.days, 'day')}.` : 'None needed. Grade B or better in every section taken.',
+    plan.partial ? h('span', { class: 'hint' }, ` ${plan.partial}`) : null
   );
 }
 
@@ -276,179 +315,42 @@ function dayStrip(plan) {
   );
 }
 
-function planBlock(b) {
-  return h(
-    'div',
-    { class: `plan-block edge-${toneOf(b).slice(5)}` },
-    h(
-      'div',
-      { class: 'plan-block-head' },
-      h('span', { class: `plan-block-days ${toneOf(b)}` }, dayRange(b)),
-      h('span', { class: 'plan-block-title' }, b.title),
-      h('span', { class: 'plan-block-length' }, [plural(b.days, 'day'), b.grade ? `Grade ${b.grade}, ${b.grade_label}` : null].filter(Boolean).join(' · '))
-    ),
-    b.focus?.length ? [h('h4', {}, 'What the Teacher Will Work On'), bullets(b.focus)] : null,
-    b.delivery ? h('p', {}, h('strong', {}, 'How UpSchool Delivers It: '), b.delivery) : null,
-    b.outcome ? h('p', {}, h('strong', {}, 'By the End: '), b.outcome) : null
-  );
-}
-
-const runSteps = (steps) =>
-  steps?.length ? h('div', { class: 'plan-part' }, h('h3', {}, 'How UpSchool’s Team Will Run It'), h('ol', { class: 'plan-steps' }, steps.map((step) => h('li', {}, step.stage ? h('strong', {}, `${step.stage}: `) : null, step.detail)))) : null;
-
-// The training plan for one teacher, on pages of its own.
-function trainingPlanPage(plan, teacher) {
+// The plan of action for one teacher: the days, what is worked on in them,
+// how UpSchool's team runs them, and the findings they answer.
+function planSection(plan) {
   if (!plan?.path) return null;
   return h(
     'section',
-    { class: 'report-page training-plan' },
-    h('h2', { class: 'report-page-title' }, 'Training Plan', h('small', {}, `Recommended for ${teacher.name}`)),
-    h(
-      'div',
-      { class: 'plan-facts' },
-      fact('Growth Path', plan.path.name, plan.programme || null),
-      fact('Length', plural(plan.days, 'day'), `This path runs ${pathLength(plan.path)}`),
-      fact('Focus', plan.focus.map((f) => f.name).join(' · '), plan.focus.map((f) => f.grade_label).join(' · '))
-    ),
-    plan.summary ? h('p', { class: 'report-lead' }, plan.summary) : null,
-    h(
-      'p',
-      {},
-      h('strong', {}, 'Why This Path: '),
-      plan.reason,
-      plan.path.scope ? ` The ${plan.path.name} is for ${asClause(plan.path.scope)}.` : '',
-      plan.partial ? h('span', { class: 'hint' }, ` ${plan.partial}`) : null
-    ),
-    h('h3', {}, 'Days at a Glance'),
+    { class: 'report-plan' },
+    h('h2', {}, `${plan.days}-Day Training Plan`, h('small', {}, plan.programme ? `${plan.path.name} · ${plan.programme}` : plan.path.name)),
+    plan.order ? h('p', {}, plan.order) : null,
     dayStrip(plan),
-    h('h3', {}, 'Plan of Action'),
-    plan.blocks.map(planBlock),
-    runSteps(plan.execution),
-    h(
-      'div',
-      { class: 'plan-part' },
-      h('h3', {}, 'Exit Assessment'),
-      h('p', {}, h('strong', {}, 'Aim: '), plan.target),
-      plan.exit_focus ? h('p', {}, plan.exit_focus) : null,
-      plan.exit_assessment ? h('p', { class: 'report-note' }, plan.exit_assessment) : null
-    ),
-    plan.continuity ? h('div', { class: 'plan-part' }, h('h3', {}, 'After the Plan'), h('p', {}, plan.continuity)) : null
-  );
-}
-
-// A teacher's path in the table of all teachers.
-const trainingCell = (entry) => (entry ? [h('div', {}, entry.path), h('div', { class: 'hint' }, plural(entry.days, 'day'))] : h('span', { class: 'hint' }, 'None needed'));
-
-// "Need for Support" in the report on all teachers: who each path is for.
-// The Training Plan that follows sets out the days.
-function schoolNeedForSupport(training) {
-  if (!training) return null;
-  if (!training.paths.length) {
-    return h('section', { class: 'report-section' }, h('h2', {}, 'Need for Support'), h('p', {}, 'Every teacher assessed so far is Proficient or better in each section they sat, so no growth path is needed.'));
-  }
-  return h(
-    'section',
-    { class: 'report-section' },
-    h('h2', {}, 'Need for Support'),
-    h('p', {}, `${training.on_path} of the ${plural(training.assessed, 'teacher')} assessed would benefit from a growth path. The plan of action follows in the Training Plan.`),
-    h(
-      'ul',
-      {},
-      training.paths.map((p) => h('li', {}, h('strong', {}, p.name), ` (${pathLength(p)}): `, p.teachers.map((t) => t.name).join(', '))),
-      training.none.length ? h('li', {}, h('strong', {}, 'No growth path needed: '), training.none.map((t) => t.name).join(', ')) : null
-    )
-  );
-}
-
-function pathsTable(training) {
-  return h(
-    'div',
-    { class: 'table-wrap' },
-    h(
-      'table',
-      { class: 'report-table' },
-      h('thead', {}, h('tr', {}, h('th', {}, 'Growth Path'), h('th', {}, 'Teachers'), h('th', { class: 'right' }, 'Training Days'))),
-      h(
-        'tbody',
-        {},
-        training.paths.map((p) =>
-          h(
-            'tr',
-            {},
-            h('td', {}, h('strong', {}, p.name), h('div', { class: 'hint' }, [pathLength(p), p.scope].filter(Boolean).join(' · '))),
-            h('td', {}, p.teachers.map((t, i) => [i ? ', ' : '', `${t.name} (${t.days})`])),
-            h('td', { class: 'right' }, p.teacher_days)
-          )
-        ),
-        training.none.length
-          ? h('tr', {}, h('td', {}, h('strong', {}, 'No Growth Path Needed')), h('td', {}, training.none.map((t) => t.name).join(', ')), h('td', { class: 'right' }, '—'))
-          : null
-      )
-    ),
-    h('p', { class: 'report-key' }, 'Each teacher’s own number of days is in brackets; training days are added up across the teachers on a path.')
-  );
-}
-
-// The training plan for the school, on pages of its own.
-function schoolTrainingPage(training) {
-  if (!training?.paths.length) return null;
-  return h(
-    'section',
-    { class: 'report-page training-plan' },
-    h('h2', { class: 'report-page-title' }, 'Training Plan', h('small', {}, 'For the school’s teachers')),
-    h(
-      'div',
-      { class: 'plan-facts' },
-      fact('Teachers on a Path', `${training.on_path} of ${training.assessed}`, 'of those assessed so far'),
-      fact('Days per Teacher', training.shortest === training.longest ? plural(training.shortest, 'day') : `${training.shortest} to ${training.longest} days`, 'Depending on the path'),
-      fact('Training Days in All', String(training.teacher_days), 'Added up across teachers')
-    ),
-    training.summary ? h('p', { class: 'report-lead' }, training.summary) : null,
-    h('h3', {}, 'Paths and Teachers'),
-    pathsTable(training),
-    h('h3', {}, 'Cohorts by Section'),
-    h('p', { class: 'report-note' }, 'Teachers who need support in the same section can be trained together; each one’s days on that section are in brackets.'),
     h(
       'div',
       { class: 'table-wrap' },
       h(
         'table',
-        { class: 'report-table' },
-        h('thead', {}, h('tr', {}, h('th', {}, 'Section'), h('th', {}, 'Teachers'))),
+        { class: 'report-table plan-table' },
+        h('thead', {}, h('tr', {}, h('th', {}, 'Days'), h('th', {}, 'What the Teacher Works On'), h('th', {}, 'How We Do It'), h('th', { class: 'right' }, 'Point'))),
         h(
           'tbody',
           {},
-          training.cohorts.map((c) =>
+          plan.blocks.map((b) =>
             h(
               'tr',
               {},
-              h('td', {}, h('span', { class: `cohort-dot tone-${c.key || 'paper'}` }), h('strong', {}, titleCase(c.name)), c.title ? h('div', { class: 'hint' }, c.title) : null),
-              h('td', {}, c.teachers.map((t, i) => [i ? ', ' : '', `${t.name} (${t.grade}, ${plural(t.days, 'day')})`]))
+              h('td', { class: 'nowrap' }, h('span', { class: `plan-block-days ${toneOf(b)}` }, dayNumbers(b))),
+              h('td', {}, h('strong', {}, shortTitle(b)), b.works_on ? h('div', {}, b.works_on) : null),
+              h('td', {}, b.how || '—'),
+              h('td', { class: 'right' }, b.points?.length ? b.points.join(', ') : '—')
             )
           )
         )
       )
     ),
-    training.phases?.length ? h('h3', {}, 'Plan of Action') : null,
-    (training.phases ?? []).map((phase) =>
-      h(
-        'div',
-        { class: 'plan-block edge-phase' },
-        h('div', { class: 'plan-block-head' }, phase.timing ? h('span', { class: 'plan-block-days tone-phase' }, phase.timing) : null, h('span', { class: 'plan-block-title' }, phase.title)),
-        phase.who ? h('p', {}, h('strong', {}, 'Who: '), phase.who) : null,
-        phase.what ? h('p', {}, h('strong', {}, 'What: '), phase.what) : null,
-        phase.delivery ? h('p', {}, h('strong', {}, 'How UpSchool Delivers It: '), phase.delivery) : null
-      )
-    ),
-    runSteps(training.execution),
-    h(
-      'div',
-      { class: 'plan-part' },
-      h('h3', {}, 'Exit Assessment'),
-      h('p', {}, 'Each teacher sits the exit assessment on the sections in their plan once it is finished.'),
-      training.exit_assessment ? h('p', { class: 'report-note' }, training.exit_assessment) : null
-    ),
-    training.continuity ? h('div', { class: 'plan-part' }, h('h3', {}, 'After the Plan'), h('p', {}, training.continuity)) : null
+    plan.partial ? h('p', { class: 'report-note' }, plan.partial) : null,
+    plan.exit_assessment ? h('p', { class: 'report-note' }, h('strong', {}, 'Final Test: '), plan.exit_assessment) : null,
+    plan.continuity ? h('p', { class: 'report-note' }, h('strong', {}, 'After the Plan: '), plan.continuity) : null
   );
 }
 
@@ -480,12 +382,12 @@ export async function renderTeacherReport(root, teacherId, testId, query = new U
 
   function draw() {
     const { teacher, school, test, report } = data;
-    const content = report?.content ?? null;
+    const content = writtenContent(report);
     const running = report?.status === 'running';
     const buildButton = h(
       'button',
       { class: `btn ${content ? '' : 'btn-primary'}`, type: 'button', disabled: running || !data.sections.length, onclick: build },
-      running ? 'Writing…' : content ? 'Rebuild report' : 'Build report'
+      running ? 'Writing…' : report?.content ? 'Rebuild report' : 'Build report'
     );
     const inlineBuild = h('button', { class: 'btn-link', type: 'button', onclick: build }, 'Rebuild report');
 
@@ -509,11 +411,11 @@ export async function renderTeacherReport(root, teacherId, testId, query = new U
       sheet = emptyState('No sections have been evaluated for this teacher in this test yet. Scan their papers and press Evaluate on the Assessments page.');
     } else if (!content) {
       sheet = reportSheet(
-        { school, title: 'Results So Far', details: teacherDetails(teacher, test, null) },
-        resultsTable(data.sections),
-        gradeKey(data.grades),
-        running ? null : h('p', { class: 'hint no-print' }, 'The written report has not been built yet. Press Build report.'),
-        questionPages(data.sections, { forTeacher: audience === 'teacher' })
+        { school, audience: audience === 'teacher' ? 'For the Teacher' : 'For Management', title: 'Results So Far', details: teacherDetails(teacher, test, null) },
+        resultsTable(data.sections, data),
+        running || report?.content ? null : h('p', { class: 'hint no-print' }, 'The written report has not been built yet. Press Build report.'),
+        marksSection(data.sections, { forTeacher: audience === 'teacher' }),
+        gradeKey(data.grades)
       );
     } else {
       sheet = audience === 'teacher' ? teacherSheet(data, content) : managementSheet(data, content);
@@ -532,7 +434,7 @@ export async function renderTeacherReport(root, teacherId, testId, query = new U
         'div',
         { class: 'page-head no-print' },
         h('div', {}, h('h1', {}, `${teacher.name}: Reports`), h('p', {}, `${test.name}${report?.written_at ? ` · written ${formatDate(report.written_at)}` : ''}`)),
-        h('div', { class: 'page-actions' }, toggle, buildButton, h('button', { class: 'btn btn-primary', onclick: () => window.print(), disabled: !content }, 'Print'))
+        h('div', { class: 'page-actions' }, toggle, buildButton, h('button', { class: 'btn btn-primary', onclick: () => window.print(), disabled: !data.sections.length }, 'Print'))
       ),
       reportState(report, { building: inlineBuild, what: `${teacher.name}’s reports` }),
       audience === 'management' && !running ? trainingNotice(data.training, content, h('button', { class: 'btn-link', type: 'button', onclick: build }, 'Rebuild report')) : null,
@@ -548,79 +450,275 @@ export async function renderTeacherReport(root, teacherId, testId, query = new U
 function teacherSheet(data, content) {
   const { teacher, school, test, report } = data;
   const t = content.teacher;
-  // Only for papers in the programme's sections; a paper marked as a whole has none.
-  const sectioned = content.sections.every((s) => SECTION_KEYS.includes(s.key));
-  const notSat = sectioned ? SECTION_KEYS.filter((key) => !content.sections.some((s) => s.key === key)) : [];
   return reportSheet(
-    { school, audience: 'For the Teacher', title: 'Teacher Development Report', details: teacherDetails(teacher, test, report) },
-    t.opening ? h('p', { class: 'report-lead' }, t.opening) : null,
-    h('h2', {}, 'Your Results'),
-    resultsTable(content.sections),
-    gradeKey(data.grades),
-    t.sections.map((s) =>
-      h(
-        'section',
-        { class: 'report-section' },
-        sectionHeading(s.section, content.sections),
-        h('div', { class: 'report-cols' }, h('div', {}, h('h3', {}, 'What Went Well'), bullets(s.went_well)), h('div', {}, h('h3', {}, 'Your Next Steps'), bullets(s.next_steps)))
-      )
-    ),
-    t.practice_ideas.length ? h('section', { class: 'report-section' }, h('h2', {}, 'Ideas to Practise This Term'), bullets(t.practice_ideas)) : null,
-    notSat.length
-      ? h('p', { class: 'report-note' }, `You have not sat ${notSat.map((k) => `Section ${k}`).join(' or ')} in this test yet. When you do, it will be added to this report.`)
-      : null,
-    t.closing ? h('p', { class: 'report-closing' }, t.closing) : null,
-    questionPages(withQuestions(content.sections, data.sections), { forTeacher: true })
+    { school, audience: 'For the Teacher', title: 'Teacher Report', details: teacherDetails(teacher, test, report) },
+    h('h2', {}, 'Summary'),
+    t.summary ? h('p', { class: 'report-lead' }, t.summary) : null,
+    resultsTable(content.sections, data, { forTeacher: true }),
+    t.went_well.length ? [h('h2', {}, 'What Went Well'), numbered(t.went_well, point)] : null,
+    t.next_steps.length ? [h('h2', {}, 'Your Next Steps'), numbered(t.next_steps, point)] : null,
+    t.practice_ideas.length ? [h('h2', {}, 'Ideas to Practise'), bullets(t.practice_ideas)] : null,
+    marksSection(withQuestions(content.sections, data.sections), { forTeacher: true }),
+    gradeKey(data.grades)
   );
 }
 
+// The potential identifier, in a short box under the results.
 function potentialBox(potential, aiRoles) {
   if (!potential) return null;
-  const areas = [
-    ['Strengths', potential.strengths],
-    ['Developing', potential.developing],
-    ['Support Priority', potential.support],
-  ].filter(([, list]) => list.length);
   // OpenAI's roles cite the answers; the rule-based ones are a fallback.
-  const roles = aiRoles.length
-    ? aiRoles
-    : potential.roles.map((r) => ({ role: `Could take on ${r.role}`, evidence: `Exemplary in ${r.section}.` }));
+  const roles = aiRoles?.length ? aiRoles.map((r) => r.role) : potential.roles.map((r) => r.role.replace(/^\p{Ll}/u, (c) => c.toUpperCase()));
+  return h(
+    'div',
+    { class: 'potential-box' },
+    h('div', { class: 'potential-head' }, h('h3', {}, 'Potential Identifier'), potentialBadge(potential)),
+    h('p', {}, potential.meaning, ' ', h('span', { class: 'hint' }, potential.evidence)),
+    roles.length ? h('p', { class: 'potential-areas' }, h('strong', {}, 'Could Take On: '), roles.map((r) => r.replace(/\.$/, '')).join('; '), '.') : null
+  );
+}
+
+// What will be done: the plan's blocks of days when there is a plan,
+// otherwise the support recommended.
+function whatWeWillDo(plan, m) {
+  if (plan?.path) {
+    return [h('h3', {}, 'What We Will Do'), numbered(plan.blocks, (b) => [h('strong', {}, `${dayRange(b)}: `), b.summary || b.title])];
+  }
+  return m.support.length ? [h('h3', {}, 'What We Recommend'), bullets(m.support)] : null;
+}
+
+// Each finding in full, numbered as on the first page, with the days of the
+// plan that work on it.
+function findingDetails(findings, plan) {
+  if (!findings.length) return null;
   return h(
     'section',
-    { class: 'potential-box' },
-    h('div', { class: 'potential-head' }, h('h2', {}, 'Potential Identifier'), potentialBadge(potential)),
-    h('p', {}, potential.meaning, ' ', h('span', { class: 'hint' }, potential.evidence)),
-    areas.length ? h('p', { class: 'potential-areas' }, areas.map(([label, list], i) => [i ? ' · ' : '', h('strong', {}, `${label}: `), list.join(', ')])) : null,
-    roles.length ? h('div', {}, h('h3', {}, 'Responsibilities the Evidence Supports'), h('ul', {}, roles.map((r) => h('li', {}, h('strong', {}, r.role), r.evidence ? ` — ${r.evidence}` : '')))) : null
+    { class: 'report-findings' },
+    h('h2', {}, 'Details'),
+    h('p', { class: 'report-note' }, 'Each finding keeps its number from the summary.'),
+    findings.map((f, i) => {
+      const days = plan?.path ? daysOf(plan.blocks.filter((b) => b.points?.includes(i + 1))) : '';
+      return h(
+        'div',
+        { class: 'finding' },
+        h('h3', {}, `${i + 1}. ${titleCase(f.title)}`),
+        f.details.length
+          ? [h('p', { class: 'finding-label' }, h('strong', {}, 'What We Found:')), bullets(f.details)]
+          : f.summary
+            ? h('p', {}, h('strong', {}, 'What We Found: '), f.summary)
+            : null,
+        f.why_it_matters ? h('p', {}, h('strong', {}, 'Why It Matters: '), f.why_it_matters) : null,
+        f.action ? h('p', {}, h('strong', {}, `What We Will Do${days ? ` (${days})` : ''}: `), f.action) : null
+      );
+    })
   );
 }
 
 function managementSheet(data, content) {
   const { teacher, school, test, report } = data;
   const m = content.management;
+  const plan = content.training;
   return reportSheet(
-    { school, audience: 'For Management', title: 'Teacher Profile Report', details: teacherDetails(teacher, test, report) },
+    { school, audience: 'For Management', title: 'Teacher Report', details: teacherDetails(teacher, test, report) },
+    h('h2', {}, 'Summary'),
     m.summary ? h('p', { class: 'report-lead' }, m.summary) : null,
-    h('h2', {}, 'Results by Section'),
-    resultsTable(content.sections),
-    gradeKey(data.grades),
+    trainingLine(plan),
+    resultsTable(content.sections, data),
     potentialBox(content.potential, m.roles),
-    m.sections.map((s) =>
-      h(
-        'section',
-        { class: 'report-section' },
-        sectionHeading(s.section, content.sections),
-        s.evidence ? h('p', {}, s.evidence) : null,
-        h('div', { class: 'report-cols' }, h('div', {}, h('h3', {}, 'Strengths'), bullets(s.strengths)), h('div', {}, h('h3', {}, 'Gaps'), bullets(s.gaps)))
-      )
-    ),
-    needForSupport(content.training, m.support),
-    trainingPlanPage(content.training, teacher),
-    questionPages(withQuestions(content.sections, data.sections), { forTeacher: false })
+    m.findings.length ? [h('h3', {}, 'What We Found'), numbered(m.findings, (f) => point({ title: f.title, detail: f.summary }))] : null,
+    whatWeWillDo(plan, m),
+    m.school_needs.length ? [h('h3', {}, 'What We Need from the School'), bullets(m.school_needs)] : null,
+    plan?.goal ? h('p', { class: 'report-callout' }, h('strong', {}, 'Goal for the Final Test: '), plan.goal) : null,
+    findingDetails(m.findings, plan),
+    planSection(plan),
+    marksSection(withQuestions(content.sections, data.sections), { forTeacher: false }),
+    gradeKey(data.grades)
   );
 }
 
-/* ------------------------------------------------- the whole school's report */
+/* ------------------------------------------------------------ the school report */
+
+// The pie: how many teachers are on track, developing or need support.
+function glance(figures, needs) {
+  const whole = figures.whole;
+  if (!whole?.teachers) return null;
+  const slices = needs.map((n) => ({ key: n.key, label: n.label, value: whole.needs[n.key] ?? 0 }));
+  return h(
+    'div',
+    { class: 'chart-block' },
+    h('h3', {}, 'Teachers at a Glance'),
+    h(
+      'div',
+      { class: 'glance' },
+      donut(slices, { size: 132, total: whole.teachers, caption: whole.teachers === 1 ? 'teacher' : 'teachers' }),
+      h(
+        'table',
+        { class: 'glance-table' },
+        h(
+          'tbody',
+          {},
+          needs.map((n) =>
+            h(
+              'tr',
+              {},
+              h('td', {}, h('i', { class: `swatch fill-${n.key}` })),
+              h('td', {}, h('strong', {}, n.label), h('div', { class: 'hint' }, n.meaning)),
+              h('td', { class: 'right glance-count' }, whole.needs[n.key] ?? 0),
+              h('td', { class: 'right hint nowrap' }, `${share(whole.needs[n.key] ?? 0, whole.teachers)}%`)
+            )
+          )
+        )
+      )
+    )
+  );
+}
+
+const sectionHead = (key) => (key ? `Section ${key}` : 'Paper');
+
+// Bar charts of each stage's average in every section, Pre-Primary to PUC,
+// with the whole school below.
+function stageTable(figures, keys, grades) {
+  if (!figures.stage_stats?.length) return null;
+  const row = (s, whole = false) =>
+    h(
+      'tr',
+      { class: whole ? 'total-row' : null },
+      h('td', {}, h('strong', {}, s.name), s.classes ? h('div', { class: 'hint' }, s.classes) : null),
+      h('td', { class: 'right' }, s.teachers),
+      keys.map((key) => h('td', { class: 'score-col' }, scoreBar(s.averages[key], grades, { label: `${s.name}, ${sectionHead(key)}` }))),
+      h('td', { class: 'right nowrap' }, `${s.needs.support} of ${s.teachers}`)
+    );
+  return h(
+    'div',
+    { class: 'chart-block' },
+    h('h3', {}, 'Average Score by Stage'),
+    h(
+      'div',
+      { class: 'table-wrap' },
+      h(
+        'table',
+        { class: 'report-table stage-table' },
+        h('thead', {}, h('tr', {}, h('th', {}, 'Stage'), h('th', { class: 'right' }, 'Teachers'), keys.map((key) => h('th', { class: 'score-col' }, sectionHead(key))), h('th', { class: 'right' }, 'Need Support'))),
+        h('tbody', {}, figures.stage_stats.map((s) => row(s)), row({ name: 'Whole School', classes: '', ...figures.whole }, true))
+      )
+    ),
+    h('p', { class: 'report-key' }, 'Each bar is the average score of the stage’s teachers who took that section; the tints behind it are the grade bands, D to A. Need Support counts teachers with a section at Grade D.'),
+    figures.stage_stats.some((s) => s.key === null)
+      ? h('p', { class: 'report-note no-print' }, 'Teachers under “Stage Not Given” have no class saved. Add the classes they teach on Schools & teachers, then rebuild, to place them in a stage.')
+      : null
+  );
+}
+
+// A stacked bar per section: how many teachers got each grade.
+function sectionGrades(figures, grades) {
+  const stats = figures.section_stats.filter((s) => s.sat);
+  if (!stats.length) return null;
+  const bands = [...grades].sort((a, b) => b.min - a.min);
+  return h(
+    'div',
+    { class: 'chart-block' },
+    h('h3', {}, 'Grades in Each Section'),
+    h(
+      'div',
+      { class: 'grade-rows' },
+      stats.map((s) =>
+        h(
+          'div',
+          { class: 'grade-row' },
+          h('div', { class: 'grade-row-name' }, h('strong', {}, titleCase(s.name)), h('div', { class: 'hint' }, `${s.sat} took it · average ${s.average}%`)),
+          stackedBar(bands.map((g) => ({ key: g.grade, label: `Grade ${g.grade}, ${g.label}`, value: s.counts[g.grade] ?? 0 })), { label: s.name })
+        )
+      )
+    ),
+    legend(bands.map((g) => ({ key: g.grade, label: `${g.grade} ${g.label}` })))
+  );
+}
+
+// "Section A: Interpersonal & Instructional Communication Skills · …"
+function sectionTitles(stats) {
+  const titled = stats.filter((s) => s.title);
+  return titled.length ? h('p', { class: 'report-key' }, titled.map((s, i) => [i ? ' · ' : '', h('strong', {}, `${titleCase(s.name)}: `), s.title])) : null;
+}
+
+const dayCount = (p) => (p.days_min === p.days_max ? plural(p.days_min, 'day') : `${p.days_min} to ${p.days_max} days`);
+
+// The school's training in a line: how many teachers are on each growth
+// path, the days in all, and how many need none. Each teacher's own plan is
+// in their management report.
+function trainingTotal(training) {
+  if (!training) return null;
+  if (!training.paths.length) {
+    return h('p', { class: 'report-callout' }, h('strong', {}, 'Training: '), 'every teacher assessed so far is at Grade B or better in each section taken, so no growth path is needed.');
+  }
+  const paths = training.paths.map((p, i) => `${i ? p.teachers.length : plural(p.teachers.length, 'teacher')} on ${p.name} (${dayCount(p)} each)`);
+  return h(
+    'p',
+    { class: 'report-callout' },
+    h('strong', {}, 'In Total: '),
+    `${listing(paths)}: ${plural(training.teacher_days, 'training day')} in all.`,
+    training.none.length ? ` ${training.none.length === 1 ? 'One teacher needs' : `${training.none.length} teachers need`} no growth path.` : ''
+  );
+}
+
+// The teachers whose sections were marked leniently, so their percentages
+// cover only the questions they attempted.
+function lenientTeachers(figures) {
+  const lenient = figures.teachers
+    .map((t) => ({ t, keys: t.sections.filter((s) => s.marking === 'lenient').map((s) => s.key || 'paper') }))
+    .filter(({ keys }) => keys.length);
+  if (!lenient.length) return null;
+  return h(
+    'p',
+    { class: 'report-note' },
+    h('strong', {}, 'Lenient marking: '),
+    'questions not attempted are left out of the marks and the total for ',
+    lenient.map(({ t, keys }, i) => [i ? ', ' : '', t.name, h('span', { class: 'hint' }, ` (${keys.join(', ')})`)]),
+    '.'
+  );
+}
+
+// Who is on track, developing or in need of support in each stage, with the
+// sections that put them there.
+function teachersByStage(figures, needs, test) {
+  const assessed = figures.teachers.filter((t) => t.sections.length);
+  if (!assessed.length || !figures.stage_stats?.length) return null;
+  const columns = [...needs].reverse();
+  const gradeFor = { developing: 'C', support: 'D' };
+  const who = (t, need) => {
+    const keys = gradeFor[need] ? t.sections.filter((s) => s.grade === gradeFor[need]).map((s) => s.key || 'paper') : [];
+    return [h('a', { href: `#/teachers/${t.id}/report/${test.id}?for=management` }, t.name), keys.length ? h('span', { class: 'hint' }, ` (${keys.join(', ')})`) : null];
+  };
+  return h(
+    'section',
+    { class: 'report-teachers' },
+    h('h2', {}, 'Teachers by Stage'),
+    h('p', { class: 'report-note' }, 'The letters in brackets are the sections at Grade D for Needs Support, and at Grade C for Developing. Each name has its own report.'),
+    h(
+      'div',
+      { class: 'table-wrap' },
+      h(
+        'table',
+        { class: 'report-table needs-table' },
+        h('thead', {}, h('tr', {}, h('th', {}, 'Stage'), columns.map((n) => h('th', {}, h('i', { class: `swatch fill-${n.key}` }), ` ${n.label}`)))),
+        h(
+          'tbody',
+          {},
+          figures.stage_stats.map((stage) => {
+            const members = assessed.filter((t) => (t.stage ?? null) === stage.key);
+            return h(
+              'tr',
+              {},
+              h('td', {}, h('strong', {}, stage.name), stage.classes ? h('div', { class: 'hint' }, stage.classes) : null),
+              columns.map((n) => {
+                const list = members.filter((t) => t.need === n.key);
+                return h('td', {}, list.length ? list.map((t, i) => [i ? ', ' : '', who(t, n.key)]) : h('span', { class: 'hint' }, '—'));
+              })
+            );
+          })
+        )
+      )
+    )
+  );
+}
 
 export async function renderSchoolReport(root, schoolId, testId) {
   let data = await reportsApi.school(schoolId, testId);
@@ -647,7 +745,7 @@ export async function renderSchoolReport(root, schoolId, testId) {
 
   function draw() {
     const { school, test, report } = data;
-    const written = report?.content ?? null;
+    const written = writtenContent(report);
     // Figures come from the report once it is written, so they match its text.
     const figures = written ?? data;
     const running = report?.status === 'running';
@@ -655,110 +753,36 @@ export async function renderSchoolReport(root, schoolId, testId) {
     const buildButton = h(
       'button',
       { class: `btn ${written ? '' : 'btn-primary'}`, type: 'button', disabled: running || !data.assessed, onclick: build },
-      running ? 'Writing…' : written ? 'Rebuild report' : 'Build report'
+      running ? 'Writing…' : report?.content ? 'Rebuild report' : 'Build report'
     );
-
     const keys = figures.section_stats.map((s) => s.key);
-    const assessed = figures.teachers.filter((t) => t.sections.length);
 
     const sheet = reportSheet(
       {
         school,
         audience: 'For Management',
-        title: 'Report on All Teachers',
+        title: 'School Report',
         details: [
           ['Test', test.name],
           ['Teachers Assessed', `${figures.assessed} of ${figures.teachers.length}`],
           ['Report Date', written ? formatDate(report.written_at) : null],
         ],
       },
-      written?.overview ? h('p', { class: 'report-lead' }, written.overview) : null,
-
-      h('h2', {}, 'Sections Across the School'),
-      h(
-        'div',
-        { class: 'table-wrap' },
-        h(
-          'table',
-          { class: 'report-table' },
-          h('thead', {}, h('tr', {}, h('th', {}, 'Section'), h('th', { class: 'right' }, 'Teachers'), h('th', { class: 'right' }, 'Average'), data.grades.map((g) => h('th', { class: 'right' }, g.grade)))),
-          h(
-            'tbody',
-            {},
-            figures.section_stats.map((s) =>
-              h(
-                'tr',
-                {},
-                h('td', {}, h('strong', {}, titleCase(s.name)), s.title ? h('div', { class: 'hint' }, s.title) : null),
-                h('td', { class: 'right' }, s.sat),
-                h('td', { class: 'right' }, s.average === null ? '—' : `${s.average}%`),
-                data.grades.map((g) => h('td', { class: 'right' }, s.counts[g.grade] || '·'))
-              )
-            )
-          )
-        )
-      ),
-      gradeKey(data.grades),
-
-      written?.section_insights?.length
-        ? h('section', {}, h('h2', {}, 'What the Sections Show'), written.section_insights.map((s) =>
-            h('div', { class: 'insight' }, sectionHeading(s.section, figures.section_stats, 'h3'), h('p', {}, s.pattern), s.training_priority ? h('p', {}, h('strong', {}, 'Training Priority: '), s.training_priority) : null)
-          ))
-        : null,
-
-      h('h2', {}, 'Teachers'),
-      h(
-        'div',
-        { class: 'table-wrap' },
-        h(
-          'table',
-          { class: 'report-table' },
-          h('thead', {}, h('tr', {}, h('th', {}, 'Teacher'), keys.map((key) => h('th', {}, key ? `Section ${key}` : 'Paper')), h('th', {}, 'Potential Identifier'), figures.training ? h('th', {}, 'Training') : null)),
-          h(
-            'tbody',
-            {},
-            assessed.map((t) =>
-              h(
-                'tr',
-                {},
-                h('td', {}, h('a', { href: `#/teachers/${t.id}/report/${test.id}?for=management` }, t.name), [t.grade, t.subjects].filter(Boolean).length ? h('div', { class: 'hint' }, [t.grade, t.subjects].filter(Boolean).join(' · ')) : null),
-                keys.map((key) => {
-                  const s = t.sections.find((x) => x.key === key);
-                  return h('td', {}, s ? percentChip(s) : h('span', { class: 'hint' }, 'not sat'));
-                }),
-                h('td', {}, potentialBadge(t.potential), t.potential?.provisional ? h('div', { class: 'hint' }, t.potential.evidence) : null),
-                figures.training ? h('td', {}, trainingCell(figures.training.by_teacher[t.id])) : null
-              )
-            )
-          )
-        )
-      ),
+      h('h2', {}, 'Summary'),
+      written?.summary ? h('p', { class: 'report-lead' }, written.summary) : null,
+      glance(figures, data.needs),
+      stageTable(figures, keys, data.grades),
+      sectionGrades(figures, data.grades),
+      sectionTitles(figures.section_stats),
+      written?.findings.length ? [h('h3', {}, 'What We Found'), numbered(written.findings, point)] : null,
+      written?.actions.length ? [h('h3', {}, 'What We Will Do'), numbered(written.actions, (a) => [a.timing ? h('strong', {}, `${a.timing}: `) : null, a.action])] : null,
+      trainingTotal(figures.training),
+      written?.school_needs.length ? [h('h3', {}, 'What We Need from the School'), bullets(written.school_needs)] : null,
+      !written && !running ? h('p', { class: 'hint no-print' }, 'The charts and figures are live. Press Build report to add the summary, findings and plan of action.') : null,
+      teachersByStage(figures, data.needs, test),
+      lenientTeachers(figures),
       figures.not_assessed.length ? h('p', { class: 'report-note' }, `Not yet assessed in this test: ${figures.not_assessed.join(', ')}.`) : null,
-
-      h(
-        'div',
-        { class: 'report-cols report-section' },
-        h('section', {}, h('h3', {}, 'Mentor Potential'), figures.mentors.length ? bullets(figures.mentors) : h('p', { class: 'hint' }, 'No one is exemplary in every section they sat yet.')),
-        h('section', {}, h('h3', {}, 'Priority for Support'), figures.support.length ? bullets(figures.support) : h('p', { class: 'hint' }, 'No one needs priority support.'))
-      ),
-
-      figures.section_stats.some((s) => s.helpers.length && s.needs.length)
-        ? h(
-            'section',
-            { class: 'report-section' },
-            h('h2', {}, 'Peer Support'),
-            h('p', { class: 'hint' }, 'Colleagues strong in a section alongside those who need support in it.'),
-            h('ul', {}, figures.section_stats.filter((s) => s.helpers.length && s.needs.length).map((s) =>
-              h('li', {}, h('strong', {}, `${s.name}: `), `${s.helpers.join(', ')} could support ${s.needs.join(', ')}.`)
-            ))
-          )
-        : null,
-
-      schoolNeedForSupport(figures.training),
-
-      written?.recommendations?.length ? h('section', { class: 'report-section' }, h('h2', {}, 'Recommendations'), h('ol', {}, written.recommendations.map((r) => h('li', {}, r)))) : null,
-      !written && !running ? h('p', { class: 'hint no-print' }, 'The figures above are live. Press Build report to add OpenAI’s written analysis, recommendations and plan of action.') : null,
-      schoolTrainingPage(figures.training)
+      gradeKey(data.grades)
     );
 
     mount(
@@ -767,10 +791,10 @@ export async function renderSchoolReport(root, schoolId, testId) {
       h(
         'div',
         { class: 'page-head no-print' },
-        h('div', {}, h('h1', {}, `${school.name}: All Teachers`), h('p', {}, `${test.name}. Figures are per section; teachers are only compared within a section they sat.`)),
+        h('div', {}, h('h1', {}, `${school.name}: School Report`), h('p', {}, `${test.name}. Figures are per section; teachers are only compared within a section they took.`)),
         h('div', { class: 'page-actions' }, buildButton, h('button', { class: 'btn btn-primary', onclick: () => window.print() }, 'Print'))
       ),
-      reportState(report, { building: h('button', { class: 'btn-link', type: 'button', onclick: build }, 'Rebuild report'), what: 'the report on all teachers' }),
+      reportState(report, { building: h('button', { class: 'btn-link', type: 'button', onclick: build }, 'Rebuild report'), what: 'the school report' }),
       data.assessed && !running ? trainingNotice(data.training_state, written, h('button', { class: 'btn-link', type: 'button', onclick: build }, 'Rebuild report')) : null,
       data.assessed ? sheet : emptyState('No teacher has been evaluated in this test yet.')
     );

@@ -78,7 +78,7 @@ function schoolCardContent(data, grades, switchTest) {
       { class: 'dash-actions' },
       testPicker,
       h('a', { class: 'btn btn-sm', href: board }, 'Open board'),
-      h('a', { class: 'btn btn-sm', href: `#/schools/${school.id}/report/${test.id}` }, 'All-teachers report')
+      h('a', { class: 'btn btn-sm', href: `#/schools/${school.id}/report/${test.id}` }, 'School report')
     )
   );
 
@@ -114,10 +114,11 @@ function waitingPanel(data, board) {
   const report = data.school_report;
   let reportLine;
   if (!data.assessed) reportLine = null;
-  else if (!report || report.status === 'none') reportLine = 'The all-teachers report has not been built for this test.';
-  else if (report.status === 'running') reportLine = 'The all-teachers report is being written.';
-  else if (report.status === 'failed') reportLine = 'The all-teachers report could not be written. Open it to try again.';
-  else if (report.stale) reportLine = 'New marks have come in since the all-teachers report was written.';
+  else if (!report || report.status === 'none') reportLine = 'The school report has not been built for this test.';
+  else if (report.status === 'running') reportLine = 'The school report is being written.';
+  else if (report.status === 'failed') reportLine = 'The school report could not be written. Open it to try again.';
+  else if (report.old_layout) reportLine = 'The school report was written in the earlier layout. Rebuild it for the simpler one.';
+  else if (report.stale) reportLine = 'New marks have come in since the school report was written.';
 
   return h(
     'div',

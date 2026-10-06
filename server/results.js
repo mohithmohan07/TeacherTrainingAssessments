@@ -5,6 +5,7 @@
 // if a section was marked more than once, the latest marking counts.
 import crypto from 'node:crypto';
 import db from './db.js';
+import { levelsFromText } from './papers.js';
 
 // Grade bands, applied to each section's percentage.
 export const GRADES = [
@@ -73,20 +74,44 @@ export function sectionName(key) {
 
 const round = (n) => Math.round(n * 100) / 100;
 
+// How a sitting's marks are counted, chosen each time Evaluate is pressed.
+// Standard counts every question, so one not attempted scores 0 out of its
+// marks. Lenient leaves the questions the teacher did not attempt out of both
+// the marks and the total. Marking the answers is the same either way.
+export const MARKINGS = [
+  { key: 'standard', label: 'Standard', meaning: 'Every question counts. A question not attempted scores 0 and stays in the total.' },
+  { key: 'lenient', label: 'Lenient', meaning: 'Questions not attempted are left out of the marks and the total.' },
+];
+
+// The kind of a marking; markings made before there was a choice are standard.
+export const markingOf = (value) => (value === 'lenient' ? 'lenient' : 'standard');
+
+const answered = (q) => String(q.teacher_answer ?? '').trim() !== '' || Number(q.marks_awarded) > 0;
+
+// A question in a section the teacher sat with nothing written and no marks.
+export const isBlank = (q) => !answered(q);
+
+// Whether a question counts towards the marks and the total.
+export const counts = (q, marking) => markingOf(marking) !== 'lenient' || answered(q);
+
 function groupSections(aiResult) {
+  const marking = markingOf(aiResult?.marking);
   const sections = new Map();
   for (const q of aiResult?.questions ?? []) {
     const key = sectionKey(q.section);
-    if (!sections.has(key)) sections.set(key, { key, awarded: 0, max: 0, questions: [] });
+    if (!sections.has(key)) sections.set(key, { key, awarded: 0, max: 0, marking, left_out: 0, left_out_marks: 0, questions: [] });
     const section = sections.get(key);
+    section.questions.push(q);
+    if (!counts(q, marking)) {
+      section.left_out += 1;
+      section.left_out_marks += Number(q.max_marks) || 0;
+      continue;
+    }
     section.awarded += Number(q.marks_awarded) || 0;
     section.max += Number(q.max_marks) || 0;
-    section.questions.push(q);
   }
   return [...sections.values()];
 }
-
-const answered = (q) => String(q.teacher_answer ?? '').trim() !== '' || Number(q.marks_awarded) > 0;
 
 // A section with nothing written against any of its questions was not sat,
 // so it is left out rather than graded 0. This matters when the whole paper
@@ -99,7 +124,7 @@ const sectionWasSat = (section) => section.questions.some(answered);
 export function sittingSections(aiResult) {
   return groupSections(aiResult)
     .filter(sectionWasSat)
-    .map((s) => describe({ ...s, awarded: round(s.awarded), max: round(s.max) }));
+    .map((s) => describe({ ...s, awarded: round(s.awarded), max: round(s.max), left_out_marks: round(s.left_out_marks) }));
 }
 
 // Sections on the paper that the teacher left entirely unanswered.
@@ -192,8 +217,8 @@ export function potentialFor(sections) {
     headline = `Strength in ${sectionList(strengths)}`;
     meaning = [
       'A real strength to build on.',
-      developing.length ? `Still developing in ${names(developing)}.` : '',
-      support.length ? `Needs focused support in ${names(support)}.` : '',
+      developing.length ? `Still developing in ${sectionList(developing)}.` : '',
+      support.length ? `Needs focused support in ${sectionList(support)}.` : '',
     ].filter(Boolean).join(' ');
   } else if (!support.length) {
     level = 'developing';
@@ -202,7 +227,7 @@ export function potentialFor(sections) {
   } else {
     level = 'support';
     headline = 'Priority for Support';
-    meaning = `Needs focused support in ${names(support)} before other responsibilities.`;
+    meaning = `Needs focused support in ${sectionList(support)} before other responsibilities.`;
   }
 
   const areas = Object.keys(SECTION_TITLES);
@@ -218,6 +243,40 @@ export function potentialFor(sections) {
     evidence: sat && sat < areas.length ? `Based on ${sat} of ${areas.length} sections so far.` : `Based on ${graded.length} section${graded.length === 1 ? '' : 's'}.`,
     provisional: sat < areas.length,
   };
+}
+
+// How a teacher stands overall, from their lowest grade: on track when every
+// section sat is Proficient or better, developing when the lowest is C, and
+// in need of support with any section at D. These match the training rule:
+// a section at C or D is what puts a teacher on a growth path.
+export const NEEDS = [
+  { key: 'on_track', label: 'On Track', meaning: 'Grade B or better in every section taken' },
+  { key: 'developing', label: 'Developing', meaning: 'A section at Grade C, none at Grade D' },
+  { key: 'support', label: 'Needs Support', meaning: 'A section at Grade D' },
+];
+
+export function needOf(sections) {
+  const grades = sections.filter((s) => s.percent !== null && s.grade).map((s) => s.grade);
+  if (!grades.length) return null;
+  if (grades.includes('D')) return 'support';
+  return grades.includes('C') ? 'developing' : 'on_track';
+}
+
+// The school stages the report on all teachers is split by, youngest first.
+export const STAGES = [
+  { key: 'pre-primary', name: 'Pre-Primary', classes: 'Nursery to UKG' },
+  { key: 'primary', name: 'Primary', classes: 'Classes 1 to 5' },
+  { key: 'middle-school', name: 'Middle School', classes: 'Classes 6 to 8' },
+  { key: 'secondary', name: 'High School', classes: 'Classes 9 and 10' },
+  { key: 'senior-secondary', name: 'PUC', classes: 'I and II PUC' },
+];
+
+// A teacher's stage, read from the classes typed as their grade. Someone who
+// teaches across stages is counted in the highest; null when the grade names
+// no class.
+export function stageOf(gradeText) {
+  const levels = levelsFromText(gradeText);
+  return STAGES.findLast((stage) => levels.has(stage.key))?.key ?? null;
 }
 
 // A short fingerprint of results, so a report can tell whether the marks it

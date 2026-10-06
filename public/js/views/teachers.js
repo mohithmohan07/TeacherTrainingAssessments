@@ -84,11 +84,13 @@ function testCard(teacher, entry) {
       ? 'The reports are being written.'
       : report.status === 'failed'
         ? `The last report could not be written: ${report.error}`
-        : report.stale
-          ? 'New marks have come in since the reports were written; open them to rebuild.'
-          : report.written_at
-            ? `Reports written ${formatDate(report.written_at)}.`
-            : null;
+        : report.old_layout
+          ? 'These reports were written in the earlier layout; open them to rebuild in the simpler one.'
+          : report.stale
+            ? 'These reports are out of date: new marks have come in or the growth paths have changed. Open them to rebuild.'
+            : report.written_at
+              ? `Reports written ${formatDate(report.written_at)}.`
+              : null;
 
   return h(
     'div',
@@ -116,7 +118,7 @@ function testCard(teacher, entry) {
                   { style: 'cursor:pointer', onclick: () => window.navigate(`/assessments/${s.assessment_id}`) },
                   h('td', {}, h('strong', {}, titleCase(s.name)), s.title ? h('div', { class: 'hint' }, s.title) : null),
                   h('td', {}, formatDate(s.date) || '—'),
-                  h('td', { class: 'right' }, `${s.awarded} / ${s.max}`),
+                  h('td', { class: 'right' }, `${s.awarded} / ${s.max}`, s.marking === 'lenient' ? h('div', { class: 'hint' }, s.left_out ? `Lenient: ${s.left_out} not attempted left out` : 'Lenient') : null),
                   h('td', {}, percentChip(s), s.grade_label ? h('span', { class: 'hint' }, ` ${s.grade_label}`) : null)
                 )
               )

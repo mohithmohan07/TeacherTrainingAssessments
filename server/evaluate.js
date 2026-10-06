@@ -4,7 +4,9 @@
 // question. It runs in the background: the request that
 // starts it returns straight away and the page polls the assessment until the
 // marking is done or has failed. Once it is done, the teacher's reports for
-// the test are rebuilt (reports.js).
+// the test are rebuilt (reports.js). Evaluate also says how the marks are
+// counted: standard, or lenient, which leaves the questions the teacher did
+// not attempt out of the marks and the total (results.js).
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import db, { UPLOADS_DIR } from './db.js';
@@ -12,7 +14,7 @@ import { OPENAI_MODEL, friendly, openaiConfigured, requestJson } from './openai.
 import { queueTeacherReports } from './reports.js';
 import { swapScanKinds } from './scans.js';
 import { sittingPapers } from './papers.js';
-import { sectionKey } from './results.js';
+import { counts, markingOf, sectionKey } from './results.js';
 
 // Types the OpenAI API accepts as image input. The scanner helper saves JPEG.
 const OPENAI_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
@@ -83,9 +85,10 @@ const saveResult = db.prepare(
     WHERE id = @id`
 );
 
-// Checks an assessment can be marked and starts marking it. Returns an error
+// Checks an assessment can be marked and starts marking it, counting the
+// marks the way `marking` says ('standard' or 'lenient'). Returns an error
 // message for the person if it cannot start, or null once it is running.
-export function startEvaluation(assessmentId) {
+export function startEvaluation(assessmentId, marking = 'standard') {
   const assessment = selectAssessment.get(assessmentId);
   if (!assessment) return 'Assessment not found.';
   if (!openaiConfigured()) {
@@ -109,14 +112,14 @@ export function startEvaluation(assessmentId) {
   }
 
   markRunning.run(assessment.id);
-  evaluate(assessment, { paper, library, response }).catch((error) => {
+  evaluate(assessment, { paper, library, response }, markingOf(marking)).catch((error) => {
     console.error(`Evaluating assessment ${assessment.id} failed:`, error);
     markFailed.run(error.userMessage ?? `Marking failed: ${error.message}`, assessment.id);
   });
   return null;
 }
 
-async function evaluate(assessment, { paper, library, response }) {
+async function evaluate(assessment, { paper, library, response }, marking) {
   const assessmentId = assessment.id;
   const content = [
     ...(await libraryInputs(library)),
@@ -140,6 +143,7 @@ async function evaluate(assessment, { paper, library, response }) {
   });
   const result = normalise({
     ...marks,
+    marking,
     questions: scopeToSection(marks.questions ?? [], assessment.section),
     // Only scanned pages can have been filed the wrong way round.
     pages_swapped: marks.pages_swapped === true && paper.length > 0 && !library.length,
@@ -221,8 +225,10 @@ const saveMarking = db.transaction((assessmentId, result) => {
 });
 
 // Totals are added up here rather than taken from the model, and marks are
-// kept within each question's maximum.
+// kept within each question's maximum. Lenient marking leaves the questions
+// the teacher did not attempt out of both totals.
 export function normalise(raw) {
+  const marking = markingOf(raw.marking);
   const questions = (raw.questions ?? []).map((q) => {
     const max = Math.max(0, Number(q.max_marks) || 0);
     const awarded = Math.min(max, Math.max(0, Number(q.marks_awarded) || 0));
@@ -235,8 +241,10 @@ export function normalise(raw) {
       feedback: String(q.feedback ?? '').trim(),
     };
   });
-  const sum = (key) => Math.round(questions.reduce((total, q) => total + q[key], 0) * 100) / 100;
+  const counted = questions.filter((q) => counts(q, marking));
+  const sum = (key) => Math.round(counted.reduce((total, q) => total + q[key], 0) * 100) / 100;
   return {
+    marking,
     pages_swapped: raw.pages_swapped === true,
     questions,
     total_score: sum('marks_awarded'),
