@@ -629,14 +629,119 @@ function reportButton(state, teacher) {
   );
 }
 
-// The school report on all of the school's teachers, offered at the end,
-// and a button that builds every teacher report still missing or out of date.
+// "Download all reports": every written report of the test in one zip, a
+// folder named after the test with the teachers' reports in one folder, the
+// management reports in another, and the school report. The server prints
+// them to PDF, which takes a few seconds a report, so the page shows how far
+// it has got and the zip downloads when it is ready. A zip made in the last
+// hour can be downloaded again.
+function downloadAll(state, { written, writing }) {
+  const fileUrl = reportsApi.zipFileUrl(state.schoolId, state.testId);
+  const line = h('div', { class: 'zip-line' });
+  const idleTitle = writing ? 'Wait until the reports being written are done.' : written ? null : 'Build the teacher reports first.';
+  const button = h('button', { class: 'btn', type: 'button', disabled: Boolean(idleTitle), title: idleTitle, onclick: () => start() }, 'Download all reports');
+
+  const save = (job) => {
+    const link = h('a', { href: fileUrl, download: job.name, style: 'display:none' });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    toast(`Downloading ${job.name}.`, 'success');
+  };
+
+  // What is in the zip and what is not, under a finished one.
+  const notes = (job) => {
+    const items = [
+      job.not_printed.length
+        ? `Could not be printed, so not in the zip: ${job.not_printed.join(', ')}.${job.out_of_memory ? ' Chromium stopped on them, most likely for lack of memory: giving the app 1 GB of memory should fix it.' : ''}`
+        : null,
+      job.left_out.length ? `Not in the zip, as their reports have not been written: ${job.left_out.join(', ')}.` : null,
+      job.old_layout.length ? `Not in the zip, as their reports are in the earlier layout (rebuild, then download again): ${job.old_layout.join(', ')}.` : null,
+      job.out_of_date.length ? `Out of date (rebuild, then download again): ${job.out_of_date.join(', ')}.` : null,
+      job.school === 'missing' ? 'The school report has not been built, so it is not in the zip.' : null,
+      job.school === 'old_layout' ? 'The school report is in the earlier layout, so it is not in the zip: rebuild it on the School Report page, then download again.' : null,
+      job.school === 'out_of_date' ? 'The school report in the zip is out of date: rebuild it on the School Report page, then download again.' : null,
+    ].filter(Boolean);
+    return items.length ? h('ul', { class: 'zip-notes' }, items.map((item) => h('li', {}, item))) : null;
+  };
+
+  // Shows a zip's state, checks back every few seconds while it is being
+  // made, and downloads it if it finishes while this page is open.
+  const show = (job, { watched = false } = {}) => {
+    if (!button.isConnected && watched) return;
+    if (!job) {
+      mount(line);
+      return;
+    }
+    if (job.status === 'running') {
+      button.disabled = true;
+      button.textContent = 'Making the zip…';
+      mount(
+        line,
+        h(
+          'div',
+          { class: 'marking-state' },
+          h('span', { class: 'spinner' }),
+          `Printing the reports to PDF: ${job.done} of ${job.total} done${job.current ? `, now ${job.current}` : ''}. The zip downloads when it is ready, if this page is still open.`
+        )
+      );
+      setTimeout(async () => {
+        if (!button.isConnected) return;
+        try {
+          show((await reportsApi.zip(state.schoolId, state.testId)).job, { watched: true });
+        } catch {
+          show(job, { watched: true });
+        }
+      }, 2500);
+      return;
+    }
+    button.disabled = Boolean(idleTitle);
+    button.textContent = 'Download all reports';
+    if (job.status === 'failed') {
+      mount(line, h('div', { class: 'marking-state error' }, job.error));
+      return;
+    }
+    if (watched) save(job);
+    mount(
+      line,
+      h(
+        'div',
+        { class: 'zip-ready' },
+        h('div', {}, h('strong', {}, job.name), ` is ready (${formatBytes(job.size)}). `, h('a', { href: fileUrl, download: job.name }, watched ? 'Download it again' : 'Download it')),
+        notes(job)
+      )
+    );
+  };
+
+  const start = async () => {
+    button.disabled = true;
+    try {
+      const viewer = { time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone, locale: navigator.language };
+      show((await reportsApi.startZip(state.schoolId, state.testId, viewer)).job, { watched: true });
+    } catch (error) {
+      toast(error.message, 'error');
+      button.disabled = Boolean(idleTitle);
+    }
+  };
+
+  // A zip being made, or made in the last hour.
+  reportsApi.zip(state.schoolId, state.testId).then(({ job }) => {
+    if (button.isConnected) show(job, { watched: job?.status === 'running' });
+  }, () => {});
+
+  return { button, line };
+}
+
+// The school report on all of the school's teachers, offered at the end, a
+// button that builds every teacher report still missing or out of date, and
+// one that downloads them all.
 function schoolReportCard(state, reload) {
   const assessed = state.roster.filter((t) => t.sections.length);
   if (!state.roster.length) return null;
   const due = assessed.filter((t) => ['none', 'failed', 'stale'].includes(t.report_status)).length;
   const writing = assessed.filter((t) => t.report_status === 'running').length;
   const reports = (n) => `${n} teacher report${n === 1 ? '' : 's'}`;
+  const download = assessed.length ? downloadAll(state, { written: assessed.some((t) => ['done', 'stale'].includes(t.report_status)), writing }) : null;
 
   const buildAll = h(
     'button',
@@ -678,6 +783,7 @@ function schoolReportCard(state, reload) {
                 due ? ` ${due === 1 ? 'One teacher report is' : `${due} teacher reports are`} missing or out of date.` : '',
                 writing ? ` ${reports(writing)} ${writing === 1 ? 'is' : 'are'} being written.` : '',
                 ' When you have evaluated everyone you want in it, build the school report on all of them.',
+                ' Download all reports puts every written report in one zip.',
               ].join('')
             : 'Once teachers have been evaluated, build their reports and the school report on all of them here.'
         )
@@ -687,6 +793,7 @@ function schoolReportCard(state, reload) {
         { class: 'page-actions' },
         writing ? h('button', { class: 'btn', type: 'button', onclick: () => reload() }, 'Refresh') : null,
         assessed.length ? buildAll : null,
+        download?.button,
         h(
           'a',
           {
@@ -699,7 +806,8 @@ function schoolReportCard(state, reload) {
           'School Report'
         )
       )
-    )
+    ),
+    download?.line
   );
 }
 

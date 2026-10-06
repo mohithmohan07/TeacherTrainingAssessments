@@ -9,14 +9,24 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+# PDF.js's optional canvas is for drawing PDFs in Node; the app draws them in
+# the browser, so it is left out.
+RUN npm ci --omit=dev --omit=optional
 
 COPY server ./server
 COPY public ./public
 COPY scanner-helper ./scanner-helper
 
-# Runtime stage: just Node and the built app.
+# Runtime stage: Node, the built app, and Chromium's headless shell, which
+# prints the reports to PDF for "Download all reports" (the full Chromium
+# instead if this Debian has no headless shell), with fonts for it.
 FROM node:22-slim
+
+RUN apt-get update \
+  && (apt-get install -y --no-install-recommends chromium-headless-shell \
+      || apt-get install -y --no-install-recommends chromium) \
+  && apt-get install -y --no-install-recommends fonts-liberation \
+  && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production \
     PORT=8080 \

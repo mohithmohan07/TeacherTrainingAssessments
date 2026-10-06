@@ -36,6 +36,13 @@ app.use('/uploads', express.static(UPLOADS_DIR, { index: false, maxAge: '1h' }))
 app.use(express.static(path.join(__dirname, '..', 'public')));
 // Noto fonts for every script the generator writes in, from the @fontsource packages.
 app.use('/fonts', express.static(path.join(__dirname, '..', 'node_modules', '@fontsource'), { index: false, maxAge: '30d' }));
+// PDF.js, which draws the library's question papers as pages at the end of a
+// teacher's reports, with the files it reads fonts and images with. Its legacy
+// build runs in browsers a few years old as well as the newest.
+const PDFJS_DIR = path.join(__dirname, '..', 'node_modules', 'pdfjs-dist');
+for (const [url, dir] of [['build', 'legacy/build'], ['cmaps', 'cmaps'], ['standard_fonts', 'standard_fonts'], ['wasm', 'wasm'], ['iccs', 'iccs']]) {
+  app.use(`/vendor/pdfjs/${url}`, express.static(path.join(PDFJS_DIR, dir), { index: false, maxAge: '30d' }));
+}
 
 app.use('/api/schools', schoolsRouter);
 app.use('/api/teachers', teachersRouter);

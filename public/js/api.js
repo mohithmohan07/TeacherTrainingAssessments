@@ -72,6 +72,10 @@ export const reportsApi = {
   school: (schoolId, testId) => api.get(`/api/reports/school?school_id=${schoolId}&test_id=${testId}`),
   buildSchool: (schoolId, testId) => api.postJson('/api/reports/school', { school_id: schoolId, test_id: testId }),
   buildAllTeachers: (schoolId, testId) => api.postJson('/api/reports/teachers', { school_id: schoolId, test_id: testId }),
+  // Every report of the test in one zip, printed to PDF on the server.
+  zip: (schoolId, testId) => api.get(`/api/reports/zip?school_id=${schoolId}&test_id=${testId}`),
+  startZip: (schoolId, testId, viewer) => api.postJson('/api/reports/zip', { school_id: schoolId, test_id: testId, ...viewer }),
+  zipFileUrl: (schoolId, testId) => `/api/reports/zip/file?school_id=${schoolId}&test_id=${testId}`,
 };
 
 export const assessmentsApi = {

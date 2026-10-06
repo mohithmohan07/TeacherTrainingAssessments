@@ -31,9 +31,15 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(bufferA, bufferB);
 }
 
-function issueToken() {
-  const expiresAt = Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000;
+function issueToken(lifetimeMs = SESSION_DAYS * 24 * 60 * 60 * 1000) {
+  const expiresAt = Date.now() + lifetimeMs;
   return `${expiresAt}.${hmac(String(expiresAt))}`;
+}
+
+// A short session for the server's own browser, which opens the report pages
+// to print them into a zip, or null when there is no password.
+export function serverSession(minutes = 30) {
+  return authEnabled ? { name: COOKIE_NAME, value: issueToken(minutes * 60 * 1000) } : null;
 }
 
 function tokenIsValid(token) {
