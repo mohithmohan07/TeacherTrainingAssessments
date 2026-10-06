@@ -238,9 +238,8 @@ file cannot be shown; the report says so in its place.
 - **For management**: factual. The training recommended (or that none is
   needed), the potential identifier, numbered findings, what UpSchool will do
   about them, what the school needs to provide and the goal for the final
-  test. **Details** then takes each finding in turn: what was found, why it
-  matters and the days of the plan that work on it. The day-by-day **Training
-  Plan** follows (see [Training plans](#training-plans)).
+  test, each in a line or two. The day-by-day **Training Plan** follows (see
+  [Training plans](#training-plans)).
 
 Open them with **Report** on the teacher's row or from their profile; each
 prints on its own. **Build N teacher reports** in the **Reports** card on the

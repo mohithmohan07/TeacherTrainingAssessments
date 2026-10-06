@@ -479,8 +479,6 @@ async function printWhenReady(container, button) {
 
 const dayRange = (b) => (b.from === b.to ? `Day ${b.from}` : `Days ${b.from}–${b.to}`);
 const dayNumbers = (b) => (b.from === b.to ? `${b.from}` : `${b.from}–${b.to}`);
-// "Days 1–9 and 18–20", for the blocks that work on one finding.
-const daysOf = (blocks) => (!blocks.length ? '' : blocks.length === 1 ? dayRange(blocks[0]) : `Days ${listing(blocks.map(dayNumbers))}`);
 // Each section keeps its colour across the plan; the shared blocks have their own.
 const toneOf = (b) => (b.kind === 'section' ? `tone-${b.key || 'paper'}` : `tone-${b.kind}`);
 const shortTitle = (b) => (b.kind === 'section' ? b.title.split(':')[0] : b.title);
@@ -700,33 +698,6 @@ function whatWeWillDo(plan, m) {
   return m.support.length ? [h('h3', {}, 'What We Recommend'), bullets(m.support)] : null;
 }
 
-// Each finding in full, numbered as on the first page, with the days of the
-// plan that work on it.
-function findingDetails(findings, plan) {
-  if (!findings.length) return null;
-  return h(
-    'section',
-    { class: 'report-findings' },
-    h('h2', {}, 'Details'),
-    h('p', { class: 'report-note' }, 'Each finding keeps its number from the summary.'),
-    findings.map((f, i) => {
-      const days = plan?.path ? daysOf(plan.blocks.filter((b) => b.points?.includes(i + 1))) : '';
-      return h(
-        'div',
-        { class: 'finding' },
-        h('h3', {}, `${i + 1}. ${titleCase(f.title)}`),
-        f.details.length
-          ? [h('p', { class: 'finding-label' }, h('strong', {}, 'What We Found:')), bullets(f.details)]
-          : f.summary
-            ? h('p', {}, h('strong', {}, 'What We Found: '), f.summary)
-            : null,
-        f.why_it_matters ? h('p', {}, h('strong', {}, 'Why It Matters: '), f.why_it_matters) : null,
-        f.action ? h('p', {}, h('strong', {}, `What We Will Do${days ? ` (${days})` : ''}: `), f.action) : null
-      );
-    })
-  );
-}
-
 function managementSheet(data, content) {
   const { teacher, school, test, report } = data;
   const m = content.management;
@@ -742,7 +713,6 @@ function managementSheet(data, content) {
     whatWeWillDo(plan, m),
     m.school_needs.length ? [h('h3', {}, 'What We Need from the School'), bullets(m.school_needs)] : null,
     plan?.goal ? h('p', { class: 'report-callout' }, h('strong', {}, 'Goal for the Final Test: '), plan.goal) : null,
-    findingDetails(m.findings, plan),
     planSection(plan),
     marksSection(withQuestions(content.sections, data.sections), { forTeacher: false }),
     gradeKey(data.grades),

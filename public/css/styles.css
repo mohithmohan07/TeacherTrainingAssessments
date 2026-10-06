@@ -667,11 +667,8 @@ td.right, th.right { text-align: right; white-space: nowrap; }
 .report-points li { margin-bottom: 7px; }
 .report-sheet .report-callout { margin: 12px 0; padding: 9px 14px; border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0; background: var(--accent-soft); break-inside: avoid; }
 .report-sheet h3 + .report-points, .report-sheet h3 + ul { margin-top: 0; }
-.finding { break-inside: avoid; }
-.report-sheet .finding h3 { margin-top: 18px; font-family: var(--serif); font-size: 16px; color: var(--accent); }
-.report-sheet .finding-label { margin-bottom: 2px; }
 .results-table .not-taken td { color: var(--muted); }
-.report-plan, .report-findings, .report-marks, .report-answers, .report-teachers { margin-top: 8px; }
+.report-plan, .report-marks, .report-answers, .report-teachers { margin-top: 8px; }
 .report-sheet h2 small { display: block; margin-top: 2px; font-family: var(--font); font-size: 13px; font-weight: 500; color: var(--muted); }
 
 /* Charts. Bars sit on a track tinted with the grade bands (the chip colours),

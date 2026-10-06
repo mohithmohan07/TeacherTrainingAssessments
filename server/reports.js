@@ -135,26 +135,26 @@ You are given one teacher's results in one test: the sections they sat, with mar
 
 A section may be marked leniently: the questions the teacher did not attempt are then left out of both the marks and the total, so its percentage covers only the questions attempted. When you give such a section's marks or percentage, say that they cover the questions attempted, and still mention the questions left blank.
 
-Write two reports from the same results, in English. Keep both simple and short: plain, everyday words and short sentences that a busy principal or teacher can read in two minutes, with no jargon. Back each point with the evidence, citing questions and marks, such as "Section A questions 2 and 3 scored 3 out of 8". Write about the teacher by name or as "the teacher", never as "he" or "she". Refer to sections exactly as given, such as "Section A".
+Write two reports from the same results, in English. Keep both brief: plain, everyday words and short sentences that a busy principal or teacher can read in a minute, with no jargon and no filler. Say each thing once; the marks, grades and every question's answers are shown beside your text in tables and charts, so do not repeat them in words. Back each point with the evidence, citing questions and marks, such as "Section A questions 2 and 3 scored 3 out of 8". Write about the teacher by name or as "the teacher", never as "he" or "she". Refer to sections exactly as given, such as "Section A".
 
 1. teacher_report, addressed to the teacher as "you". It helps the teacher get better and never criticises.
-- summary: two or three short sentences: thank the teacher for taking the test, then the main strength and the main next step.
-- went_well: two to four points. Each has a title of two to five words, such as "Clear examples", and one sentence of detail from their answers.
-- next_steps: two to four points in the same way. Each detail is one concrete thing to try in their own classroom next week.
-- practice_ideas: three short habits or activities that fit into a normal school week.
+- summary: two short sentences: thank the teacher for taking the test, then the main strength and the main next step.
+- went_well: two or three points. Each has a title of two to five words, such as "Clear examples", and one sentence of detail from their answers, of no more than 20 words.
+- next_steps: two or three points in the same way. Each detail is one concrete thing to try in their own classroom next week.
+- practice_ideas: two or three short habits or activities that fit into a normal school week, a few words each.
 - Never use words like poor, weak, fail, lacking or inadequate. Be realistic about large classes, heavy workloads, little time, answering in a language that may not be their first, and writing by hand against the clock.
 - Do not rank the teacher, compare them with others, or mention sections they did not sit.
 
 2. management_report, for the principal and management. Factual and neutral.
-- summary: two or three short sentences on what the results show, naming the sections sat, for example "The teacher did well in Section A and needs support in Section B. The classroom examples are practical, but several answers did not say how the idea would be taught." If questions were left blank, say how many. Do not mention training days; they are added after the summary.
-- findings: three to five findings, the most important first; the report numbers them. Each has:
+- summary: one or two short sentences on what the results show, naming the sections sat, for example "The teacher did well in Section A and needs support in Section B. The classroom examples are practical, but several answers did not say how the idea would be taught." If questions were left blank, say how many. Do not mention training days; they are added after the summary.
+- findings: two to four findings, the most important first; the report numbers them. Each has:
   - title: two to five words, such as "Checking understanding";
-  - summary: one or two sentences for the first page, citing questions and marks;
+  - summary: one sentence for the first page, of no more than 25 words, citing questions and marks;
   - details: two or three short points from the teacher's answers, for the details page;
   - why_it_matters: one sentence on why it matters for the children or the school;
   - action: one or two sentences on what will be done about it.
   When questions were left blank, make one finding about them, such as "Questions left blank", listing them.
-- school_needs: two or three things the school needs to do, such as setting aside time for the training, arranging classroom visits by an UpSchool coach, or providing teaching materials.
+- school_needs: two things the school needs to do, one short sentence each, such as setting aside time for the training, arranging classroom visits by an UpSchool coach, or providing teaching materials.
 - roles: up to two responsibilities the evidence supports, such as mentoring colleagues in a section, each with its evidence. Leave it empty if the results do not support any.
 - support: up to three kinds of support that would help, most useful first.
 - Do not speculate about the teacher's personal life, health or motives. Do not treat sections not sat as weaknesses. If only one or two sections were sat, say that the picture is partial.`;
@@ -530,11 +530,11 @@ const SCHOOL_INSTRUCTIONS = `You write the school report for a teacher training 
 
 You are given every assessed teacher's results in one test, with figures by section, by need and by school stage (Pre-Primary, Primary, Middle School, High School and PUC), a rule-based potential identifier for each teacher and, where available, the main findings from their own reports. Teachers may have sat only some sections, so only compare teachers within a section. Sections marked leniently leave out the questions the teacher did not attempt, so their percentages cover only the questions attempted.
 
-Write in English that is simple and short: plain, everyday words and short sentences that a busy principal can read in two minutes, with no jargon. Base every statement on the figures given and cite them, such as "In Primary, 5 of 9 teachers are at Grade C in Section C". Be factual and neutral. Write about teachers by name, never as "he" or "she". Refer to sections exactly as given, such as "Section A".
-- summary: two or three short sentences: how many teachers took the test, how many need support, and the main pattern by stage or section.
-- findings: three to five findings, the most important first; the report numbers them. Each has a title of three to eight words that states the finding, such as "Primary teachers are strong in Section C", and a detail of one or two sentences with the figures. Look for patterns by stage and by section, and name teachers who are strong in a section and could help others.
-- actions: three to five things UpSchool's team and the school will do, the most important first, each one sentence, such as "Hold workshops on Section B for the 6 teachers at Grade D, with Middle School and High School teachers in separate groups." Give each a timing such as "Weeks 1–2", or "" when there is none. Pair teachers strong in a section with those who need help in it, in the same stage where possible.
-- school_needs: two or three things the school needs to do, such as fixing the training calendar, freeing time for teachers who mentor colleagues, or arranging classroom visits by UpSchool coaches.
+Write in English that is brief: plain, everyday words and short sentences that a busy principal can read in a minute, with no jargon and no filler. The report shows the figures in charts and tables beside your text, so give only the figures that make each point. Base every statement on the figures given and cite them, such as "In Primary, 5 of 9 teachers are at Grade C in Section C". Be factual and neutral. Write about teachers by name, never as "he" or "she". Refer to sections exactly as given, such as "Section A".
+- summary: two short sentences: how many teachers took the test, how many need support, and the main pattern by stage or section.
+- findings: three or four findings, the most important first; the report numbers them. Each has a title of three to eight words that states the finding, such as "Primary teachers are strong in Section C", and a detail of one sentence with the figures. Look for patterns by stage and by section, and name teachers who are strong in a section and could help others.
+- actions: three or four things UpSchool's team and the school will do, the most important first, each one sentence, such as "Hold workshops on Section B for the 6 teachers at Grade D, with Middle School and High School teachers in separate groups." Give each a timing such as "Weeks 1–2", or "" when there is none. Pair teachers strong in a section with those who need help in it, in the same stage where possible.
+- school_needs: two or three things the school needs to do, one short sentence each, such as fixing the training calendar, freeing time for teachers who mentor colleagues, or arranging classroom visits by UpSchool coaches.
 - Do not rank teachers against each other beyond what the figures show, and do not speculate about personal circumstances.`;
 
 const SCHOOL_SCHEMA = {
