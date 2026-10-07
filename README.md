@@ -152,6 +152,35 @@ The helper listens on `127.0.0.1:17645` only, answers only this app's pages,
 and keeps a copy of every scan under `Documents\Assessment scans`, so a failed
 upload never loses pages. See `scanner-helper/README.txt` for its settings.
 
+### Uploading every answer paper at once (PDFs)
+
+**Upload all answer papers (PDFs)** on the Assessments page takes every
+teacher's scanned answer paper in one go: one PDF per teacher, chosen together
+with **Upload files** or dropped on the page. The browser turns each PDF's
+pages into pictures and uploads them. The PDFs need not say whose answers they
+are, which sections they cover or which paper was sat; each one is sorted:
+
+1. **The teacher** comes from the file name ("Keshava.pdf",
+   "Archana_BM.pdf"), or else from the name written on the sheets, which
+   OpenAI reads while it checks the language of each page.
+2. **Pages not in English** are read by Gemini first, in their own script, as
+   Evaluate does. A teacher can write one section in Kannada and another in
+   English: each section is matched on its own.
+3. **Sections and papers**: OpenAI compares the answers with the library papers
+   that fit the teacher (their level, subject and board), using what each
+   answer talks about, the names and terms in it and the order of the
+   questions, to say which section each page answers and which paper each
+   section was sat on. A section with no pages was not sat.
+
+Nothing is filed until it is checked. Each PDF shows its teacher, its pages
+coloured by section and the question paper chosen for each section, all of
+which can be changed; **Preview** shows a section's question paper beside the
+teacher's answers to it. **File** puts each section's pages under the
+teacher's sitting for that section, with its question paper. Filing marks
+nothing: **Evaluate all** (with one Standard or Lenient choice) marks the
+sections just filed, two at a time, or each can be evaluated on its own.
+PDFs not yet filed wait on the page for the next visit.
+
 ### Uploading image files
 
 Without the helper, the buttons read **Upload** and take image files instead,

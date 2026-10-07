@@ -28,6 +28,14 @@ export const uploadScans = multer({
   fileFilter: imageFilter,
 });
 
+// The pages of one answer-paper PDF, made into pictures by the browser before
+// upload (bulk.js): up to 120 pages, 25 MB each.
+export const uploadPdfPages = multer({
+  storage: diskStorage,
+  limits: { fileSize: 25 * 1024 * 1024, files: 120 },
+  fileFilter: imageFilter,
+});
+
 // School logo: one image, up to 5 MB.
 export const uploadLogo = multer({
   storage: diskStorage,

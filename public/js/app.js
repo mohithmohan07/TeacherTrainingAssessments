@@ -5,6 +5,7 @@ import { renderGenerator, renderGeneratedPaper } from './views/generator.js';
 import { renderTeacherProfile } from './views/teachers.js';
 import { renderTeacherReport, renderSchoolReport } from './views/reports.js';
 import { renderPapers } from './views/papers.js';
+import { renderBulk } from './views/bulk.js';
 import { renderTraining } from './views/training.js';
 import { toast } from './ui.js';
 
@@ -18,6 +19,7 @@ const routes = [
   { pattern: /^\/teachers\/(\d+)$/, nav: 'schools', render: (id) => renderTeacherProfile(view, id) },
   { pattern: /^\/teachers\/(\d+)\/report\/(\d+)(?:\?(.*))?$/, nav: 'assessments', render: (id, testId, query) => renderTeacherReport(view, id, testId, new URLSearchParams(query ?? '')) },
   { pattern: /^\/assessments(?:\?(.*))?$/, nav: 'assessments', render: (query) => renderAssessments(view, new URLSearchParams(query ?? '')) },
+  { pattern: /^\/assessments\/upload-all(?:\?(.*))?$/, nav: 'assessments', render: (query) => renderBulk(view, new URLSearchParams(query ?? '')) },
   { pattern: /^\/assessments\/(\d+)$/, nav: 'assessments', render: (id) => renderAssessmentDetail(view, id) },
   { pattern: /^\/papers$/, nav: 'papers', render: () => renderPapers(view) },
   { pattern: /^\/training$/, nav: 'training', render: () => renderTraining(view) },
