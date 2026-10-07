@@ -1,10 +1,11 @@
 import {
   h, mount, field, input, textarea, select, toast, confirmAction, statusBadge,
-  formatDate, formatBytes, emptyState, openLightbox, sectionChip,
+  formatDate, formatBytes, emptyState, viewPages, sectionChip,
 } from '../ui.js';
 import { schoolsApi, teachersApi, assessmentsApi, testsApi, reportsApi } from '../api.js';
 import { choosePaper, paperFacts, paperThumb } from '../paper-picker.js';
 import { chooseMarking } from '../marking-choice.js';
+import { movePages } from '../move-pages.js';
 import { WRITING_NAME, checkedSections, openWritingReport, writingChip, writingLine } from '../writing.js';
 import {
   scanner, scanPages, connectScanner, stopScanning, checkScannerOnce, selectScanner, selectedScanner,
@@ -12,6 +13,8 @@ import {
 } from '../scanner.js';
 
 const KIND_NAMES = { question_paper: 'question paper', response: 'answer paper' };
+const pageCount = (n) => `${n} page${n === 1 ? '' : 's'}`;
+const capitalise = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 
 // The board works on the full paper or on one section at a time.
 const SECTION_OPTIONS = [
@@ -68,6 +71,7 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
     roster: [],
     librarySize: 0,
     assessments: [],
+    justFiled: null,
   };
 
   const container = h('div', {});
@@ -184,6 +188,7 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
       schoolReportCard(state, load),
       historyCard(state)
     );
+    state.justFiled = null; // the row that just had pages filed lights up once
   }
 
   // Looks for the scanner helper if scanning was turned on in an earlier visit.
@@ -245,7 +250,7 @@ function teacherBoardCard(state, reload, redraw) {
           state.roster.map((teacher) =>
             h(
               'tr',
-              {},
+              { class: state.justFiled === teacher.id ? 'just-filed' : null },
               h(
                 'td',
                 {},
@@ -297,15 +302,18 @@ function teacherBoardCard(state, reload, redraw) {
 // scanner connected the button scans; otherwise it picks image files. The
 // button names what it files the pages as, and once pages are in, the first
 // one shows small beside the count, so pages filed in the wrong column are
-// plain to see.
+// plain to see. Clicking it shows them all.
 function scanCell(state, teacher, kind, count, firstPage, reload, redraw) {
-  const label = count ? `${count} page${count === 1 ? '' : 's'}` : 'None yet';
+  const label = count ? pageCount(count) : 'None yet';
   const scanning = scanner.status === 'ready';
   const idleLabel = scanning
     ? (count ? 'Scan more' : `Scan ${KIND_NAMES[kind]}`)
     : count ? 'Add pages' : `Upload ${KIND_NAMES[kind]}`;
   const fileInput = h('input', { type: 'file', accept: 'image/*', multiple: true, style: 'display:none' });
   const button = h('button', { class: 'btn btn-sm', type: 'button' }, idleLabel);
+  // The test and section the pages go to are taken when the button is
+  // pressed, so changing them while the scanner works cannot send them elsewhere.
+  let target = { testId: state.testId, section: state.section };
 
   const settle = () => {
     button.disabled = false;
@@ -316,16 +324,16 @@ function scanCell(state, teacher, kind, count, firstPage, reload, redraw) {
   const upload = async (files, { scanned = false, warning = '' } = {}) => {
     const data = new FormData();
     data.set('kind', kind);
-    data.set('test_id', state.testId);
-    if (state.section) data.set('section', state.section);
+    data.set('test_id', target.testId);
+    if (target.section) data.set('section', target.section);
     for (const file of files) data.append('files', file);
 
     button.textContent = 'Uploading…';
     try {
       await teachersApi.uploadScans(teacher.id, data);
-      const pages = `${files.length} page${files.length === 1 ? '' : 's'}`;
-      toast(`${pages} ${scanned ? 'scanned' : 'added'} as ${teacher.name}’s ${KIND_NAMES[kind]}.`, 'success');
+      toast(`${pageCount(files.length)} ${scanned ? 'scanned' : 'added'} as ${teacher.name}’s ${KIND_NAMES[kind]}.`, 'success');
       if (warning) toast(warning, 'error');
+      state.justFiled = teacher.id;
       await reload(); // redraws the whole board, so the button state goes with it
     } catch (error) {
       const kept = scanned && scanner.folder ? ` The scanned pages are also saved on this laptop in ${scanner.folder}.` : '';
@@ -335,22 +343,32 @@ function scanCell(state, teacher, kind, count, firstPage, reload, redraw) {
   };
 
   button.addEventListener('click', async () => {
+    target = { testId: state.testId, section: state.section };
     if (!scanning) {
       fileInput.click();
       return;
     }
     button.disabled = true;
     button.textContent = 'Scanning…';
+    const what = `${target.section ? `Section ${target.section} ` : ''}${KIND_NAMES[kind]}`;
+    const dialog = scanningDialog(teacher.name, what);
     let scan;
     try {
-      scan = await scanPages({ label: `${teacher.name} - ${KIND_NAMES[kind]}` });
+      scan = await scanWithDialog(dialog, { teacherName: teacher.name, label: `${teacher.name} - ${KIND_NAMES[kind]}` });
     } catch (error) {
+      dialog.close();
       toast(error.message, 'error');
       settle();
       if (error.helperGone) redraw();
       return;
     }
+    if (!scan) {
+      settle();
+      return;
+    }
+    dialog.say(`Filing ${pageCount(scan.files.length)} as ${teacher.name}’s ${what}…`);
     await upload(scan.files, { scanned: true, warning: scan.warning });
+    dialog.close();
   });
 
   fileInput.addEventListener('change', () => {
@@ -365,13 +383,103 @@ function scanCell(state, teacher, kind, count, firstPage, reload, redraw) {
         class: 'scan-first',
         src: `/uploads/${firstPage}`,
         alt: `First page of ${teacher.name}’s ${KIND_NAMES[kind]}`,
-        title: `First page of the ${KIND_NAMES[kind]}. Click to see it larger.`,
+        title: `The ${KIND_NAMES[kind]}’s first page. Click to see every page.`,
         loading: 'lazy',
-        onclick: () => openLightbox(`/uploads/${firstPage}`, `${teacher.name} - ${KIND_NAMES[kind]}`),
+        onclick: () => showRowPages(state, teacher, kind, firstPage, reload),
       })
     : null;
 
   return h('div', { class: 'scan-cell' }, preview, h('span', { class: 'scan-count' }, label), button, fileInput);
+}
+
+// A row's pages of one kind, from the first, under the name of the teacher
+// they are filed under. Until the paper is marked, pages that are another
+// teacher's can be moved from there.
+function showRowPages(state, teacher, kind, firstPage, reload) {
+  const movable = teacher.assessment_status !== 'evaluated' && teacher.ai_status !== 'running';
+  viewPages({
+    title: `${teacher.name} · ${capitalise(KIND_NAMES[kind])}${state.section ? ` · Section ${state.section}` : ''}`,
+    pages: [{ src: `/uploads/${firstPage}`, name: `First page of ${teacher.name}’s ${KIND_NAMES[kind]}` }],
+    loadPages: async () => {
+      const sitting = await assessmentsApi.get(teacher.assessment_id);
+      return (kind === 'response' ? sitting.response_files : sitting.question_paper_files)
+        .map((file) => ({ src: `/uploads/${file.stored_name}`, name: file.original_name }));
+    },
+    action: movable ? { label: 'Wrong teacher? Move these pages', run: () => moveRowPages(state, teacher, kind, reload) } : null,
+  });
+}
+
+async function moveRowPages(state, teacher, kind, reload) {
+  const moved = await movePages({
+    sitting: {
+      id: teacher.assessment_id,
+      teacher_id: teacher.id,
+      teacher_name: teacher.name,
+      school_id: teacher.school_id,
+      question_paper_count: teacher.question_paper_count,
+      response_count: teacher.response_count,
+    },
+    kind,
+  });
+  if (!moved) return;
+  state.justFiled = moved.teacher.id;
+  await reload();
+}
+
+// While the scanner works, a dialog names whose paper the pages will be filed
+// under, so a press on the wrong row shows at once, and it covers the page so
+// nothing else can be pressed meanwhile. Stop closes it; whatever the scanner
+// still sends after that is not filed.
+function scanningDialog(teacherName, what) {
+  const line = h('span', {}, 'Scanning the pages in the feeder…');
+  const stop = h('button', { class: 'btn', type: 'button' }, 'Stop');
+  const overlay = h(
+    'div',
+    { class: 'modal-backdrop' },
+    h(
+      'div',
+      { class: 'modal scan-progress', role: 'dialog', 'aria-modal': 'true', 'aria-label': `Scanning for ${teacherName}`, tabindex: '-1' },
+      h('div', { class: 'modal-head' }, h('div', {}, h('h2', {}, `Scanning for ${teacherName}`), h('p', { class: 'hint' }, capitalise(what)))),
+      h(
+        'div',
+        { class: 'scan-progress-body' },
+        h('div', { class: 'marking-state' }, h('span', { class: 'spinner' }), line),
+        h('p', { class: 'hint' }, `The pages will be filed as ${teacherName}’s ${what}. If this is the wrong teacher, press Stop.`)
+      ),
+      h('div', { class: 'modal-foot' }, stop)
+    )
+  );
+  const stopped = new Promise((resolve) => {
+    stop.addEventListener('click', () => {
+      overlay.remove();
+      resolve(null);
+    });
+  });
+  document.body.append(overlay);
+  overlay.firstElementChild.focus(); // not Stop, so a stray Enter does not stop the scan
+  return {
+    stopped,
+    // Once the pages are being filed, Stop can no longer stop them.
+    say: (text) => {
+      line.textContent = text;
+      stop.disabled = true;
+    },
+    close: () => overlay.remove(),
+  };
+}
+
+// Scans behind the dialog. Resolves with the scan, or null if Stop was
+// pressed first, in which case the pages are kept only on this laptop.
+async function scanWithDialog(dialog, { teacherName, label }) {
+  const scanning = scanPages({ label });
+  const scan = await Promise.race([scanning, dialog.stopped]);
+  if (scan === null) {
+    scanning.then(
+      () => toast(`Nothing was filed for ${teacherName}. The pages scanned after you pressed Stop are only on this laptop${scanner.folder ? `, in ${scanner.folder}` : ''}.`, 'error'),
+      () => {}
+    );
+  }
+  return scan;
 }
 
 // The question paper on a teacher's row comes one of two ways: papers from the
@@ -987,11 +1095,14 @@ function scansCard(assessment, refresh) {
     }
     await refresh();
   });
+  const move = hasPages && movableSitting(assessment)
+    ? h('button', { class: 'btn btn-sm', type: 'button', onclick: () => moveSittingPages(assessment, null, refresh) }, 'Move to another teacher')
+    : null;
 
   return h(
     'div',
     { class: 'card' },
-    h('div', { class: 'scan-group-head' }, h('h2', { style: 'margin:0' }, 'Question paper and answer paper'), swap),
+    h('div', { class: 'scan-group-head' }, h('h2', { style: 'margin:0' }, 'Question paper and answer paper'), h('div', { class: 'row-actions' }, move, swap)),
     h(
       'p',
       { class: 'hint' },
@@ -1003,6 +1114,24 @@ function scansCard(assessment, refresh) {
     scanGroup(assessment, 'question_paper', assessment.papers.length ? 'Scanned question paper pages' : 'Question paper', assessment.question_paper_files, refresh),
     scanGroup(assessment, 'response', 'Answer paper', assessment.response_files, refresh)
   );
+}
+
+// Pages filed under the wrong teacher can be moved until the paper is marked.
+const movableSitting = (assessment) => assessment.status !== 'evaluated' && assessment.ai_status !== 'running';
+
+async function moveSittingPages(assessment, kind, refresh) {
+  const moved = await movePages({
+    sitting: {
+      id: assessment.id,
+      teacher_id: assessment.teacher_id,
+      teacher_name: assessment.teacher_name,
+      school_id: assessment.school_id,
+      question_paper_count: assessment.question_paper_files.length,
+      response_count: assessment.response_files.length,
+    },
+    kind,
+  });
+  if (moved) await refresh();
 }
 
 // Papers from the library confirmed as this sitting's question paper. OpenAI
@@ -1099,16 +1228,25 @@ function scanGroup(assessment, kind, label, files, refresh) {
   scanButton?.addEventListener('click', async () => {
     scanButton.disabled = true;
     scanButton.textContent = 'Scanning…';
+    const what = `${assessment.section ? `Section ${assessment.section} ` : ''}${KIND_NAMES[kind]}`;
+    const dialog = scanningDialog(assessment.teacher_name, what);
     let scan;
     try {
-      scan = await scanPages({ label: `${assessment.teacher_name} - ${KIND_NAMES[kind]}` });
+      scan = await scanWithDialog(dialog, { teacherName: assessment.teacher_name, label: `${assessment.teacher_name} - ${KIND_NAMES[kind]}` });
     } catch (error) {
+      dialog.close();
       toast(error.message, 'error');
       await refresh();
       return;
     }
+    if (!scan) {
+      await refresh();
+      return;
+    }
     if (scan.warning) toast(scan.warning, 'error');
+    dialog.say(`Filing ${pageCount(scan.files.length)} as ${assessment.teacher_name}’s ${what}…`);
     await upload(scan.files);
+    dialog.close();
   });
 
   const dropzoneLabel = h('span', {}, 'Drop scanned images here, or click to choose files');
@@ -1137,7 +1275,7 @@ function scanGroup(assessment, kind, label, files, refresh) {
     ? h(
         'div',
         { class: 'thumbs' },
-        files.map((file) =>
+        files.map((file, index) =>
           h(
             'div',
             { class: 'thumb' },
@@ -1145,7 +1283,14 @@ function scanGroup(assessment, kind, label, files, refresh) {
               src: `/uploads/${file.stored_name}`,
               alt: file.original_name,
               loading: 'lazy',
-              onclick: () => openLightbox(`/uploads/${file.stored_name}`, file.original_name),
+              onclick: () => viewPages({
+                title: `${assessment.teacher_name} · ${capitalise(KIND_NAMES[kind])}`,
+                pages: files.map((page) => ({ src: `/uploads/${page.stored_name}`, name: page.original_name })),
+                start: index,
+                action: movableSitting(assessment)
+                  ? { label: 'Wrong teacher? Move these pages', run: () => moveSittingPages(assessment, kind, refresh) }
+                  : null,
+              }),
             }),
             h(
               'div',

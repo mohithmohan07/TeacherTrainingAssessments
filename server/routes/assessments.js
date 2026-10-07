@@ -1,13 +1,16 @@
 import express from 'express';
 import db from '../db.js';
 import { uploadScans } from '../uploads.js';
-import { SCAN_KINDS, attachScans, discardUploads, removeStoredFile, swapScanKinds } from '../scans.js';
+import { SCAN_KINDS, attachScans, discardUploads, movePages, removeStoredFile, swapScanKinds } from '../scans.js';
 import { normalise, startEvaluation } from '../evaluate.js';
 import { MARKINGS, sittingSections, testFor, unansweredSections } from '../results.js';
 import { checkSittingWriting } from '../writing.js';
 import { PAPER_SECTIONS, presentPaper, setSittingPapers, sittingPapers } from '../papers.js';
+import { currentAssessmentFor } from '../sittings.js';
 
 const router = express.Router();
+
+const selectTeacher = db.prepare('SELECT * FROM teachers WHERE id = ?');
 
 const STATUSES = new Set(['draft', 'scanned', 'evaluated']);
 
@@ -272,6 +275,44 @@ router.post('/:id/swap', (req, res) => {
 
   swapScanKinds(assessment.id);
   res.json(withFiles(selectAssessmentRow.get(assessment.id)));
+});
+
+// Move pages filed under the wrong teacher to the right one: to that teacher's
+// current sitting in the same test, for the same full paper or section, after
+// any pages it already has. Nothing is marked. A sitting that has been marked
+// keeps its pages, as its marks came from them.
+router.post('/:id/move', (req, res) => {
+  const assessment = selectAssessmentRow.get(req.params.id);
+  if (!assessment) return res.status(404).json({ error: 'Assessment not found.' });
+  if (assessment.ai_status === 'running') {
+    return res.status(400).json({ error: 'OpenAI is marking these pages. Wait for it to finish, then move them.' });
+  }
+  if (assessment.status === 'evaluated') {
+    return res.status(400).json({
+      error: `${assessment.teacher_name}’s paper has been marked from these pages, so they stay with it. If they are another teacher’s, delete this sitting on its evaluation page and scan the pages again on the right teacher’s row.`,
+    });
+  }
+
+  const teacher = selectTeacher.get(req.body.teacher_id);
+  if (!teacher || teacher.school_id !== assessment.school_id) return res.status(400).json({ error: 'Pick a teacher from this school.' });
+  if (teacher.id === assessment.teacher_id) return res.status(400).json({ error: `These pages are already filed under ${teacher.name}.` });
+
+  const kinds = (Array.isArray(req.body.kinds) ? req.body.kinds : [...SCAN_KINDS]).filter((kind) => SCAN_KINDS.has(kind));
+  const counts = { question_paper: assessment.question_paper_count, response: assessment.response_count };
+  if (!kinds.some((kind) => counts[kind])) return res.status(400).json({ error: 'There are no pages to move.' });
+
+  const target = currentAssessmentFor(teacher, testFor(assessment.school_id, assessment.test_id), assessment.section);
+  if (target.ai_status === 'running') {
+    return res.status(400).json({ error: `${teacher.name}’s paper is being marked. Wait for it to finish, then move the pages.` });
+  }
+
+  const moved = movePages(assessment.id, target.id, kinds, { from: assessment.teacher_name, to: teacher.name });
+  res.json({
+    moved,
+    kinds: kinds.filter((kind) => counts[kind]),
+    teacher: { id: teacher.id, name: teacher.name },
+    assessment_id: target.id,
+  });
 });
 
 router.delete('/:id/files/:fileId', (req, res) => {

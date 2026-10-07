@@ -48,6 +48,45 @@ export function swapScanKinds(assessmentId) {
   flipKinds.run(assessmentId);
 }
 
+const selectKindPages = db.prepare(
+  'SELECT id, original_name FROM assessment_files WHERE assessment_id = ? AND kind = ? ORDER BY position, id'
+);
+
+const refilePage = db.prepare(
+  'UPDATE assessment_files SET assessment_id = @assessment_id, position = @position, original_name = @original_name WHERE id = @id'
+);
+
+const countPages = db.prepare('SELECT COUNT(*) AS n FROM assessment_files WHERE assessment_id = ?');
+
+// A sitting whose pages have all gone is a draft again, not "Scans uploaded".
+const backToDraft = db.prepare(
+  `UPDATE assessments SET status = 'draft', updated_at = datetime('now') WHERE id = ? AND status = 'scanned'`
+);
+
+// Pages filed under the wrong teacher, moved to the right teacher's sitting
+// after the pages of the same kind it already has, in their order. Scanned
+// pages are named after the teacher they were scanned for, so names that
+// start with the first teacher's name take the new one.
+export const movePages = db.transaction((fromId, toId, kinds, { from, to }) => {
+  let moved = 0;
+  for (const kind of kinds) {
+    let position = nextPosition.get(toId, kind).max_position;
+    for (const page of selectKindPages.all(fromId, kind)) {
+      position += 1;
+      moved += 1;
+      refilePage.run({
+        id: page.id,
+        assessment_id: toId,
+        position,
+        original_name: page.original_name.startsWith(`${from} - `) ? `${to} - ${page.original_name.slice(from.length + 3)}` : page.original_name,
+      });
+    }
+  }
+  markScanned.run(toId);
+  if (!countPages.get(fromId).n) backToDraft.run(fromId);
+  return moved;
+});
+
 export const attachScans = db.transaction((assessmentId, kind, files) => {
   const startAt = nextPosition.get(assessmentId, kind).max_position + 1;
   files.forEach((file, index) => {
