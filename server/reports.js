@@ -23,7 +23,6 @@ import { WRITING_NAME, addMissingWriting } from './writing.js';
 import {
   GRADES,
   NEEDS,
-  SECTION_SHORT,
   SECTION_TITLES,
   STAGES,
   counts,
@@ -141,7 +140,8 @@ const PLAIN_WORDS = `Use plain, everyday English that anyone can understand: a p
 - Never refer to question numbers (such as "Q1A" or "question 3") and never put marks in brackets; the tables beside your text show them. Say instead what the teacher was asked to do and what they did or missed.
 - Avoid teaching jargon and technical terms, such as pedagogy, formative assessment, scaffolding, differentiation, task-focused or phishing. When a term cannot be avoided, explain it in a few words, such as "phishing emails (fake emails that try to steal passwords)".
 - Titles name the skill or the gap in everyday words, such as "Giving clear instructions" or "Keeping children safe online", not labels such as "Task-focused teaching".
-- Name a section with what it is about, such as "Section A (Communication)"; the first time is enough. The sections are: ${Object.entries(SECTION_SHORT).map(([key, about]) => `Section ${key} (${about})`).join(', ')}.
+- Name every section by its full name, exactly as written here and the same way every time, never as "Section A" or by a letter alone: ${Object.values(SECTION_TITLES).map((title) => `"${title}"`).join(', ')}.
+- Describe what a teacher needs to work on as the wider skill that the missed questions belong to, not the single item one question asked about. For example, if a question on the /b/ sound was missed, the need is "teaching early reading and letter sounds", not "the /b/ sound".
 - Give a grade with its meaning, such as "Grade C (Fair)".`;
 
 const TEACHER_INSTRUCTIONS = `You write the reports for a teacher training assessment programme run in Indian schools.
@@ -163,7 +163,7 @@ Write about the teacher by name or as "the teacher", never as "he" or "she".
 - Do not rank the teacher, compare them with others, or mention sections they did not sit.
 
 2. management_report, for the principal and management. Factual and neutral.
-- summary: one or two short sentences on what the results show, naming the sections sat, for example "The teacher did well in Section A (Communication) and needs support in Section B (Subject & Classroom). The classroom examples are practical, but several answers did not say how the idea would be taught." If questions were left blank, say how many. Do not mention training days; they are added after the summary.
+- summary: one or two short sentences on what the results show, naming the sections sat, for example "The teacher did well in Interpersonal & Instructional Communication Skills and needs support in Subject Knowledge, Classroom Management & Child Psychology. The classroom examples are practical, but several answers did not say how the idea would be taught." If questions were left blank, say how many. Do not mention training days; they are added after the summary.
 - findings: two to four findings, the most important first; the report numbers them. Each has:
   - title: two to five words, such as "Checking understanding";
   - summary: one sentence for the first page, of no more than 30 words, saying in plain words what the teacher did well or found hard, such as "When asked how to settle a noisy class, the teacher gave a clear routine but did not say how to keep it going.";
@@ -473,7 +473,6 @@ export function withCurrentNames(content) {
       blocks: content.training.blocks.map((b) => ({
         ...b,
         title: BLOCK_TITLES[b.kind] ?? b.title,
-        about: b.key ? SECTION_SHORT[b.key] ?? null : null,
         grade_label: b.grade ? gradeLabel(b.grade) ?? b.grade_label : b.grade_label,
       })),
     };
@@ -600,11 +599,11 @@ const SCHOOL_INSTRUCTIONS = `You write the school report for a teacher training 
 
 You are given every assessed teacher's results in one test, with figures by section, by need and by school stage (Pre-Primary, Primary, Middle School, High School and PUC), a rule-based potential identifier for each teacher and, where available, the main findings from their own reports. Teachers may have sat only some sections, so only compare teachers within a section. Sections marked leniently leave out the questions the teacher did not attempt, so their percentages cover only the questions attempted.
 
-Write in English that is brief: short sentences that a busy principal can read in a minute, with no filler. The report shows the figures in charts and tables beside your text, so give only the figures that make each point. Base every statement on the figures given, such as "In Primary, 5 of 9 teachers need some support in Section C (Computer Skills)". Be factual and neutral. Write about teachers by name, never as "he" or "she".
+Write in English that is brief: short sentences that a busy principal can read in a minute, with no filler. The report shows the figures in charts and tables beside your text, so give only the figures that make each point. Base every statement on the figures given, such as "In Primary, 5 of 9 teachers need some support in Computer Knowledge & Digital Teaching Skills". Be factual and neutral. Write about teachers by name, never as "he" or "she".
 ${PLAIN_WORDS}
 - summary: two short sentences: how many teachers took the test, how many need support, and the main pattern by stage or section.
 - findings: three or four findings, the most important first; the report numbers them. Each has a title of three to eight words that states the finding, such as "Primary teachers are good with computers", and a detail of one sentence with the figures. Look for patterns by stage and by section, and name teachers who are strong in a section and could help others.
-- actions: three or four things UpSchool's team and the school will do, the most important first, each one sentence, such as "Hold workshops on Section B (Subject & Classroom) for the 6 teachers at Grade D (Needs Improvement), with Middle School and High School teachers in separate groups." Give each a timing such as "Weeks 1–2", or "" when there is none. Pair teachers strong in a section with those who need help in it, in the same stage where possible.
+- actions: three or four things UpSchool's team and the school will do, the most important first, each one sentence, such as "Hold workshops on Subject Knowledge, Classroom Management & Child Psychology for the 6 teachers at Grade D (Needs Improvement), with Middle School and High School teachers in separate groups." Give each a timing such as "Weeks 1–2", or "" when there is none. Pair teachers strong in a section with those who need help in it, in the same stage where possible.
 - school_needs: two or three things the school needs to do, one short sentence each, such as fixing the training calendar, freeing time for teachers who mentor colleagues, or arranging classroom visits by UpSchool coaches.
 - Do not rank teachers against each other beyond what the figures show, and do not speculate about personal circumstances.`;
 

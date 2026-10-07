@@ -316,8 +316,10 @@ without the question paper or the teacher's answers to hand. OpenAI is told
 never to cite question numbers or marks in its text (the tables show them),
 to say instead what the teacher was asked and what they did or missed, to
 avoid teaching jargon and to explain any term it cannot avoid. Sections are
-named with what they cover: A (Communication), B (Subject & Classroom) and
-C (Computer Skills). Reports written before then say so on screen and count
+called by their full names in the text, the same for every teacher, never by
+a letter alone, and what a teacher needs to work on (and the training plan's
+topics) is the wider skill the missed questions belong to, not one item from
+one question. Reports written before then say so on screen and count
 as out of date, so **Build N teacher reports** picks them up; the names of
 grades, needs and the potential identifier change on every report at once.
 

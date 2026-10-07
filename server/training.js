@@ -11,7 +11,7 @@
 // the teacher works on in each block of days and how UpSchool's team runs it.
 import db from './db.js';
 import { friendly, requestJson } from './openai.js';
-import { GRADES, SECTION_TITLES, fingerprint } from './results.js';
+import { GRADES, SECTION_TITLES, fingerprint, sectionTitleOf } from './results.js';
 
 const MAX_PATHS = 6;
 const MAX_DAYS = 120;
@@ -169,11 +169,11 @@ export function goalFor(focus) {
     const next = GRADES[GRADES.findIndex((band) => band.grade === s.grade) - 1];
     if (!next) continue;
     if (!goals.has(next.grade)) goals.set(next.grade, { band: next, names: [] });
-    goals.get(next.grade).names.push(s.name);
+    goals.get(next.grade).names.push(s);
   }
   const parts = [...goals.values()]
     .sort((a, b) => a.band.min - b.band.min)
-    .map(({ band, names }) => `at least ${band.min}% (Grade ${band.grade}, ${band.label}) in ${listing(names.sort())}`);
+    .map(({ band, names }) => `at least ${band.min}% (Grade ${band.grade}, ${band.label}) in ${listing(names.sort((a, b) => String(a.key).localeCompare(String(b.key))).map(sectionTitleOf))}`);
   return parts.length ? `${parts.join(', and ').replace(/^a/, 'A')}.` : '';
 }
 
@@ -197,7 +197,7 @@ function apportion(total, weights) {
   return parts;
 }
 
-const about = (s) => `${s.name} (${s.grade_label}, ${s.percent}%)`;
+const about = (s) => `${sectionTitleOf(s)} (${s.grade_label}, ${s.percent}%)`;
 const summarise = ({ key, name, title, grade, grade_label, percent }) => ({ key, name, title, grade, grade_label, percent });
 
 // A teacher's plan from their section results, or null when no paths are set
@@ -214,7 +214,7 @@ export function trainingPlanFor(sections, framework) {
     .sort((a, b) => (a.grade !== b.grade ? (a.grade === 'D' ? -1 : 1) : a.percent - b.percent || a.key.localeCompare(b.key)));
   const strengths = graded.filter((s) => !(s.grade in SECTION_DAYS));
   const areas = Object.keys(SECTION_TITLES);
-  const notSat = graded.some((s) => areas.includes(s.key)) ? areas.filter((key) => !graded.some((s) => s.key === key)).map((key) => `Section ${key}`) : [];
+  const notSat = graded.some((s) => areas.includes(s.key)) ? areas.filter((key) => !graded.some((s) => s.key === key)).map((key) => SECTION_TITLES[key]) : [];
 
   const plan = {
     version: framework.version,
@@ -275,8 +275,8 @@ export function trainingPlanFor(sections, framework) {
       focus.length < 2
         ? null
         : focus[0].grade !== focus[1].grade
-          ? `We start with ${focus[0].name} because it has the lowest grade, ${focus[0].grade} (${focus[0].grade_label}).`
-          : `We start with ${focus[0].name} because it had the lower score.`,
+          ? `We start with ${sectionTitleOf(focus[0])} because it has the lowest grade, ${focus[0].grade} (${focus[0].grade_label}).`
+          : `We start with ${sectionTitleOf(focus[0])} because it had the lower score.`,
     goal: goalFor(focus),
   };
 }
@@ -300,7 +300,7 @@ export const TEACHER_PLAN_INSTRUCTIONS = `
 
 3. training_plan, for the management report, from the TRAINING PLAN given after the results. Its path, blocks and days are fixed: never change them. For each block, by its number:
 - summary: one short sentence in plain, everyday words, starting with a verb, on what happens in those days, for a list headed "What We Will Do". For example: "Practise short lessons that check what children have understood at each step." For practice in class, what an UpSchool coach does in the teacher's own classes; for the review, how progress is checked before the final test.
-- works_on: what the teacher works on in those days, as a few topics in under 15 words, taken from this teacher's answers, in everyday words a school manager would understand without the question paper. For example: "Starting lessons well, asking good questions, checking children have understood". No sounds, symbols or specialist terms such as "/b/ sound" or "task-focused answers": say "teaching letter sounds" or "answering what is asked".
+- works_on: the skills the teacher works on in those days, as a few topics in under 15 words, in everyday words a school manager would understand without the question paper. Name the wider skills that this teacher's missed questions belong to, so the training covers everything related, not just the items asked about. For example: "Starting lessons well, asking good questions, checking children have understood". Never a single item, sound or symbol such as "the /b/ sound": say "teaching early reading and letter sounds" instead.
 - how: how UpSchool's team runs those days, in under 12 words of everyday English. For example: "UpSchool trainer at school: shows how, then the teacher practises".
 - points: the numbers of the management_report findings these days work on, counting from 1.
 Also give after_plan: one short sentence in plain words on the support after the training, from AFTER THE TRAINING given after the plan, such as "UpSchool checks in on the teacher before each new chapter." Give "" when it is not given.
@@ -369,7 +369,7 @@ export function schoolTraining(teachers, framework) {
       const days = members.map((t) => t.plan.days);
       return {
         ...path,
-        teachers: members.map((t) => ({ id: t.id, name: t.name, stage: t.stage, days: t.plan.days, focus: t.plan.focus.map((f) => f.name) })),
+        teachers: members.map((t) => ({ id: t.id, name: t.name, stage: t.stage, days: t.plan.days, focus: t.plan.focus.map(sectionTitleOf) })),
         teacher_days: days.reduce((a, b) => a + b, 0),
         days_min: days.length ? Math.min(...days) : 0,
         days_max: days.length ? Math.max(...days) : 0,

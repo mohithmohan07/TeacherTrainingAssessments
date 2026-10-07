@@ -85,13 +85,14 @@ const gradeChip = (s) => (s.grade ? h('span', { class: `grade-chip grade-${s.gra
 function lenientKey(sections, { forTeacher = false } = {}) {
   const lenient = sections.filter((s) => s.marking === 'lenient');
   if (!lenient.length) return null;
-  const which = lenient.filter((s) => s.left_out).map((s) => `${titleCase(s.name)}, ${plural(s.left_out, 'question')} worth ${marks(s.left_out_marks)} marks`);
+  const nameOf = (s) => s.title || titleCase(s.name);
+  const which = lenient.filter((s) => s.left_out).map((s) => `${nameOf(s)}, ${plural(s.left_out, 'question')} worth ${marks(s.left_out_marks)} marks`);
   return h(
     'p',
     { class: 'report-note' },
     h('strong', {}, 'Lenient marking: '),
     forTeacher ? 'only the questions you answered are counted; questions you left blank are not in your marks or the total' : 'only the questions answered are counted; questions left blank are not in the marks or the total',
-    lenient.length < sections.length ? ` in ${listing(lenient.map((s) => titleCase(s.name)))}.` : '.',
+    lenient.length < sections.length ? ` in ${listing(lenient.map(nameOf))}.` : '.',
     which.length ? ` Not counted: ${which.join('; ')}.` : ' Every question was answered, so nothing is left out.'
   );
 }
@@ -514,8 +515,9 @@ const dayRange = (b) => (b.from === b.to ? `Day ${b.from}` : `Days ${b.from}–$
 const dayNumbers = (b) => (b.from === b.to ? `${b.from}` : `${b.from}–${b.to}`);
 // Each section keeps its colour across the plan; the shared blocks have their own.
 const toneOf = (b) => (b.kind === 'section' ? `tone-${b.key || 'paper'}` : `tone-${b.kind}`);
-// "Section B (Subject & Classroom)", so the plan reads without the paper.
-const shortTitle = (b) => (b.kind === 'section' ? `${b.title.split(':')[0]}${b.about ? ` (${b.about})` : ''}` : b.title);
+// A section's block by the section's name, such as "Computer Knowledge &
+// Digital Teaching Skills", so the plan reads without the paper.
+const shortTitle = (b) => (b.kind === 'section' ? b.title.split(': ').slice(1).join(': ') || b.title : b.title);
 
 // What the report says about training when the growth paths are missing or
 // have changed since it was written. Screen only.
@@ -825,11 +827,11 @@ function stageTable(figures, keys, grades) {
       h(
         'table',
         { class: 'report-table stage-table' },
-        h('thead', {}, h('tr', {}, h('th', {}, 'Stage'), h('th', { class: 'right' }, 'Teachers'), keys.map((key) => h('th', { class: 'score-col' }, sectionHead(key))), h('th', { class: 'right' }, 'Need More Support'))),
+        h('thead', {}, h('tr', {}, h('th', {}, 'Stage'), h('th', { class: 'right' }, 'Teachers'), keys.map((key) => h('th', { class: 'score-col' }, sectionHead(key))), h('th', { class: 'right' }, 'Needs More Support'))),
         h('tbody', {}, figures.stage_stats.map((s) => row(s)), row({ name: 'Whole School', classes: '', ...figures.whole }, true))
       )
     ),
-    h('p', { class: 'report-key' }, 'Each bar is the average percentage of that stage’s teachers who took the section. The shading behind it marks the grades, D on the left to A on the right. “Need More Support” counts teachers with any section at Grade D (Needs Improvement).'),
+    h('p', { class: 'report-key' }, 'Each bar is the average percentage of that stage’s teachers who took the section. The shading behind it marks the grades, D on the left to A on the right. “Needs More Support” counts teachers with any section at Grade D (Needs Improvement).'),
     figures.stage_stats.some((s) => s.key === null)
       ? h('p', { class: 'report-note no-print' }, 'Teachers under “Classes Not Given” have no class saved. Add the classes they teach on Schools & teachers, then rebuild, to place them in a stage.')
       : null
@@ -1001,8 +1003,8 @@ export async function renderSchoolReport(root, schoolId, testId) {
       written?.summary ? h('p', { class: 'report-lead' }, written.summary) : null,
       glance(figures, data.needs),
       stageTable(figures, keys, data.grades),
-      sectionGrades(figures, data.grades),
       sectionTitles(figures.section_stats),
+      sectionGrades(figures, data.grades),
       written?.findings.length ? [h('h3', {}, 'What We Found'), numbered(written.findings, point)] : null,
       written?.actions.length ? [h('h3', {}, 'What We Will Do'), numbered(written.actions, (a) => [a.timing ? h('strong', {}, `${a.timing}: `) : null, a.action])] : null,
       trainingTotal(figures.training),

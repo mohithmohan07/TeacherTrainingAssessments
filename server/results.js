@@ -24,13 +24,9 @@ export const SECTION_TITLES = {
   C: 'Computer Knowledge & Digital Teaching Skills',
 };
 
-// What each section is about, in a word or two, so a report can say
-// "Section C (Computer Skills)" for a reader without the paper.
-export const SECTION_SHORT = {
-  A: 'Communication',
-  B: 'Subject & Classroom',
-  C: 'Computer Skills',
-};
+// A section's name in every report's text: the programme's title for it, the
+// same for every teacher, so a reader never needs to know what a letter means.
+export const sectionTitleOf = (section) => SECTION_TITLES[section.key] ?? section.title ?? section.name;
 
 // What a strong result in each section suggests a teacher could take on.
 const SECTION_ROLES = {
@@ -206,17 +202,11 @@ export function potentialFor(sections) {
   const strengths = graded.filter((s) => s.grade === 'A' || s.grade === 'B');
   const support = graded.filter((s) => s.grade === 'D');
   const exemplary = graded.filter((s) => s.grade === 'A');
-  const names = (list) => list.map((s) => s.name).join(', ');
-  // "Section A", or "Sections A and B" when there are two.
-  const sectionList = (list) =>
-    list.length > 1 && list.every((s) => /^[A-Z]$/.test(s.key))
-      ? `Sections ${list.slice(0, -1).map((s) => s.key).join(', ')} and ${list.at(-1).key}`
-      : names(list);
-  // The same with what each section is about: "Section C (Computer Skills)".
-  const about = (list) =>
-    list.every((s) => SECTION_SHORT[s.key])
-      ? `${sectionList(list)} (${list.map((s) => SECTION_SHORT[s.key]).join('; ')})`
-      : names(list);
+  // The sections by name: "Computer Knowledge & Digital Teaching Skills".
+  const about = (list) => {
+    const titles = list.map(sectionTitleOf);
+    return titles.length > 1 ? `${titles.slice(0, -1).join(', ')} and ${titles.at(-1)}` : titles[0];
+  };
 
   let level;
   let headline;
@@ -232,7 +222,7 @@ export function potentialFor(sections) {
   } else if (strengths.length) {
     const developing = graded.filter((s) => s.grade === 'C');
     level = 'emerging';
-    headline = `Strong in ${sectionList(strengths)}`;
+    headline = 'Strong in Some Sections';
     meaning = [
       `Good or better in ${about(strengths)}.`,
       developing.length ? `Needs some practice in ${about(developing)}.` : '',
