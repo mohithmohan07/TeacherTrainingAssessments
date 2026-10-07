@@ -194,6 +194,29 @@ how many questions and marks were left out. Changing a question's mark from 0
 counts it again. To switch an evaluated sitting between the two, press
 Evaluate again and choose the other.
 
+### Written Expression
+
+Once the answers are marked, Evaluate also has OpenAI check how well they are
+written, apart from whether they are right: **Written Expression**. Each
+section the teacher wrote in gets four scores out of 5 (Sentence Formation,
+Grammar, Spelling and Punctuation, Word Choice) and a score out of 10 from
+them: Excellent 8.5 and above, Good 7 to 8, Fair 5 to 6.5, Needs Practice
+below 5. Only answers written in words count; option letters, one-word
+answers and drawings are left out, and a section with too little writing says
+so instead of a score. Answers are judged in the language they are written in,
+from the scans for answers in English and from Gemini's reading for the rest.
+It changes no mark, grade, total or potential identifier, and a check that
+fails leaves the marks in place.
+
+The score shows on the teacher's row on the board, on the assessment page and
+on the profile. Clicking it opens the errors found: for each, the question,
+the kind of error and what is wrong, the teacher's own words and the
+correction. Both of a teacher's reports carry the score in the results table
+and the same list under **Written Expression**, before Question by Question.
+Papers marked before the check get it when their reports are next built (or
+with **Check the writing** on the assessment page), judged from what the
+marking wrote down of each answer; their marks stay as they are.
+
 It needs the `OPENAI_API_KEY` secret on the server (on Fly:
 `fly secrets set OPENAI_API_KEY=... -a teachertrainingassessments`). The model
 is `gpt-6-luna` unless `OPENAI_MODEL` says otherwise. OpenAI reads JPG, PNG,
@@ -472,6 +495,7 @@ server/
   evaluate.js       marking the scans with OpenAI
   reading.js        the answers' language, and Gemini reading those not all in English
   answers.js        what should have been answered, for papers marked before the marking said
+  writing.js        Written Expression: how well the answers are written, and the errors
   paper-inputs.js   a sitting's papers as OpenAI input, for marking and answers
   papers.js         the question paper library: labels, suggestions, pack import
   results.js        section results, grades and the potential identifier

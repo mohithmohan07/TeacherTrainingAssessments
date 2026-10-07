@@ -5,6 +5,7 @@ import {
 import { schoolsApi, teachersApi, assessmentsApi, testsApi, reportsApi } from '../api.js';
 import { choosePaper, paperFacts, paperThumb } from '../paper-picker.js';
 import { chooseMarking } from '../marking-choice.js';
+import { WRITING_NAME, checkedSections, openWritingReport, writingChip, writingLine } from '../writing.js';
 import {
   scanner, scanPages, connectScanner, stopScanning, checkScannerOnce, selectScanner, selectedScanner,
   scanBothSides, setScanBothSides, HELPER_DOWNLOAD_URL,
@@ -270,7 +271,7 @@ function teacherBoardCard(state, reload, redraw) {
                 'td',
                 {},
                 teacher.sections.length
-                  ? [h('div', { class: 'chips' }, teacher.sections.map((section) => sectionChip(section, { short: true }))), lenientNote(teacher.sections)]
+                  ? [h('div', { class: 'chips' }, teacher.sections.map((section) => sectionChip(section, { short: true })), writingChip(teacher.sections, { teacherName: teacher.name })), lenientNote(teacher.sections)]
                   : h('span', { class: 'hint' }, '—')
               ),
               h(
@@ -845,7 +846,7 @@ function historyCard(state) {
                     'td',
                     {},
                     row.sections.length
-                      ? [h('div', { class: 'chips' }, row.sections.map((section) => sectionChip(section, { short: true }))), lenientNote(row.sections)]
+                      ? [h('div', { class: 'chips' }, row.sections.map((section) => sectionChip(section, { short: true })), writingChip(row.sections, { teacherName: row.teacher_name })), lenientNote(row.sections)]
                       : row.score === null
                         ? '—'
                         : `${row.score}${row.max_score ? ` / ${row.max_score}` : ''}`
@@ -1203,7 +1204,7 @@ function markingCard(assessment, runEvaluation, onSaved) {
 
   let body;
   if (running) {
-    body = h('div', { class: 'marking-state' }, h('span', { class: 'spinner' }), 'OpenAI is marking each question. Answers not all in English are read by Gemini first. This usually takes a few minutes; you can leave this page and come back.');
+    body = h('div', { class: 'marking-state' }, h('span', { class: 'spinner' }), 'OpenAI is marking each question, then checking the writing. Answers not all in English are read by Gemini first. This usually takes a few minutes; you can leave this page and come back.');
   } else if (assessment.ai_status === 'failed') {
     body = h('div', { class: 'marking-state error' }, assessment.ai_error || 'The marking did not finish.');
   } else if (!hasScans) {
@@ -1268,6 +1269,7 @@ function markingResult(assessment, result, onSaved) {
     h('div', { class: 'marking-total chips' }, assessment.sections.map((section) => sectionChip(section))),
     h('p', { class: 'hint' }, assessment.sections.map((s) => `${s.name}: ${s.awarded} / ${s.max}${s.grade_label ? ` (${s.grade_label})` : ''}`).join(' · ')),
     markingNote(result, assessment.sections),
+    writingCard(assessment, onSaved),
     result.pages_swapped
       ? h(
           'p',
@@ -1335,6 +1337,65 @@ function markingResult(assessment, result, onSaved) {
       'p',
       {},
       h('a', { class: 'btn btn-sm', href: `#/teachers/${assessment.teacher_id}/report/${assessment.test_id}` }, 'Open the teacher’s reports')
+    )
+  );
+}
+
+// Each section's Written Expression, beside the marks. Clicking a score opens
+// the errors found. A sitting marked before Evaluate checked the writing, or
+// whose check failed, has a button to check it now.
+function writingCard(assessment, onSaved) {
+  const sections = assessment.sections;
+  if (!sections.length) return null;
+  const checked = checkedSections(sections);
+  const problem = sections.find((s) => s.writing && !s.writing.checked)?.writing.problem;
+  let action = null;
+  if (checked.length < sections.length) {
+    action = h('button', { class: 'btn btn-sm', type: 'button' }, problem ? 'Check the writing again' : 'Check the writing');
+    action.addEventListener('click', async () => {
+      action.disabled = true;
+      action.textContent = 'Checking… (about a minute)';
+      try {
+        const updated = await assessmentsApi.checkWriting(assessment.id);
+        toast('Writing checked. Rebuild the teacher’s report to take it in.', 'success');
+        onSaved(updated);
+      } catch (error) {
+        toast(error.message, 'error');
+        action.disabled = false;
+        action.textContent = 'Check the writing again';
+      }
+    });
+  }
+  const open = (list) => openWritingReport({ teacherName: assessment.teacher_name, sections: list });
+  return h(
+    'div',
+    { class: 'writing-card' },
+    h('div', { class: 'scan-group-head' }, h('h3', { style: 'margin:0' }, WRITING_NAME), action),
+    checked.length
+      ? h(
+          'div',
+          { class: 'writing-scores' },
+          checked.map((s) =>
+            h(
+              'button',
+              { type: 'button', class: 'writing-score-button', onclick: () => open([s]) },
+              h('strong', {}, s.name),
+              h('span', {}, writingLine(s.writing)),
+              s.writing.judged || s.writing.errors.length
+                ? h('span', { class: 'hint' }, `${s.writing.errors.length} error${s.writing.errors.length === 1 ? '' : 's'} · see them`)
+                : null
+            )
+          )
+        )
+      : null,
+    h(
+      'p',
+      { class: 'hint', style: 'margin:6px 0 0' },
+      checked.length
+        ? 'How well the answers are written: sentence formation, grammar, spelling and punctuation, and word choice, judged in the language they are written in. It does not change the marks. Click a score to see the errors.'
+        : problem
+          ? `The writing could not be checked: ${problem}`
+          : 'This paper was marked before the writing was checked. Press Check the writing, or rebuild the teacher’s report, to add it. The marks stay as they are.'
     )
   );
 }

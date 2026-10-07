@@ -4,6 +4,7 @@ import { uploadScans } from '../uploads.js';
 import { SCAN_KINDS, attachScans, discardUploads, removeStoredFile, swapScanKinds } from '../scans.js';
 import { normalise, startEvaluation } from '../evaluate.js';
 import { MARKINGS, sittingSections, testFor, unansweredSections } from '../results.js';
+import { checkSittingWriting } from '../writing.js';
 import { PAPER_SECTIONS, presentPaper, setSittingPapers, sittingPapers } from '../papers.js';
 
 const router = express.Router();
@@ -41,12 +42,12 @@ function withFiles(assessment) {
   };
 }
 
-// Each section's marks, percentage and grade in one sitting, and how its
-// marks were counted.
+// Each section's marks, percentage and grade in one sitting, how its marks
+// were counted, and its Written Expression.
 function sectionSummary(aiResult) {
   return aiResult
-    ? sittingSections(aiResult).map(({ key, name, awarded, max, percent, grade, grade_label, marking, left_out, left_out_marks }) => ({
-        key, name, awarded, max, percent, grade, grade_label, marking, left_out, left_out_marks,
+    ? sittingSections(aiResult).map(({ key, name, awarded, max, percent, grade, grade_label, marking, left_out, left_out_marks, writing }) => ({
+        key, name, awarded, max, percent, grade, grade_label, marking, left_out, left_out_marks, writing,
       }))
     : [];
 }
@@ -193,6 +194,18 @@ router.put('/:id/marks', (req, res) => {
     `UPDATE assessments SET ai_result = ?, score = ?, max_score = ?, updated_at = datetime('now') WHERE id = ?`
   ).run(JSON.stringify(updated), updated.total_score, updated.max_score, assessment.id);
 
+  res.json(withFiles(selectAssessmentRow.get(assessment.id)));
+});
+
+// Check the Written Expression of a sitting marked before Evaluate did it.
+// The marks stay as they are. Answers once, when the check is saved.
+router.post('/:id/writing', async (req, res) => {
+  const assessment = selectAssessmentRow.get(req.params.id);
+  if (!assessment) return res.status(404).json({ error: 'Assessment not found.' });
+  if (!assessment.ai_result) return res.status(400).json({ error: 'This sitting has not been marked yet. Press Evaluate first.' });
+  if (assessment.ai_status === 'running') return res.status(400).json({ error: 'OpenAI is marking this. Wait for it to finish.' });
+  const problem = await checkSittingWriting(assessment.id);
+  if (problem) return res.status(400).json({ error: problem });
   res.json(withFiles(selectAssessmentRow.get(assessment.id)));
 });
 

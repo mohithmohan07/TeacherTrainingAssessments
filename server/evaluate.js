@@ -11,7 +11,9 @@
 // counted: standard, or lenient, which leaves the questions the teacher did
 // not attempt out of the marks and the total (results.js). For every question
 // the marking also says what was asked and what a full-marks answer contains,
-// which the teacher's reports show beside what the teacher wrote.
+// which the teacher's reports show beside what the teacher wrote. Once the
+// answers are marked, their Written Expression is checked from what was
+// marked (writing.js); that changes no mark.
 import db from './db.js';
 import { OPENAI_MODEL, friendly, openaiConfigured, requestJson } from './openai.js';
 import { GEMINI_MODEL } from './gemini.js';
@@ -22,6 +24,7 @@ import { sittingPapers } from './papers.js';
 import { counts, markingOf, sectionKey } from './results.js';
 import { OPENAI_IMAGE_TYPES, pageInputs, questionPaperInputs } from './paper-inputs.js';
 import { EXPECTED_ANSWER_RULE, QUESTION_TEXT_RULE } from './answers.js';
+import { checkWriting, writingOf } from './writing.js';
 
 const EXAMINER = 'You are an experienced examiner marking a teacher training assessment.';
 
@@ -141,6 +144,7 @@ async function evaluate(assessment, { paper, library, response }, marking) {
   let marks;
   let pagesSwapped;
   let reading;
+  let writingSource;
   if (language.language === 'english') {
     marks = await markAnswers(assessment, false, [
       ...(await questionPaperInputs({ paper, library })),
@@ -149,6 +153,7 @@ async function evaluate(assessment, { paper, library, response }, marking) {
     ]);
     pagesSwapped = canSwap && marks.pages_swapped === true;
     reading = { ...language, read_by: 'openai', model: OPENAI_MODEL };
+    writingSource = { pages: pagesSwapped ? paper : response };
   } else {
     // Gemini reads the pages the answers are on, which are the other group
     // when the two were filed the wrong way round.
@@ -164,17 +169,22 @@ async function evaluate(assessment, { paper, library, response }, marking) {
     ]);
     pagesSwapped = language.pages_swapped;
     reading = { ...language, read_by: 'gemini', model: GEMINI_MODEL };
+    writingSource = { reading: pages };
   }
-  const result = normalise({
-    ...marks,
-    marking,
-    reading,
-    questions: scopeToSection(marks.questions ?? [], assessment.section),
-    pages_swapped: pagesSwapped,
-  });
-  if (!result.questions.length) {
+  const questions = scopeToSection(marks.questions ?? [], assessment.section);
+  if (!questions.length) {
     throw friendly('OpenAI found no questions to mark. Check the question paper pages are readable and the right way up, then press Evaluate again.');
   }
+  // A check that fails leaves the marks as they are; it is tried again when
+  // the teacher's reports are built.
+  let writing = null;
+  try {
+    writing = await checkWriting(questions, writingSource);
+  } catch (error) {
+    console.error(`Checking the writing for assessment ${assessmentId} failed:`, error);
+    writing = { problem: error.userMessage ?? `The writing could not be checked: ${error.message}` };
+  }
+  const result = normalise({ ...marks, marking, reading, writing, questions, pages_swapped: pagesSwapped });
   saveMarking(assessmentId, result);
 
   // The teacher's reports for this test are rewritten to take in the new
@@ -252,6 +262,7 @@ export function normalise(raw) {
   return {
     marking,
     reading: readingOf(raw.reading),
+    writing: writingOf(raw.writing, questions),
     pages_swapped: raw.pages_swapped === true,
     questions,
     total_score: sum('marks_awarded'),

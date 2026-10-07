@@ -626,6 +626,56 @@ td.right, th.right { text-align: right; white-space: nowrap; }
   .answers-table td[data-label]::before { content: attr(data-label); display: block; margin-top: 4px; font-size: 12px; font-weight: 650; color: #3c4b5a; }
 }
 
+/* Written Expression: a score out of 10 for how well the answers are
+   written, with the errors found. The colour follows the level. */
+.writing-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 9px; border-radius: 999px; border: 1px dashed currentColor;
+  font: inherit; font-size: 12px; font-weight: 600; white-space: nowrap; cursor: pointer;
+  background: var(--surface-2); color: var(--muted);
+}
+.writing-chip-name { font-weight: 500; }
+.writing-chip:hover { text-decoration: underline; }
+.w-excellent { background: #dff3e8; color: #125c3f; border-color: #bfe0cf; }
+.w-good { background: #e6f0fa; color: #1f4f7d; border-color: #c6dbef; }
+.w-fair { background: var(--warn-soft); color: var(--warn); border-color: #eed9b0; }
+.w-practice { background: #f7e8f0; color: #7d2451; border-color: #ecc8da; }
+.writing-score { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12.5px; font-weight: 650; white-space: nowrap; }
+.writing-score[role="link"] { cursor: pointer; }
+.writing-card { margin: 14px 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+.writing-scores { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.writing-score-button {
+  display: grid; gap: 1px; text-align: left; padding: 8px 12px; min-width: 150px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface); font: inherit; cursor: pointer;
+}
+.writing-score-button:hover { border-color: var(--accent); }
+.modal.writing-report { width: min(860px, 100%); }
+.writing-report-body { padding: 4px 20px 12px; overflow-y: auto; }
+.writing-block { margin-top: 14px; }
+.writing-block-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.writing-block-head h3 { margin: 0; }
+.writing-criteria { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 4px 0 6px; font-size: 13px; }
+.writing-criterion { display: inline-flex; align-items: center; gap: 6px; }
+.writing-criterion b { font-weight: 650; }
+.writing-dots { display: inline-flex; gap: 2px; }
+.writing-dots i { width: 8px; height: 8px; border-radius: 50%; background: var(--border); }
+.writing-dots i.on { background: var(--accent); }
+.writing-summary { margin: 4px 0 8px; font-size: 14px; }
+.writing-errors { table-layout: fixed; }
+.writing-errors th:nth-child(1) { width: 11%; }
+.writing-errors th:nth-child(2) { width: 25%; }
+.report-sheet .writing-errors td, .writing-errors td { font-size: 13px; line-height: 1.45; }
+.error-type { font-weight: 650; }
+.error-wrote { text-decoration: underline wavy #c0392b; text-decoration-thickness: 1px; text-underline-offset: 3px; overflow-wrap: anywhere; }
+.error-fixed { color: var(--ok); font-weight: 600; overflow-wrap: anywhere; }
+@media screen and (max-width: 640px) {
+  .writing-errors, .writing-errors tbody, .writing-errors tr, .writing-errors td { display: block; width: 100%; }
+  .writing-errors thead { display: none; }
+  .writing-errors tr { padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .writing-errors td { padding: 2px 0; border: none; }
+  .writing-errors td[data-label]::before { content: attr(data-label); display: block; margin-top: 4px; font-size: 12px; font-weight: 650; color: #3c4b5a; }
+}
+
 /* Evidence: the question paper and the answer paper the marks came from.
    Small pages on screen; printed, each takes a page of its own. */
 .report-evidence { margin-top: 8px; }
@@ -790,7 +840,7 @@ td.right, th.right { text-align: right; white-space: nowrap; }
   .report-sheet a { color: inherit; text-decoration: none; }
   .grade-chip, .potential, .potential-box, .report-details, .report-callout, .report-table th, .report-table .total-row td,
   .q-marks, .q-blank, .day, .day-legend i, .plan-block-days, .score-track, .score-track span, .stack-part, .chart-legend i,
-  .swatch { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .swatch, .writing-score, .writing-dots i { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   tbody tr:hover { background: none; }
 }
 
