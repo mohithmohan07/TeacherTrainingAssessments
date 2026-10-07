@@ -7,11 +7,14 @@
 // management reports carry a training plan when growth paths are set up, and
 // a teacher's reports end with the marks for every question, then what the
 // teacher answered and what should have been answered, question by question,
-// then the question paper and the answer paper as evidence.
+// then the question paper and the answer paper as evidence. Both of a
+// teacher's reports also show Written Expression: a score per section for
+// how well the answers are written, and the errors found.
 import { h, mount, toast, formatDate, logoFor, potentialBadge, emptyState, titleCase, upschoolLogo, printFrame, openLightbox } from '../ui.js';
 import { reportsApi } from '../api.js';
 import { donut, legend, scoreBar, stackedBar } from '../charts.js';
 import { keepOnly, pagesOf } from '../evidence.js';
+import { checkedSections, levelClass, writingSection } from '../writing.js';
 
 const SECTION_KEYS = ['A', 'B', 'C'];
 
@@ -50,6 +53,9 @@ function reportState(report, { building, what }) {
   }
   if (report.old_layout) {
     return h('div', { class: 'notice no-print' }, 'This report was written in the earlier, longer layout. Rebuild it to get the simpler one. ', building);
+  }
+  if (report.no_writing && !report.no_answers) {
+    return h('div', { class: 'notice no-print' }, 'This report was written before reports showed Written Expression. Rebuild it to add the writing score and its errors. ', building);
   }
   if (report.no_answers) {
     return h('div', { class: 'notice no-print' }, 'This report was written before reports showed what the teacher answered and what should have been answered for each question. Rebuild it to add them. ', building);
@@ -90,6 +96,21 @@ function lenientKey(sections, { forTeacher = false } = {}) {
 // Each section's result as a bar on the grade bands. Sections of the
 // programme the teacher has not taken yet are listed too.
 function resultsTable(sections, { grades, section_titles: titles = {} }, { forTeacher = false } = {}) {
+  // Written Expression gets a column once any section has been checked. Its
+  // score leads to the errors further down.
+  const writing = checkedSections(sections).length > 0;
+  const toErrors = () => document.getElementById('written-expression')?.scrollIntoView({ behavior: 'smooth' });
+  const writingCell = (s) => {
+    const w = s.writing;
+    if (!w?.checked) return h('td', { class: 'hint' }, '—');
+    if (!w.judged) return h('td', { class: 'hint' }, 'Too little writing');
+    return h(
+      'td',
+      { class: 'nowrap' },
+      h('span', { class: `writing-score ${levelClass(w)}`, role: 'link', title: 'See the errors', onclick: toErrors }, `${w.score} / 10`),
+      h('div', { class: 'hint' }, w.level)
+    );
+  };
   const sectioned = sections.length > 0 && sections.every((s) => SECTION_KEYS.includes(s.key));
   const notTaken = sectioned ? SECTION_KEYS.filter((key) => !sections.some((s) => s.key === key)) : [];
   return [h(
@@ -98,7 +119,7 @@ function resultsTable(sections, { grades, section_titles: titles = {} }, { forTe
     h(
       'table',
       { class: 'report-table results-table' },
-      h('thead', {}, h('tr', {}, h('th', {}, 'Part of the Test'), h('th', { class: 'right' }, 'Marks'), h('th', { class: 'score-col' }, 'Score'), h('th', {}, 'Grade'))),
+      h('thead', {}, h('tr', {}, h('th', {}, 'Part of the Test'), h('th', { class: 'right' }, 'Marks'), h('th', { class: 'score-col' }, 'Score'), h('th', {}, 'Grade'), writing ? h('th', {}, 'Written Expression') : null)),
       h(
         'tbody',
         {},
@@ -109,7 +130,8 @@ function resultsTable(sections, { grades, section_titles: titles = {} }, { forTe
             h('td', {}, h('strong', {}, titleCase(s.name)), s.title ? h('div', { class: 'hint' }, s.title) : null, s.date ? h('div', { class: 'hint' }, `Taken ${formatDate(s.date)}`) : null),
             h('td', { class: 'right nowrap' }, `${marks(s.awarded)} / ${marks(s.max)}`, s.marking === 'lenient' ? h('div', { class: 'hint' }, 'Lenient') : null),
             h('td', { class: 'score-col' }, scoreBar(s.percent, grades, { label: s.name })),
-            h('td', {}, gradeChip(s))
+            h('td', {}, gradeChip(s)),
+            writing ? writingCell(s) : null
           )
         ),
         notTaken.map((key) =>
@@ -117,7 +139,7 @@ function resultsTable(sections, { grades, section_titles: titles = {} }, { forTe
             'tr',
             { class: 'not-taken' },
             h('td', {}, h('strong', {}, `Section ${key}`), titles[key] ? h('div', { class: 'hint' }, titles[key]) : null),
-            h('td', { class: 'hint', colspan: 3 }, 'Not taken yet')
+            h('td', { class: 'hint', colspan: writing ? 4 : 3 }, 'Not taken yet')
           )
         )
       )
@@ -182,8 +204,16 @@ function gradeKey(grades) {
 
 // The questions behind each section: from the report when it kept them, so a
 // printed report shows the marks it was written from, otherwise as marked now.
+// Reports written before Written Expression take it from the results too.
 function withQuestions(sections, live) {
-  return sections.map((s) => (s.questions ? s : { ...s, questions: live.find((l) => l.key === s.key)?.questions ?? [] }));
+  return sections.map((s) => {
+    const now = live.find((l) => l.key === s.key);
+    return {
+      ...s,
+      questions: s.questions ?? now?.questions ?? [],
+      writing: 'writing' in s ? s.writing : now?.writing ?? null,
+    };
+  });
 }
 
 const isBlank = (q) => q.blank ?? (!String(q.teacher_answer ?? '').trim() && !(Number(q.marks_awarded) > 0));
@@ -623,6 +653,7 @@ export async function renderTeacherReport(root, teacherId, testId, query = new U
         running || report?.content ? null : h('p', { class: 'hint no-print' }, 'The written report has not been built yet. Press Build report.'),
         marksSection(data.sections, { forTeacher: audience === 'teacher' }),
         gradeKey(data.grades),
+        writingSection(data.sections, { forTeacher: audience === 'teacher' }),
         answersSection(data.sections, { forTeacher: audience === 'teacher' }),
         evidenceSection(data.sections, data.evidence, { forTeacher: audience === 'teacher' })
       );
@@ -646,6 +677,9 @@ export async function renderTeacherReport(root, teacherId, testId, query = new U
         h('div', { class: 'page-actions' }, toggle, buildButton, printButton)
       ),
       reportState(report, { building: inlineBuild, what: `${teacher.name}’s reports` }),
+      !running && content?.writing_problems?.length
+        ? h('div', { class: 'notice no-print' }, `The writing could not be checked for ${content.writing_problems.join(' ')} `, h('button', { class: 'btn-link', type: 'button', onclick: build }, 'Rebuild report'))
+        : null,
       !running && content ? answersNotice(content, withQuestions(content.sections, data.sections), h('button', { class: 'btn-link', type: 'button', onclick: build }, 'Rebuild report')) : null,
       audience === 'management' && !running ? trainingNotice(data.training, content, h('button', { class: 'btn-link', type: 'button', onclick: build }, 'Rebuild report')) : null,
       sheet
@@ -660,17 +694,19 @@ export async function renderTeacherReport(root, teacherId, testId, query = new U
 function teacherSheet(data, content) {
   const { teacher, school, test, report } = data;
   const t = content.teacher;
+  const sections = withQuestions(content.sections, data.sections);
   return reportSheet(
     { school, audience: 'For the Teacher', title: 'Teacher Report', details: teacherDetails(teacher, test, report) },
     h('h2', {}, 'Summary'),
     t.summary ? h('p', { class: 'report-lead' }, t.summary) : null,
-    resultsTable(content.sections, data, { forTeacher: true }),
+    resultsTable(sections, data, { forTeacher: true }),
     t.went_well.length ? [h('h2', {}, 'What Went Well'), numbered(t.went_well, point)] : null,
     t.next_steps.length ? [h('h2', {}, 'Your Next Steps'), numbered(t.next_steps, point)] : null,
     t.practice_ideas.length ? [h('h2', {}, 'Ideas to Practise'), bullets(t.practice_ideas)] : null,
-    marksSection(withQuestions(content.sections, data.sections), { forTeacher: true }),
+    marksSection(sections, { forTeacher: true }),
     gradeKey(data.grades),
-    answersSection(withQuestions(content.sections, data.sections), { forTeacher: true, written: Boolean(content.answers) }),
+    writingSection(sections, { forTeacher: true }),
+    answersSection(sections, { forTeacher: true, written: Boolean(content.answers) }),
     evidenceSection(content.sections, data.evidence, { forTeacher: true })
   );
 }
@@ -702,21 +738,23 @@ function managementSheet(data, content) {
   const { teacher, school, test, report } = data;
   const m = content.management;
   const plan = content.training;
+  const sections = withQuestions(content.sections, data.sections);
   return reportSheet(
     { school, audience: 'For Management', title: 'Teacher Report', details: teacherDetails(teacher, test, report) },
     h('h2', {}, 'Summary'),
     m.summary ? h('p', { class: 'report-lead' }, m.summary) : null,
     trainingLine(plan),
-    resultsTable(content.sections, data),
+    resultsTable(sections, data),
     potentialBox(content.potential, m.roles),
     m.findings.length ? [h('h3', {}, 'What We Found'), numbered(m.findings, (f) => point({ title: f.title, detail: f.summary }))] : null,
     whatWeWillDo(plan, m),
     m.school_needs.length ? [h('h3', {}, 'What We Need from the School'), bullets(m.school_needs)] : null,
     plan?.goal ? h('p', { class: 'report-callout' }, h('strong', {}, 'Goal for the Final Test: '), plan.goal) : null,
     planSection(plan),
-    marksSection(withQuestions(content.sections, data.sections), { forTeacher: false }),
+    marksSection(sections, { forTeacher: false }),
     gradeKey(data.grades),
-    answersSection(withQuestions(content.sections, data.sections), { forTeacher: false, written: Boolean(content.answers) }),
+    writingSection(sections, { forTeacher: false }),
+    answersSection(sections, { forTeacher: false, written: Boolean(content.answers) }),
     evidenceSection(content.sections, data.evidence, { forTeacher: false })
   );
 }

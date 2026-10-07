@@ -13,10 +13,13 @@
 // answered (answers.js fills that in first for papers marked before the
 // marking wrote it down). The management reports also carry a training plan,
 // whose path and days are worked out in training.js and whose content OpenAI
-// writes in the same request.
+// writes in the same request. Each section's Written Expression, from
+// writing.js, is kept with the results; sittings marked before Evaluate
+// checked it are checked first.
 import db from './db.js';
 import { OPENAI_MODEL, friendly, openaiConfigured, requestJson } from './openai.js';
 import { addMissingAnswers } from './answers.js';
+import { WRITING_NAME, addMissingWriting } from './writing.js';
 import {
   GRADES,
   NEEDS,
@@ -272,6 +275,10 @@ function describeResults(teacher, test, sections) {
       if (q.teacher_answer) lines.push(`   Teacher wrote: ${clip(q.teacher_answer, 300)}`);
       lines.push(expected);
     }
+    const w = section.writing;
+    if (w?.judged) {
+      lines.push(`${WRITING_NAME} (how well the answers are written, apart from the marks; shown in its own table, so mention it only if it is one of the main next steps): ${w.score} / 10, ${w.level}. ${w.criteria.map((c) => `${c.label} ${c.score}/5`).join(', ')}. ${w.summary}`);
+    }
     lines.push('');
   }
   return lines.filter((line) => line !== null).join('\n');
@@ -307,9 +314,9 @@ export function questionsOf(section) {
 // A teacher's own reports keep the questions too, so a printed report always
 // shows the marks it was written from.
 function snapshot(sections, { questions = false } = {}) {
-  return sections.map(({ key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at, marking, left_out, left_out_marks, ...rest }) => ({
+  return sections.map(({ key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at, marking, left_out, left_out_marks, writing, ...rest }) => ({
     key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at, marking, left_out, left_out_marks,
-    ...(questions ? { questions: questionsOf({ ...rest, marking }) } : {}),
+    ...(questions ? { questions: questionsOf({ ...rest, marking }), writing: writing ?? null } : {}),
   }));
 }
 
@@ -322,6 +329,7 @@ async function writeTeacherReports(teacherId, testId, reportId) {
   // Papers marked before the marking said what should have been answered get
   // it now; the results are then read again to take it in.
   const answerProblems = await addMissingAnswers(teacherResults(teacherId, testId));
+  const writingProblems = await addMissingWriting(teacherResults(teacherId, testId));
   const sections = teacherResults(teacherId, testId);
   if (!sections.length) throw friendly('There are no marked sections for this teacher in this test yet. Press Evaluate first.');
 
@@ -354,6 +362,10 @@ async function writeTeacherReports(teacherId, testId, reportId) {
     // it is missing for any sitting where it could not be worked out.
     answers: true,
     answers_problems: answerProblems,
+    // Written with each section's Written Expression, and why it is missing
+    // for any sitting that could not be checked.
+    writing: true,
+    writing_problems: writingProblems,
     test_name: test.name,
     stage: stageOf(teacher.grade),
     sections: snapshot(sections, { questions: true }),
@@ -412,6 +424,8 @@ export function isStale(report, sections) {
 // Whether a teacher's report was written before reports showed what the
 // teacher answered and what should have been answered for each question.
 export const lacksAnswers = (report) => report?.kind === 'teacher' && Boolean(report.content) && !report.content.answers;
+// Teacher reports written before they showed Written Expression.
+export const lacksWritingScore = (report) => report?.kind === 'teacher' && Boolean(report.content) && !report.content.writing;
 
 // Whether growth paths were added or changed after the report was written,
 // so its training plan is out of date.
@@ -422,7 +436,7 @@ function pathsChanged(report, framework) {
 // Whether a report needs rebuilding, for any of those reasons: the board, the
 // dashboard and the profile page go by this.
 export function isOutOfDate(report, sections, framework = getFramework()) {
-  return isOldLayout(report) || lacksAnswers(report) || pathsChanged(report, framework) || isStale(report, sections);
+  return isOldLayout(report) || lacksAnswers(report) || lacksWritingScore(report) || pathsChanged(report, framework) || isStale(report, sections);
 }
 
 // Builds every teacher report in a test that is missing, failed or out of

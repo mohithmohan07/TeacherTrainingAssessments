@@ -85,6 +85,8 @@ export const assessmentsApi = {
   update: (id, body) => api.putJson(`/api/assessments/${id}`, body),
   evaluate: (id, marking = 'standard') => api.postJson(`/api/assessments/${id}/evaluate`, { marking }),
   saveMarks: (id, marks) => api.putJson(`/api/assessments/${id}/marks`, { marks }),
+  // Checks the Written Expression of a sitting marked before Evaluate did.
+  checkWriting: (id) => api.postJson(`/api/assessments/${id}/writing`, {}),
   swap: (id) => api.postJson(`/api/assessments/${id}/swap`, {}),
   setPapers: (id, paperIds) => api.putJson(`/api/assessments/${id}/papers`, { paper_ids: paperIds }),
   remove: (id) => api.del(`/api/assessments/${id}`),

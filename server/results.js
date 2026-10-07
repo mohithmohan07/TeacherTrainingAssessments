@@ -6,6 +6,7 @@
 import crypto from 'node:crypto';
 import db from './db.js';
 import { levelsFromText } from './papers.js';
+import { sectionWriting } from './writing.js';
 
 // Grade bands, applied to each section's percentage.
 export const GRADES = [
@@ -120,11 +121,15 @@ function groupSections(aiResult) {
 // with no marks means nothing was written.
 const sectionWasSat = (section) => section.questions.some(answered);
 
-// The sections of one marked sitting that the teacher sat.
+// The sections of one marked sitting that the teacher sat, each with its
+// Written Expression (writing.js) when the sitting's writing was checked.
 export function sittingSections(aiResult) {
   return groupSections(aiResult)
     .filter(sectionWasSat)
-    .map((s) => describe({ ...s, awarded: round(s.awarded), max: round(s.max), left_out_marks: round(s.left_out_marks) }));
+    .map((s) => ({
+      ...describe({ ...s, awarded: round(s.awarded), max: round(s.max), left_out_marks: round(s.left_out_marks) }),
+      writing: sectionWriting(aiResult?.writing, s.key),
+    }));
 }
 
 // Sections on the paper that the teacher left entirely unanswered.

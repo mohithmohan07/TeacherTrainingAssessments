@@ -6,6 +6,7 @@ import {
   isOldLayout,
   isStale,
   lacksAnswers,
+  lacksWritingScore,
   questionsOf,
   queueSchoolReport,
   queueTeacherReports,
@@ -85,7 +86,7 @@ function teacherPayload(teacher, test) {
     section_titles: SECTION_TITLES,
     sections: sections.map(({ questions, ...rest }) => ({ ...rest, questions: questionsOf({ questions, marking: rest.marking }) })),
     potential: potentialFor(sections),
-    report: report && { ...report, stale: isStale(report, sections), old_layout: isOldLayout(report), no_answers: lacksAnswers(report) },
+    report: report && { ...report, stale: isStale(report, sections), old_layout: isOldLayout(report), no_answers: lacksAnswers(report), no_writing: lacksWritingScore(report) },
     training: trainingState(),
     evidence: evidenceFor(teacher.id, sections, report?.content?.sections ?? []),
   };
