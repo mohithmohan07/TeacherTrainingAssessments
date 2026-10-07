@@ -831,7 +831,7 @@ function stageTable(figures, keys, grades) {
         h('tbody', {}, figures.stage_stats.map((s) => row(s)), row({ name: 'Whole School', classes: '', ...figures.whole }, true))
       )
     ),
-    h('p', { class: 'report-key' }, 'Each bar is the average percentage of that stage’s teachers who took the section. The shading behind it marks the grades, D on the left to A on the right. “Needs More Support” counts teachers with any section at Grade D (Needs Improvement).'),
+    h('p', { class: 'report-key' }, 'Each bar is the average percentage of that stage’s teachers who took the section. The shading behind it marks the grades, D on the left to A on the right. “Needs More Support” counts teachers with any section at Grade D (Needs Practice).'),
     figures.stage_stats.some((s) => s.key === null)
       ? h('p', { class: 'report-note no-print' }, 'Teachers under “Classes Not Given” have no class saved. Add the classes they teach on Schools & teachers, then rebuild, to place them in a stage.')
       : null

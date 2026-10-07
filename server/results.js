@@ -13,7 +13,7 @@ export const GRADES = [
   { min: 85, grade: 'A', label: 'Excellent' },
   { min: 70, grade: 'B', label: 'Good' },
   { min: 50, grade: 'C', label: 'Fair' },
-  { min: 0, grade: 'D', label: 'Needs Improvement' },
+  { min: 0, grade: 'D', label: 'Needs Practice' },
 ];
 
 // The programme's sections (see paper-formats.js). Section B is written for
@@ -260,7 +260,7 @@ export function potentialFor(sections) {
 export const NEEDS = [
   { key: 'on_track', label: 'Doing Well', meaning: 'Grade A or B (Excellent or Good) in every section taken' },
   { key: 'developing', label: 'Needs Some Support', meaning: 'Lowest grade is C (Fair), in at least one section' },
-  { key: 'support', label: 'Needs More Support', meaning: 'Grade D (Needs Improvement) in at least one section' },
+  { key: 'support', label: 'Needs More Support', meaning: 'Grade D (Needs Practice) in at least one section' },
 ];
 
 export function needOf(sections) {

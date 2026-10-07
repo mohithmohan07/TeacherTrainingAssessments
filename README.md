@@ -242,12 +242,12 @@ marking counts.
 
 There is no overall percentage. Each section is graded on its own:
 
-| Grade | Label             | Section percentage |
-|-------|-------------------|--------------------|
-| A     | Excellent         | 85% and above      |
-| B     | Good              | 70% to 84%         |
-| C     | Fair              | 50% to 69%         |
-| D     | Needs Improvement | below 50%          |
+| Grade | Label          | Section percentage |
+|-------|----------------|--------------------|
+| A     | Excellent      | 85% and above      |
+| B     | Good           | 70% to 84%         |
+| C     | Fair           | 50% to 69%         |
+| D     | Needs Practice | below 50%          |
 
 The bands are in `server/results.js`.
 
