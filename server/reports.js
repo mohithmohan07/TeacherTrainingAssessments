@@ -19,7 +19,7 @@
 import db from './db.js';
 import { OPENAI_MODEL, friendly, openaiConfigured, requestJson } from './openai.js';
 import { addMissingAnswers } from './answers.js';
-import { WRITING_NAME, addMissingWriting } from './writing.js';
+import { WRITING_NAME, addMissingWriting, schoolWriting, teacherWriting, writingExamples } from './writing.js';
 import {
   GRADES,
   NEEDS,
@@ -494,20 +494,20 @@ const stageName = (key) => STAGES.find((stage) => stage.key === key)?.name ?? nu
 // Figures for the school report, worked out from the marks: each teacher's
 // sections, stage and need, how each section went across the school and in
 // each stage, and who could help whom.
-export function schoolOverview(schoolId, testId) {
-  const teachers = selectTeachersOfSchool.all(schoolId).map((teacher) => {
-    const sections = teacherResults(teacher.id, testId);
-    return {
-      id: teacher.id,
-      name: teacher.name,
-      grade: teacher.grade,
-      subjects: teacher.subjects,
-      stage: stageOf(teacher.grade),
-      sections: snapshot(sections),
-      potential: potentialFor(sections),
-      need: needOf(sections),
-    };
-  });
+export function schoolOverview(schoolId, testId, { examples = false } = {}) {
+  const results = selectTeachersOfSchool.all(schoolId).map((teacher) => ({ teacher, sections: teacherResults(teacher.id, testId) }));
+  const teachers = results.map(({ teacher, sections }) => ({
+    id: teacher.id,
+    name: teacher.name,
+    grade: teacher.grade,
+    subjects: teacher.subjects,
+    stage: stageOf(teacher.grade),
+    sections: snapshot(sections),
+    potential: potentialFor(sections),
+    need: needOf(sections),
+    writing: teacherWriting(sections),
+  }));
+  const writingResults = results.filter((r) => r.sections.length).map(({ teacher, sections }) => ({ name: teacher.name, sections }));
 
   const keys = [...new Set(teachers.flatMap((t) => t.sections.map((s) => s.key)))].sort();
   const sectionStats = keys.map((key) => {
@@ -537,6 +537,10 @@ export function schoolOverview(schoolId, testId) {
     not_assessed: teachers.filter((t) => !t.sections.length).map((t) => t.name),
     mentors: assessed.filter((t) => t.potential?.level === 'mentor').map((t) => t.name),
     support: assessed.filter((t) => t.potential?.level === 'support').map((t) => t.name),
+    // Written Expression across the school; the report's writer also gets
+    // some of the errors, to name the usual mistakes.
+    writing: schoolWriting(writingResults),
+    ...(examples ? { writing_examples: writingExamples(writingResults) } : {}),
   };
 }
 
@@ -550,6 +554,41 @@ Write in English that is brief: plain, everyday words and short sentences that a
 - actions: three or four things UpSchool's team and the school will do, the most important first, each one sentence, such as "Hold workshops on Section B for the 6 teachers at Grade D, with Middle School and High School teachers in separate groups." Give each a timing such as "Weeks 1–2", or "" when there is none. Pair teachers strong in a section with those who need help in it, in the same stage where possible.
 - school_needs: two or three things the school needs to do, one short sentence each, such as fixing the training calendar, freeing time for teachers who mentor colleagues, or arranging classroom visits by UpSchool coaches.
 - Do not rank teachers against each other beyond what the figures show, and do not speculate about personal circumstances.`;
+
+// Asked for only when some teacher's writing has been checked.
+const SCHOOL_WRITING_INSTRUCTIONS = `
+
+You are also given the school's Written Expression: how well the teachers' answers are written, apart from their marks, judged in the language each answer is in. Each section a teacher wrote in is scored out of 10 from four scores out of 5 (Sentence Formation, Grammar, Spelling and Punctuation, Word Choice), and you get the averages, the kinds of error with how many teachers made them, and examples of the errors. Fill written_expression briefly:
+- summary: one sentence on the school's writing overall, with the average score.
+- gaps: two or three points on where teachers usually fall short in their writing, most common first, each one short sentence naming the usual mistake and how many teachers make it, such as "Verb tenses: 7 of 10 teachers switch between past and present in one answer."
+- actions: two or three short, practical things to improve it, one sentence each, that fit into a school week, such as a short grammar refresher in staff meetings, model answers to compare with, or peer checking of written work.
+Do not name teachers here.`;
+
+const SCHOOL_WRITING_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['summary', 'gaps', 'actions'],
+  properties: {
+    summary: { type: 'string' },
+    gaps: { type: 'array', items: { type: 'string' } },
+    actions: { type: 'array', items: { type: 'string' } },
+  },
+};
+
+// The school's Written Expression as the report's writer sees it.
+function describeSchoolWriting(w, examples = []) {
+  if (!w) return '';
+  return [
+    '',
+    '',
+    `${WRITING_NAME} (how well the answers are written, apart from the marks):`,
+    `- ${w.teachers} teacher${w.teachers === 1 ? '' : 's'} with enough writing to judge; school average ${w.average} / 10 (${w.level}).`,
+    `- Teachers by level: ${w.levels.map((l) => `${l.label} ${l.teachers}`).join(', ')}.`,
+    `- Average of each score out of 5: ${w.criteria.map((c) => `${c.label} ${c.average ?? '—'}`).join(', ')}.`,
+    `- Kinds of error: ${w.types.length ? w.types.map((t) => `${t.type} ${t.errors} errors by ${t.teachers} of ${w.teachers} teachers`).join('; ') : 'none found'}.`,
+    ...(examples.length ? ['- Examples of the errors:', ...examples.map((e) => `  ${e}`)] : []),
+  ].join('\n');
+}
 
 const SCHOOL_SCHEMA = {
   type: 'object',
@@ -573,7 +612,7 @@ const SCHOOL_SCHEMA = {
 
 // What the school report is written from: each teacher's stage and results.
 function schoolBasis(overview) {
-  return fingerprint(overview.teachers.map((t) => [t.id, t.stage, t.sections.map((s) => [s.key, s.assessment_id, s.percent])]));
+  return fingerprint(overview.teachers.map((t) => [t.id, t.stage, t.sections.map((s) => [s.key, s.assessment_id, s.percent]), t.writing?.score ?? null]));
 }
 
 // The main findings of a teacher's own report, for the school report.
@@ -587,7 +626,8 @@ function findingsOf(report) {
 async function writeSchoolReport(schoolId, testId, reportId) {
   const school = db.prepare('SELECT * FROM schools WHERE id = ?').get(schoolId);
   const test = selectTest.get(testId);
-  const overview = schoolOverview(schoolId, testId);
+  // The examples of errors go to the writer only, not into the report.
+  const { writing_examples: examples, ...overview } = schoolOverview(schoolId, testId, { examples: true });
   if (!overview.assessed) throw friendly('No teacher in this test has marked sections yet.');
 
   const keys = overview.section_stats.map((s) => s.key);
@@ -630,10 +670,12 @@ async function writeSchoolReport(schoolId, testId, reportId) {
   const training = schoolTraining(overview.teachers, getFramework());
   const planning = Boolean(training?.paths.length);
   const raw = await requestJson({
-    instructions: SCHOOL_INSTRUCTIONS + (planning ? SCHOOL_PLAN_INSTRUCTIONS : ''),
-    content: [{ type: 'input_text', text: lines.join('\n') + describeSchoolTraining(training, stageName) }],
+    instructions: SCHOOL_INSTRUCTIONS + (planning ? SCHOOL_PLAN_INSTRUCTIONS : '') + (overview.writing ? SCHOOL_WRITING_INSTRUCTIONS : ''),
+    content: [{ type: 'input_text', text: lines.join('\n') + describeSchoolTraining(training, stageName) + describeSchoolWriting(overview.writing, examples) }],
     name: 'school_report',
-    schema: SCHOOL_SCHEMA,
+    schema: overview.writing
+      ? { ...SCHOOL_SCHEMA, required: [...SCHOOL_SCHEMA.required, 'written_expression'], properties: { ...SCHOOL_SCHEMA.properties, written_expression: SCHOOL_WRITING_SCHEMA } }
+      : SCHOOL_SCHEMA,
     task: 'write this report',
     retry: 'Press Build report to try again.',
   });
@@ -650,6 +692,9 @@ async function writeSchoolReport(schoolId, testId, reportId) {
       .slice(0, 6),
     school_needs: strings(raw.school_needs, 4),
     training,
+    written_expression: overview.writing && raw.written_expression
+      ? { summary: text(raw.written_expression.summary, 600), gaps: strings(raw.written_expression.gaps, 3), actions: strings(raw.written_expression.actions, 3) }
+      : null,
   };
   saveReport.run({ id: reportId, content: JSON.stringify(content), basis: schoolBasis(overview), model: OPENAI_MODEL });
 }

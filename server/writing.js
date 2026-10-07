@@ -216,6 +216,61 @@ export function sectionWriting(writing, key) {
   };
 }
 
+/* ------------------------------------------------------ across a school */
+
+const oneDecimal = (n) => Math.round(n * 10) / 10;
+const average = (list) => (list.length ? list.reduce((a, b) => a + b, 0) / list.length : null);
+
+// A teacher's Written Expression over the sections judged: the average score
+// out of 10 and its level. Null when no section was judged.
+export function teacherWriting(sections) {
+  const judged = sections.filter((s) => s.writing?.judged);
+  if (!judged.length) return null;
+  const score = oneDecimal(average(judged.map((s) => s.writing.score)));
+  return { score, level: levelFor(score) };
+}
+
+// The school's Written Expression, from each assessed teacher's sections:
+// the average score, how many teachers are at each level, the average of
+// each of the four scores, and the kinds of error, most common first, with
+// how many teachers made them. Null when no teacher's writing was judged.
+export function schoolWriting(teachers) {
+  const judged = teachers
+    .map((t) => ({ t, sections: t.sections.filter((s) => s.writing?.judged), overall: teacherWriting(t.sections) }))
+    .filter((x) => x.overall);
+  if (!judged.length) return null;
+  const sections = judged.flatMap((x) => x.sections);
+  const types = ERROR_TYPES.map((type) => {
+    const per = judged.map((x) => x.sections.reduce((n, s) => n + s.writing.errors.filter((e) => e.type === type).length, 0));
+    return { type, errors: per.reduce((a, b) => a + b, 0), teachers: per.filter(Boolean).length };
+  })
+    .filter((t) => t.errors)
+    .sort((a, b) => b.teachers - a.teachers || b.errors - a.errors);
+  return {
+    teachers: judged.length,
+    average: oneDecimal(average(judged.map((x) => x.overall.score))),
+    level: levelFor(average(judged.map((x) => x.overall.score))),
+    levels: WRITING_LEVELS.map((band) => ({ label: band.label, teachers: judged.filter((x) => x.overall.level === band.label).length })),
+    criteria: WRITING_CRITERIA.map((c) => ({
+      label: c.label,
+      average: oneDecimal(average(sections.map((s) => s.writing.criteria.find((x) => x.label === c.label)?.score).filter(Number.isFinite))),
+    })),
+    types,
+  };
+}
+
+// A few of each teacher's errors, as the school report's writer sees them,
+// so it can name the usual mistakes.
+export function writingExamples(teachers, most = 40) {
+  const lines = [];
+  for (const t of teachers) {
+    for (const e of t.sections.flatMap((s) => (s.writing?.judged ? s.writing.errors : [])).slice(0, 4)) {
+      lines.push(`${e.type}: ${e.problem} ("${clip(e.wrote, 60)}" → "${clip(e.correction, 60)}")`);
+    }
+  }
+  return lines.slice(0, most);
+}
+
 /* ------------------------------------------- sittings marked before the check */
 
 const selectAssessment = db.prepare('SELECT * FROM assessments WHERE id = ?');

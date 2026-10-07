@@ -4,6 +4,7 @@
 // with what the teacher wrote, what is wrong and the correction. The reports
 // carry the same list in a short table.
 import { h } from './ui.js';
+import { legend, stackedBar } from './charts.js';
 
 export const WRITING_NAME = 'Written Expression';
 
@@ -163,5 +164,68 @@ export function writingSection(sections, { forTeacher = false } = {}) {
     h('h2', {}, WRITING_NAME, h('small', {}, forTeacher ? 'How well your answers are written, and what to correct' : 'How well the teacher’s answers are written, and the errors found')),
     checked.map((s) => sectionBlock(s, { forTeacher })),
     writingKey()
+  );
+}
+
+/* ------------------------------------------------------ the school report */
+
+const LEVEL_KEYS = { Excellent: 'w-excellent', Good: 'w-good', Fair: 'w-fair', 'Needs Practice': 'w-practice' };
+
+// Written Expression across the school, kept short: the average, teachers by
+// level, the four scores, the usual kinds of error, then where teachers fall
+// short and how to improve, as written with the report.
+export function schoolWritingSection(w, written) {
+  if (!w) return null;
+  return h(
+    'section',
+    { class: 'report-writing school-writing' },
+    h('h2', {}, WRITING_NAME, h('small', {}, 'How well the teachers’ answers are written, apart from the marks')),
+    h(
+      'p',
+      { class: 'report-callout' },
+      h('strong', {}, 'School Average: '),
+      `${w.average} / 10, ${w.level}, across ${w.teachers} teacher${w.teachers === 1 ? '' : 's'}.`
+    ),
+    written?.summary ? h('p', {}, written.summary) : null,
+    h(
+      'div',
+      { class: 'school-writing-charts' },
+      h(
+        'div',
+        {},
+        h('h3', {}, 'Teachers by Level'),
+        stackedBar(w.levels.map((l) => ({ key: LEVEL_KEYS[l.label], label: l.label, value: l.teachers })), { label: WRITING_NAME }),
+        legend(w.levels.map((l) => ({ key: LEVEL_KEYS[l.label], label: l.label })))
+      ),
+      h(
+        'div',
+        {},
+        h('h3', {}, 'Average of Each Score'),
+        h(
+          'div',
+          { class: 'writing-criteria writing-criteria-list' },
+          w.criteria.map((c) =>
+            h(
+              'div',
+              { class: 'writing-criterion' },
+              h('span', {}, c.label),
+              h('span', { class: 'writing-dots', 'aria-hidden': 'true' }, [1, 2, 3, 4, 5].map((n) => h('i', { class: n <= Math.round(c.average ?? 0) ? 'on' : null }))),
+              h('b', {}, c.average === null ? '—' : `${c.average}/5`)
+            )
+          )
+        )
+      )
+    ),
+    w.types.length
+      ? h(
+          'p',
+          { class: 'report-note' },
+          h('strong', {}, 'Most Common Errors: '),
+          w.types.slice(0, 4).map((t) => `${t.type}, ${t.teachers} of ${w.teachers} teachers`).join(' · '),
+          '.'
+        )
+      : null,
+    written?.gaps?.length ? [h('h3', {}, 'Where Teachers Fall Short'), h('ul', {}, written.gaps.map((g) => h('li', {}, g)))] : null,
+    written?.actions?.length ? [h('h3', {}, 'How to Improve'), h('ol', { class: 'report-points' }, written.actions.map((a) => h('li', {}, a)))] : null
   );
 }
