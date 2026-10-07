@@ -14,7 +14,7 @@ import { h, mount, toast, formatDate, logoFor, potentialBadge, emptyState, title
 import { reportsApi } from '../api.js';
 import { donut, legend, scoreBar, stackedBar } from '../charts.js';
 import { keepOnly, pagesOf } from '../evidence.js';
-import { checkedSections, levelClass, writingSection } from '../writing.js';
+import { checkedSections, levelClass, schoolWritingSection, writingSection } from '../writing.js';
 
 const SECTION_KEYS = ['A', 'B', 'C'];
 
@@ -1003,6 +1003,7 @@ export async function renderSchoolReport(root, schoolId, testId) {
       trainingTotal(figures.training),
       written?.school_needs.length ? [h('h3', {}, 'What We Need from the School'), bullets(written.school_needs)] : null,
       !written && !running ? h('p', { class: 'hint no-print' }, 'The charts and figures are live. Press Build report to add the summary, findings and plan of action.') : null,
+      schoolWritingSection(figures.writing, written?.written_expression),
       teachersByStage(figures, data.needs, test),
       lenientTeachers(figures),
       figures.not_assessed.length ? h('p', { class: 'report-note' }, `Not yet assessed in this test: ${figures.not_assessed.join(', ')}.`) : null,

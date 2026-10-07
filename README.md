@@ -217,6 +217,12 @@ Papers marked before the check get it when their reports are next built (or
 with **Check the writing** on the assessment page), judged from what the
 marking wrote down of each answer; their marks stay as they are.
 
+The School Report has a short **Written Expression** section too: the
+school's average score, teachers by level, the average of each of the four
+scores and the most common kinds of error, then a few lines on where teachers
+usually fall short in their writing and how to improve it, written by OpenAI
+from the figures and some of the errors found. It does not name teachers.
+
 It needs the `OPENAI_API_KEY` secret on the server (on Fly:
 `fly secrets set OPENAI_API_KEY=... -a teachertrainingassessments`). The model
 is `gpt-6-luna` unless `OPENAI_MODEL` says otherwise. OpenAI reads JPG, PNG,
