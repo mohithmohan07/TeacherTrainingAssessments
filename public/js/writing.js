@@ -93,7 +93,8 @@ export function errorsTable(errors, { forTeacher = false } = {}) {
   );
 }
 
-// One section's score, four scores, sentence and errors.
+// One section's score, four scores, sentence and errors. The section's full
+// name follows its letter where it is known, as elsewhere in the reports.
 function sectionBlock(s, { forTeacher = false, heading = 'h3' } = {}) {
   const w = s.writing;
   return h(
@@ -102,7 +103,7 @@ function sectionBlock(s, { forTeacher = false, heading = 'h3' } = {}) {
     h(
       'div',
       { class: 'writing-block-head' },
-      h(heading, {}, s.name),
+      h(heading, {}, s.name, s.title ? h('span', { class: 'answers-title' }, s.title) : null),
       h('span', { class: `writing-score ${levelClass(w)}` }, writingLine(w))
     ),
     !w.checked ? h('p', { class: 'hint' }, w.problem) : null,
