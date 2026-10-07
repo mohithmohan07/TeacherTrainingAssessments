@@ -6,6 +6,7 @@ import {
   isOldLayout,
   isStale,
   lacksAnswers,
+  lacksPlainWords,
   lacksWritingScore,
   questionsOf,
   queueSchoolReport,
@@ -13,6 +14,7 @@ import {
   queueTestReports,
   schoolOverview,
   schoolReportIsStale,
+  withCurrentNames,
 } from '../reports.js';
 import { getFramework, schoolTraining } from '../training.js';
 import { sittingPapers } from '../papers.js';
@@ -86,7 +88,15 @@ function teacherPayload(teacher, test) {
     section_titles: SECTION_TITLES,
     sections: sections.map(({ questions, ...rest }) => ({ ...rest, questions: questionsOf({ questions, marking: rest.marking }) })),
     potential: potentialFor(sections),
-    report: report && { ...report, stale: isStale(report, sections), old_layout: isOldLayout(report), no_answers: lacksAnswers(report), no_writing: lacksWritingScore(report) },
+    report: report && {
+      ...report,
+      content: withCurrentNames(report.content),
+      stale: isStale(report, sections),
+      old_layout: isOldLayout(report),
+      no_answers: lacksAnswers(report),
+      no_writing: lacksWritingScore(report),
+      old_words: lacksPlainWords(report),
+    },
     training: trainingState(),
     evidence: evidenceFor(teacher.id, sections, report?.content?.sections ?? []),
   };
@@ -120,7 +130,7 @@ function schoolPayload(school, test) {
     ...overview,
     training: schoolTraining(overview.teachers, getFramework()),
     training_state: trainingState(),
-    report: report && { ...report, stale: schoolReportIsStale(report, overview), old_layout: isOldLayout(report) },
+    report: report && { ...report, content: withCurrentNames(report.content), stale: schoolReportIsStale(report, overview), old_layout: isOldLayout(report), old_words: lacksPlainWords(report) },
   };
 }
 

@@ -14,7 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import db from './db.js';
 import { serverSession } from './auth.js';
-import { LAYOUT, findReport, isOutOfDate, schoolOverview, schoolReportIsStale } from './reports.js';
+import { LAYOUT, findReport, isOutOfDate, schoolOverview, schoolReportIsOutOfDate } from './reports.js';
 import { teacherResults } from './results.js';
 import { friendly } from './openai.js';
 import { getFramework } from './training.js';
@@ -106,7 +106,7 @@ function planFor(school, test) {
   const report = findReport('school', test.id, null);
   if (report?.status === 'running') plan.writing += 1;
   else if (report?.content?.layout === LAYOUT) {
-    plan.school = report.status === 'failed' || schoolReportIsStale(report, schoolOverview(school.id, test.id)) ? 'out_of_date' : 'included';
+    plan.school = report.status === 'failed' || schoolReportIsOutOfDate(report, schoolOverview(school.id, test.id)) ? 'out_of_date' : 'included';
   } else if (report?.content) {
     plan.school = 'old_layout';
   }

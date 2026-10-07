@@ -8,12 +8,12 @@ import db from './db.js';
 import { levelsFromText } from './papers.js';
 import { sectionWriting } from './writing.js';
 
-// Grade bands, applied to each section's percentage.
+// Grade bands, applied to each section's percentage, named in everyday words.
 export const GRADES = [
-  { min: 85, grade: 'A', label: 'Exemplary' },
-  { min: 70, grade: 'B', label: 'Proficient' },
-  { min: 50, grade: 'C', label: 'Developing' },
-  { min: 0, grade: 'D', label: 'Beginning' },
+  { min: 85, grade: 'A', label: 'Excellent' },
+  { min: 70, grade: 'B', label: 'Good' },
+  { min: 50, grade: 'C', label: 'Fair' },
+  { min: 0, grade: 'D', label: 'Needs Improvement' },
 ];
 
 // The programme's sections (see paper-formats.js). Section B is written for
@@ -22,6 +22,14 @@ export const SECTION_TITLES = {
   A: 'Interpersonal & Instructional Communication Skills',
   B: 'Subject Knowledge, Classroom Management & Child Psychology',
   C: 'Computer Knowledge & Digital Teaching Skills',
+};
+
+// What each section is about, in a word or two, so a report can say
+// "Section C (Computer Skills)" for a reader without the paper.
+export const SECTION_SHORT = {
+  A: 'Communication',
+  B: 'Subject & Classroom',
+  C: 'Computer Skills',
 };
 
 // What a strong result in each section suggests a teacher could take on.
@@ -80,8 +88,8 @@ const round = (n) => Math.round(n * 100) / 100;
 // marks. Lenient leaves the questions the teacher did not attempt out of both
 // the marks and the total. Marking the answers is the same either way.
 export const MARKINGS = [
-  { key: 'standard', label: 'Standard', meaning: 'Every question counts. A question not attempted scores 0 and stays in the total.' },
-  { key: 'lenient', label: 'Lenient', meaning: 'Questions not attempted are left out of the marks and the total.' },
+  { key: 'standard', label: 'Standard', meaning: 'Every question counts. A question left blank gets 0 and stays in the total.' },
+  { key: 'lenient', label: 'Lenient', meaning: 'Only the questions answered count. Questions left blank are not in the marks or the total.' },
 ];
 
 // The kind of a marking; markings made before there was a choice are standard.
@@ -204,35 +212,40 @@ export function potentialFor(sections) {
     list.length > 1 && list.every((s) => /^[A-Z]$/.test(s.key))
       ? `Sections ${list.slice(0, -1).map((s) => s.key).join(', ')} and ${list.at(-1).key}`
       : names(list);
+  // The same with what each section is about: "Section C (Computer Skills)".
+  const about = (list) =>
+    list.every((s) => SECTION_SHORT[s.key])
+      ? `${sectionList(list)} (${list.map((s) => SECTION_SHORT[s.key]).join('; ')})`
+      : names(list);
 
   let level;
   let headline;
   let meaning;
   if (exemplary.length === graded.length) {
     level = 'mentor';
-    headline = 'Mentor Potential';
-    meaning = 'Exemplary in every section sat. A candidate to guide colleagues and lead training.';
+    headline = 'Can Guide Other Teachers';
+    meaning = 'Grade A (Excellent) in every section taken. Could help train and guide other teachers.';
   } else if (strengths.length === graded.length) {
     level = 'strong';
-    headline = 'Strong Performer';
-    meaning = 'Proficient or better in every section sat. Ready for more responsibility in these areas.';
+    headline = 'Strong in Every Section';
+    meaning = 'Grade A or B (Excellent or Good) in every section taken. Ready to take on more responsibility.';
   } else if (strengths.length) {
     const developing = graded.filter((s) => s.grade === 'C');
     level = 'emerging';
-    headline = `Strength in ${sectionList(strengths)}`;
+    headline = `Strong in ${sectionList(strengths)}`;
     meaning = [
-      'A real strength to build on.',
-      developing.length ? `Still developing in ${sectionList(developing)}.` : '',
-      support.length ? `Needs focused support in ${sectionList(support)}.` : '',
+      `Good or better in ${about(strengths)}.`,
+      developing.length ? `Needs some practice in ${about(developing)}.` : '',
+      support.length ? `Needs extra help in ${about(support)}.` : '',
     ].filter(Boolean).join(' ');
   } else if (!support.length) {
     level = 'developing';
-    headline = 'Developing Steadily';
-    meaning = 'Developing in every section sat. Regular training and practice should lift these to proficient.';
+    headline = 'Fair in Every Section';
+    meaning = 'Grade C (Fair) in every section taken. Regular training and practice should lift these to Grade B (Good).';
   } else {
     level = 'support';
-    headline = 'Priority for Support';
-    meaning = `Needs focused support in ${sectionList(support)} before other responsibilities.`;
+    headline = 'Needs Help First';
+    meaning = `Needs extra help in ${about(support)} before taking on other duties.`;
   }
 
   const areas = Object.keys(SECTION_TITLES);
@@ -245,19 +258,19 @@ export function potentialFor(sections) {
     developing: graded.filter((s) => s.grade === 'C').map((s) => s.name),
     support: support.map((s) => s.name),
     roles: exemplary.filter((s) => SECTION_ROLES[s.key]).map((s) => ({ section: s.name, role: SECTION_ROLES[s.key] })),
-    evidence: sat && sat < areas.length ? `Based on ${sat} of ${areas.length} sections so far.` : `Based on ${graded.length} section${graded.length === 1 ? '' : 's'}.`,
+    evidence: sat && sat < areas.length ? `Based on ${sat} of ${areas.length} sections so far.` : graded.length === areas.length ? `Based on all ${areas.length} sections.` : `Based on ${graded.length} section${graded.length === 1 ? '' : 's'}.`,
     provisional: sat < areas.length,
   };
 }
 
-// How a teacher stands overall, from their lowest grade: on track when every
-// section sat is Proficient or better, developing when the lowest is C, and
-// in need of support with any section at D. These match the training rule:
+// How a teacher stands overall, from their lowest grade: doing well when
+// every section sat is Good (B) or better, needing some support when the
+// lowest is C, and more support with any section at D. These match the training rule:
 // a section at C or D is what puts a teacher on a growth path.
 export const NEEDS = [
-  { key: 'on_track', label: 'On Track', meaning: 'Grade B or better in every section taken' },
-  { key: 'developing', label: 'Developing', meaning: 'A section at Grade C, none at Grade D' },
-  { key: 'support', label: 'Needs Support', meaning: 'A section at Grade D' },
+  { key: 'on_track', label: 'Doing Well', meaning: 'Grade A or B (Excellent or Good) in every section taken' },
+  { key: 'developing', label: 'Needs Some Support', meaning: 'Lowest grade is C (Fair), in at least one section' },
+  { key: 'support', label: 'Needs More Support', meaning: 'Grade D (Needs Improvement) in at least one section' },
 ];
 
 export function needOf(sections) {

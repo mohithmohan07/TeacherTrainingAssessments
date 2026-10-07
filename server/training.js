@@ -87,7 +87,7 @@ export function clearFramework() {
 
 // How a path is picked, for the Training paths page. trainingPlanFor() follows it.
 export const PATH_RULES = [
-  'A teacher who is Proficient (grade B) or better in every section sat needs no growth path.',
+  'A teacher who is Good (grade B) or better in every section sat needs no growth path.',
   'One section at grade C or D: the first path.',
   'Two or more sections at grade C or D, but fewer than two at D: the second path.',
   'Two or more sections at grade D: the third path.',
@@ -151,8 +151,14 @@ export async function readFramework(buffer, filename) {
 
 /* -------------------------------------------------- one teacher's plan */
 
+// The names of the plan's shared blocks, after the sections' own.
+export const BLOCK_TITLES = {
+  practice: 'Practice in Class with a Coach',
+  review: 'Review and Final Test',
+};
+
 // The days a section that needs support asks for before the plan is fitted
-// to its path: more for a section at Beginning than at Developing.
+// to its path: more for a section at grade D than at grade C.
 const SECTION_DAYS = { D: 6, C: 4 };
 
 // The goal for the exit assessment: one grade up in each section that needs
@@ -167,7 +173,7 @@ export function goalFor(focus) {
   }
   const parts = [...goals.values()]
     .sort((a, b) => a.band.min - b.band.min)
-    .map(({ band, names }) => `at least ${band.min}% (Grade ${band.grade}) in ${listing(names.sort())}`);
+    .map(({ band, names }) => `at least ${band.min}% (Grade ${band.grade}, ${band.label}) in ${listing(names.sort())}`);
   return parts.length ? `${parts.join(', and ').replace(/^a/, 'A')}.` : '';
 }
 
@@ -224,7 +230,7 @@ export function trainingPlanFor(sections, framework) {
       path: null,
       days: 0,
       blocks: [],
-      reason: `Proficient or better in every section sat: ${listing(strengths.map(about))}. No growth path is needed.`,
+      reason: `Good or better in every section taken: ${listing(strengths.map(about))}. No training is needed.`,
     };
   }
 
@@ -246,8 +252,8 @@ export function trainingPlanFor(sections, framework) {
       grade_label: s.grade_label,
       days: parts[i],
     })),
-    { kind: 'practice', key: null, title: 'Classroom Application with Coaching', days: parts[focus.length] },
-    { kind: 'review', key: null, title: 'Review and Exit Assessment Readiness', days: review },
+    { kind: 'practice', key: null, title: BLOCK_TITLES.practice, days: parts[focus.length] },
+    { kind: 'review', key: null, title: BLOCK_TITLES.review, days: review },
   ].filter((block) => block.days > 0);
   let day = 1;
   for (const [i, block] of blocks.entries()) {
@@ -269,39 +275,44 @@ export function trainingPlanFor(sections, framework) {
       focus.length < 2
         ? null
         : focus[0].grade !== focus[1].grade
-          ? `We start with ${focus[0].name} because it is at Grade ${focus[0].grade}.`
+          ? `We start with ${focus[0].name} because it has the lowest grade, ${focus[0].grade} (${focus[0].grade_label}).`
           : `We start with ${focus[0].name} because it had the lower score.`,
     goal: goalFor(focus),
   };
 }
 
 // What OpenAI is told about the plan when it writes a teacher's reports.
-export function describeTeacherPlan(plan) {
+export function describeTeacherPlan(plan, framework) {
   if (!plan?.path) return '';
   return [
     '',
     `TRAINING PLAN (fixed): ${plan.path.name}${plan.path.scope ? `, for ${plan.path.scope.replace(/\.$/, '').toLowerCase()}` : ''}. ${plan.days} days in all.`,
     `Why: ${plan.reason}`,
     ...plan.blocks.map((b) => `Block ${b.number}, ${dayRange(b.from, b.to)} (${plural(b.days, 'day')}): ${b.title}${b.grade ? `, grade ${b.grade} ${b.grade_label}` : ''}`),
-    `Goal for the exit assessment: ${plan.goal}`,
-  ].join('\n');
+    `Goal for the final test: ${plan.goal}`,
+    framework?.continuity ? `AFTER THE TRAINING: ${framework.continuity}` : null,
+  ]
+    .filter((line) => line !== null)
+    .join('\n');
 }
 
 export const TEACHER_PLAN_INSTRUCTIONS = `
 
 3. training_plan, for the management report, from the TRAINING PLAN given after the results. Its path, blocks and days are fixed: never change them. For each block, by its number:
-- summary: one short sentence, starting with a verb, on what happens in those days, for a list headed "What We Will Do". For example: "Plan short lessons that check what pupils have understood at each step." For classroom application, what an UpSchool coach does in the teacher's own classes; for the review, how progress is checked before the exit assessment.
-- works_on: what the teacher works on in those days, as a few topics in under 15 words, taken from this teacher's answers. For example: "Lesson openings, questioning, checking understanding".
-- how: how UpSchool's team runs those days, in under 12 words. For example: "UpSchool trainer at school: demonstrations, role-play, short practice".
+- summary: one short sentence in plain, everyday words, starting with a verb, on what happens in those days, for a list headed "What We Will Do". For example: "Practise short lessons that check what children have understood at each step." For practice in class, what an UpSchool coach does in the teacher's own classes; for the review, how progress is checked before the final test.
+- works_on: what the teacher works on in those days, as a few topics in under 15 words, taken from this teacher's answers, in everyday words a school manager would understand without the question paper. For example: "Starting lessons well, asking good questions, checking children have understood". No sounds, symbols or specialist terms such as "/b/ sound" or "task-focused answers": say "teaching letter sounds" or "answering what is asked".
+- how: how UpSchool's team runs those days, in under 12 words of everyday English. For example: "UpSchool trainer at school: shows how, then the teacher practises".
 - points: the numbers of the management_report findings these days work on, counting from 1.
+Also give after_plan: one short sentence in plain words on the support after the training, from AFTER THE TRAINING given after the plan, such as "UpSchool checks in on the teacher before each new chapter." Give "" when it is not given.
 With a training plan, each finding's action says what UpSchool's team will do about it during the plan, without day numbers, and management_report.support lists only support beyond the plan, such as mentoring by a colleague or classroom resources.
 Never mention a proposal, a framework document, prices, fees or payments.`;
 
 export const TEACHER_PLAN_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['blocks'],
+  required: ['blocks', 'after_plan'],
   properties: {
+    after_plan: { type: 'string' },
     blocks: {
       type: 'array',
       items: {
@@ -331,7 +342,7 @@ export function writtenPlan(plan, written, framework, findings = 0) {
     ...plan,
     programme: framework?.programme ?? '',
     exit_assessment: framework?.exit_assessment ?? '',
-    continuity: framework?.continuity ?? '',
+    continuity: text(written?.after_plan, 400) || (framework?.continuity ?? ''),
     blocks: plan.blocks.map((block) => {
       const w = byNumber.get(block.number) ?? {};
       const points = (Array.isArray(w.points) ? w.points : []).map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= findings);

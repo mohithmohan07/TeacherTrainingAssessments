@@ -242,12 +242,12 @@ marking counts.
 
 There is no overall percentage. Each section is graded on its own:
 
-| Grade | Label      | Section percentage |
-|-------|------------|--------------------|
-| A     | Exemplary  | 85% and above      |
-| B     | Proficient | 70% to 84%         |
-| C     | Developing | 50% to 69%         |
-| D     | Beginning  | below 50%          |
+| Grade | Label             | Section percentage |
+|-------|-------------------|--------------------|
+| A     | Excellent         | 85% and above      |
+| B     | Good              | 70% to 84%         |
+| C     | Fair              | 50% to 69%         |
+| D     | Needs Improvement | below 50%          |
 
 The bands are in `server/results.js`.
 
@@ -311,35 +311,46 @@ the foot. Reports and question papers print without the page address, date
 and title the browser would otherwise add at the top and bottom of each page,
 as long as the print dialog's margins are left on Default.
 
-The **potential identifier** is worked out from the section grades by fixed
-rules, so every teacher is judged the same way:
+Every report is written in plain, everyday words that anyone can follow
+without the question paper or the teacher's answers to hand. OpenAI is told
+never to cite question numbers or marks in its text (the tables show them),
+to say instead what the teacher was asked and what they did or missed, to
+avoid teaching jargon and to explain any term it cannot avoid. Sections are
+named with what they cover: A (Communication), B (Subject & Classroom) and
+C (Computer Skills). Reports written before then say so on screen and count
+as out of date, so **Build N teacher reports** picks them up; the names of
+grades, needs and the potential identifier change on every report at once.
 
-- **Mentor Potential**: exemplary (A) in every section sat.
-- **Strong Performer**: proficient or better (A or B) in every section sat.
-- **Strength in …**: A or B in some sections, still developing in others.
-- **Developing Steadily**: C in every section sat.
-- **Priority for Support**: D in a section, with no A or B anywhere.
+The **potential identifier**, headed **Strengths and Potential** in the
+reports, is worked out from the section grades by fixed rules, so every
+teacher is judged the same way:
+
+- **Can Guide Other Teachers**: A in every section sat.
+- **Strong in Every Section**: A or B in every section sat.
+- **Strong in Section …**: A or B in some sections, C or D in others.
+- **Fair in Every Section**: C in every section sat.
+- **Needs Help First**: D in a section, with no A or B anywhere.
 
 It always says how many of the three sections it rests on.
 
 The school report sorts teachers by **need** and **stage**, both by fixed
-rules. The need matches the training: teachers on track need no growth path.
+rules. The need matches the training: teachers doing well need no growth path.
 
-- **On Track**: B or better in every section taken.
-- **Developing**: a section at C, none at D.
-- **Needs Support**: a section at D.
+- **Doing Well**: B or better in every section taken.
+- **Needs Some Support**: a section at C, none at D.
+- **Needs More Support**: a section at D.
 
 A teacher's stage comes from the class typed in their **Grade**: Pre-Primary
 (Nursery to UKG), Primary (Classes 1 to 5), Middle School (6 to 8), High
 School (9 and 10) or PUC (I and II PUC). Someone who teaches across stages is
 counted in the highest, and a teacher whose Grade names no class shows under
-**Stage Not Given**.
+**Classes Not Given**.
 
 At the end, **School Report** in the Reports card (or on the dashboard) opens
 the report on all of the school's teachers in the test. Its first page has a
-summary, a pie chart splitting the teachers into On Track, Developing and
-Needs Support, and each section's average score in every stage, with how many
-need support there. Then come each section's grades as bars, OpenAI's findings, a
+summary, a pie chart splitting the teachers into Doing Well, Needs Some
+Support and Needs More Support, and each section's average score in every
+stage, with how many need more support there. Then come each section's grades as bars, OpenAI's findings, a
 plan of action with timings and how UpSchool's team runs it, the training days
 in all, what the school needs to provide, and every teacher sorted by stage
 and need, each name linking to their report. The charts and figures are live;
@@ -361,7 +372,7 @@ repository, and the reports never mention the proposal.
 A teacher's path is picked from their section grades by fixed rules, with the
 paths ordered from the shortest to the longest:
 
-- **No path**: Proficient (B) or better in every section sat.
+- **No path**: Good (B) or better in every section sat.
 - **The first path**: one section at C or D.
 - **The second path**: two or more sections at C or D, but fewer than two at D.
 - **The third path**: two or more sections at D.

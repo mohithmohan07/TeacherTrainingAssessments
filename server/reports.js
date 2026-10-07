@@ -23,6 +23,7 @@ import { WRITING_NAME, addMissingWriting } from './writing.js';
 import {
   GRADES,
   NEEDS,
+  SECTION_SHORT,
   SECTION_TITLES,
   STAGES,
   counts,
@@ -36,6 +37,7 @@ import {
   teacherResults,
 } from './results.js';
 import {
+  BLOCK_TITLES,
   SCHOOL_PLAN_INSTRUCTIONS,
   TEACHER_PLAN_INSTRUCTIONS,
   TEACHER_PLAN_SCHEMA,
@@ -132,13 +134,25 @@ function reportRowFor(kind, schoolId, testId, teacherId) {
 
 /* ------------------------------------------------------ one teacher's reports */
 
+// How every report is worded, for both prompts. MM, who reads them, asked
+// that anyone can understand every line on its own, without the question
+// paper or the teacher's answers to hand.
+const PLAIN_WORDS = `Use plain, everyday English that anyone can understand: a parent, a new teacher or a school manager, without the question paper or the teacher's answers to hand. Every point must make sense on its own.
+- Never refer to question numbers (such as "Q1A" or "question 3") and never put marks in brackets; the tables beside your text show them. Say instead what the teacher was asked to do and what they did or missed.
+- Avoid teaching jargon and technical terms, such as pedagogy, formative assessment, scaffolding, differentiation, task-focused or phishing. When a term cannot be avoided, explain it in a few words, such as "phishing emails (fake emails that try to steal passwords)".
+- Titles name the skill or the gap in everyday words, such as "Giving clear instructions" or "Keeping children safe online", not labels such as "Task-focused teaching".
+- Name a section with what it is about, such as "Section A (Communication)"; the first time is enough. The sections are: ${Object.entries(SECTION_SHORT).map(([key, about]) => `Section ${key} (${about})`).join(', ')}.
+- Give a grade with its meaning, such as "Grade C (Fair)".`;
+
 const TEACHER_INSTRUCTIONS = `You write the reports for a teacher training assessment programme run in Indian schools.
 
 You are given one teacher's results in one test: the sections they sat, with marks, percentage and grade in each, and for every question what was asked, the marks, the examiner's feedback, a short extract of what the teacher wrote and, where marks were lost, what a full-marks answer contains. Questions left blank are marked as such. The programme has up to three sections; teachers may sit only some of them, possibly on different dates.
 
 A section may be marked leniently: the questions the teacher did not attempt are then left out of both the marks and the total, so its percentage covers only the questions attempted. When you give such a section's marks or percentage, say that they cover the questions attempted, and still mention the questions left blank.
 
-Write two reports from the same results, in English. Keep both brief: plain, everyday words and short sentences that a busy principal or teacher can read in a minute, with no jargon and no filler. Say each thing once; the marks, grades and every question's answers are shown beside your text in tables and charts, so do not repeat them in words. Back each point with the evidence, citing questions and marks, such as "Section A questions 2 and 3 scored 3 out of 8". Write about the teacher by name or as "the teacher", never as "he" or "she". Refer to sections exactly as given, such as "Section A".
+Write two reports from the same results, in English. Keep both brief: short sentences that a busy principal or teacher can read in a minute, with no filler. Say each thing once; the marks, grades and every question's answers are shown beside your text in tables and charts, so do not repeat them in words.
+${PLAIN_WORDS}
+Write about the teacher by name or as "the teacher", never as "he" or "she".
 
 1. teacher_report, addressed to the teacher as "you". It helps the teacher get better and never criticises.
 - summary: two short sentences: thank the teacher for taking the test, then the main strength and the main next step.
@@ -149,14 +163,14 @@ Write two reports from the same results, in English. Keep both brief: plain, eve
 - Do not rank the teacher, compare them with others, or mention sections they did not sit.
 
 2. management_report, for the principal and management. Factual and neutral.
-- summary: one or two short sentences on what the results show, naming the sections sat, for example "The teacher did well in Section A and needs support in Section B. The classroom examples are practical, but several answers did not say how the idea would be taught." If questions were left blank, say how many. Do not mention training days; they are added after the summary.
+- summary: one or two short sentences on what the results show, naming the sections sat, for example "The teacher did well in Section A (Communication) and needs support in Section B (Subject & Classroom). The classroom examples are practical, but several answers did not say how the idea would be taught." If questions were left blank, say how many. Do not mention training days; they are added after the summary.
 - findings: two to four findings, the most important first; the report numbers them. Each has:
   - title: two to five words, such as "Checking understanding";
-  - summary: one sentence for the first page, of no more than 25 words, citing questions and marks;
+  - summary: one sentence for the first page, of no more than 30 words, saying in plain words what the teacher did well or found hard, such as "When asked how to settle a noisy class, the teacher gave a clear routine but did not say how to keep it going.";
   - details: two or three short points from the teacher's answers, for the details page;
   - why_it_matters: one sentence on why it matters for the children or the school;
   - action: one or two sentences on what will be done about it.
-  When questions were left blank, make one finding about them, such as "Questions left blank", listing them.
+  When questions were left blank, make one finding about them, such as "Questions left unanswered", saying how many and what they were about, such as "Four questions on using computers in class were not answered."
 - school_needs: two things the school needs to do, one short sentence each, such as setting aside time for the training, arranging classroom visits by an UpSchool coach, or providing teaching materials.
 - roles: up to two responsibilities the evidence supports, such as mentoring colleagues in a section, each with its evidence. Leave it empty if the results do not support any.
 - support: up to three kinds of support that would help, most useful first.
@@ -337,7 +351,7 @@ async function writeTeacherReports(teacherId, testId, reportId) {
   const plan = trainingPlanFor(sections, framework);
   const raw = await requestJson({
     instructions: TEACHER_INSTRUCTIONS + (plan?.path ? TEACHER_PLAN_INSTRUCTIONS : ''),
-    content: [{ type: 'input_text', text: describeResults(teacher, test, sections) + describeTeacherPlan(plan) }],
+    content: [{ type: 'input_text', text: describeResults(teacher, test, sections) + describeTeacherPlan(plan, framework) }],
     name: 'teacher_reports',
     schema: plan?.path ? withPlan(TEACHER_SCHEMA, TEACHER_PLAN_SCHEMA) : TEACHER_SCHEMA,
     task: 'write this report',
@@ -365,6 +379,8 @@ async function writeTeacherReports(teacherId, testId, reportId) {
     // Written with each section's Written Expression, and why it is missing
     // for any sitting that could not be checked.
     writing: true,
+    // Written in plain words that make sense without the question paper.
+    plain: true,
     writing_problems: writingProblems,
     test_name: test.name,
     stage: stageOf(teacher.grade),
@@ -426,6 +442,46 @@ export function isStale(report, sections) {
 export const lacksAnswers = (report) => report?.kind === 'teacher' && Boolean(report.content) && !report.content.answers;
 // Teacher reports written before they showed Written Expression.
 export const lacksWritingScore = (report) => report?.kind === 'teacher' && Boolean(report.content) && !report.content.writing;
+// Reports written before OpenAI was asked for plain words that make sense
+// without the question paper.
+export const lacksPlainWords = (report) => Boolean(report?.content) && !report.content.plain;
+
+// A written report with today's names for grades, needs, the potential
+// identifier and the training blocks, which are worked out here rather than
+// written by OpenAI, so a report written under the earlier names shows the
+// new ones without a rebuild.
+export function withCurrentNames(content) {
+  if (!content) return content;
+  const relabel = (sections) => (sections ?? []).map((s) => ({ ...s, grade_label: s.grade ? gradeLabel(s.grade) ?? s.grade_label : s.grade_label }));
+  const out = { ...content };
+  if (Array.isArray(content.sections)) {
+    out.sections = relabel(content.sections);
+    if (content.potential) out.potential = potentialFor(out.sections);
+  }
+  if (Array.isArray(content.teachers)) {
+    out.teachers = content.teachers.map((t) => {
+      const sections = relabel(t.sections);
+      return { ...t, sections, potential: t.potential ? potentialFor(sections) : t.potential };
+    });
+  }
+  if (Array.isArray(content.stage_stats)) {
+    out.stage_stats = content.stage_stats.map((stage) => (stage.key === null ? { ...stage, name: NO_STAGE.name } : stage));
+  }
+  if (content.training?.blocks) {
+    out.training = {
+      ...content.training,
+      blocks: content.training.blocks.map((b) => ({
+        ...b,
+        title: BLOCK_TITLES[b.kind] ?? b.title,
+        about: b.key ? SECTION_SHORT[b.key] ?? null : null,
+        grade_label: b.grade ? gradeLabel(b.grade) ?? b.grade_label : b.grade_label,
+      })),
+    };
+  }
+  return out;
+}
+
+const gradeLabel = (grade) => GRADES.find((g) => g.grade === grade)?.label ?? null;
 
 // Whether growth paths were added or changed after the report was written,
 // so its training plan is out of date.
@@ -436,7 +492,7 @@ function pathsChanged(report, framework) {
 // Whether a report needs rebuilding, for any of those reasons: the board, the
 // dashboard and the profile page go by this.
 export function isOutOfDate(report, sections, framework = getFramework()) {
-  return isOldLayout(report) || lacksAnswers(report) || lacksWritingScore(report) || pathsChanged(report, framework) || isStale(report, sections);
+  return isOldLayout(report) || lacksAnswers(report) || lacksWritingScore(report) || lacksPlainWords(report) || pathsChanged(report, framework) || isStale(report, sections);
 }
 
 // Builds every teacher report in a test that is missing, failed or out of
@@ -478,7 +534,7 @@ function groupFigures(members, keys) {
 // The school's stages, youngest first, each with its teachers' figures. Only
 // stages with assessed teachers are listed; teachers whose classes name no
 // stage come last.
-const NO_STAGE = { key: null, name: 'Stage Not Given', classes: '' };
+const NO_STAGE = { key: null, name: 'Classes Not Given', classes: '' };
 
 function stageStats(assessed, keys) {
   return [...STAGES, NO_STAGE]
@@ -544,10 +600,11 @@ const SCHOOL_INSTRUCTIONS = `You write the school report for a teacher training 
 
 You are given every assessed teacher's results in one test, with figures by section, by need and by school stage (Pre-Primary, Primary, Middle School, High School and PUC), a rule-based potential identifier for each teacher and, where available, the main findings from their own reports. Teachers may have sat only some sections, so only compare teachers within a section. Sections marked leniently leave out the questions the teacher did not attempt, so their percentages cover only the questions attempted.
 
-Write in English that is brief: plain, everyday words and short sentences that a busy principal can read in a minute, with no jargon and no filler. The report shows the figures in charts and tables beside your text, so give only the figures that make each point. Base every statement on the figures given and cite them, such as "In Primary, 5 of 9 teachers are at Grade C in Section C". Be factual and neutral. Write about teachers by name, never as "he" or "she". Refer to sections exactly as given, such as "Section A".
+Write in English that is brief: short sentences that a busy principal can read in a minute, with no filler. The report shows the figures in charts and tables beside your text, so give only the figures that make each point. Base every statement on the figures given, such as "In Primary, 5 of 9 teachers need some support in Section C (Computer Skills)". Be factual and neutral. Write about teachers by name, never as "he" or "she".
+${PLAIN_WORDS}
 - summary: two short sentences: how many teachers took the test, how many need support, and the main pattern by stage or section.
-- findings: three or four findings, the most important first; the report numbers them. Each has a title of three to eight words that states the finding, such as "Primary teachers are strong in Section C", and a detail of one sentence with the figures. Look for patterns by stage and by section, and name teachers who are strong in a section and could help others.
-- actions: three or four things UpSchool's team and the school will do, the most important first, each one sentence, such as "Hold workshops on Section B for the 6 teachers at Grade D, with Middle School and High School teachers in separate groups." Give each a timing such as "Weeks 1–2", or "" when there is none. Pair teachers strong in a section with those who need help in it, in the same stage where possible.
+- findings: three or four findings, the most important first; the report numbers them. Each has a title of three to eight words that states the finding, such as "Primary teachers are good with computers", and a detail of one sentence with the figures. Look for patterns by stage and by section, and name teachers who are strong in a section and could help others.
+- actions: three or four things UpSchool's team and the school will do, the most important first, each one sentence, such as "Hold workshops on Section B (Subject & Classroom) for the 6 teachers at Grade D (Needs Improvement), with Middle School and High School teachers in separate groups." Give each a timing such as "Weeks 1–2", or "" when there is none. Pair teachers strong in a section with those who need help in it, in the same stage where possible.
 - school_needs: two or three things the school needs to do, one short sentence each, such as fixing the training calendar, freeing time for teachers who mentor colleagues, or arranging classroom visits by UpSchool coaches.
 - Do not rank teachers against each other beyond what the figures show, and do not speculate about personal circumstances.`;
 
@@ -640,6 +697,7 @@ async function writeSchoolReport(schoolId, testId, reportId) {
 
   const content = {
     layout: LAYOUT,
+    plain: true,
     test_name: test.name,
     ...overview,
     summary: text(raw.summary),
@@ -668,3 +726,6 @@ export function queueSchoolReport(schoolId, testId) {
 export function schoolReportIsStale(report, overview) {
   return Boolean(report?.basis) && report.basis !== schoolBasis(overview);
 }
+
+// Whether the school report needs rebuilding, for the zip.
+export const schoolReportIsOutOfDate = (report, overview) => lacksPlainWords(report) || schoolReportIsStale(report, overview);
