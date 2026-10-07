@@ -6,6 +6,7 @@ import { buildTeacherTemplate, parseTeacherWorkbook } from '../excel.js';
 import { GRADES, potentialFor, teacherResults, testFor } from '../results.js';
 import { findReport, isOldLayout, isOutOfDate, lacksAnswers } from '../reports.js';
 import { PAPER_SECTIONS, allPapers, presentPaper, sittingPapers, suggestPapers, teacherProfile } from '../papers.js';
+import { currentAssessmentFor } from '../sittings.js';
 
 const router = express.Router();
 
@@ -94,40 +95,6 @@ function withResults(row, testId, section, library) {
     sections: sections.map(({ key, name, percent, grade, grade_label, marking, writing }) => ({ key, name, percent, grade, grade_label, marking, writing })),
     report_status: report ? (report.status === 'done' && isOutOfDate(report, sections) ? 'stale' : report.status) : 'none',
   };
-}
-
-// The most recently created sitting in the test for the full paper or the
-// section, not the latest by date: the date is editable, so a backdated entry
-// must not become the current sitting.
-const selectLatestAssessment = db.prepare(
-  'SELECT * FROM assessments WHERE teacher_id = ? AND test_id = ? AND section IS ? ORDER BY id DESC LIMIT 1'
-);
-
-const insertAssessment = db.prepare(
-  `INSERT INTO assessments (school_id, teacher_id, test_id, section, title, assessment_date, subject, status)
-   VALUES (@school_id, @teacher_id, @test_id, @section, @title, date('now'), @subject, 'draft')`
-);
-
-const selectAssessmentById = db.prepare('SELECT * FROM assessments WHERE id = ?');
-
-// The board row acts on the teacher's current sitting in the test, for the
-// full paper or for the one section the board is working on. One that has
-// already been evaluated is left alone: uploading again opens a new sitting
-// in the same test, which is how a teacher sits Section A on one date and
-// Sections B and C on another. Their results are added together.
-function currentAssessmentFor(teacher, test, section = null) {
-  const latest = selectLatestAssessment.get(teacher.id, test.id, section);
-  if (latest && latest.status !== 'evaluated') return latest;
-
-  const info = insertAssessment.run({
-    school_id: teacher.school_id,
-    teacher_id: teacher.id,
-    test_id: test.id,
-    section,
-    title: `${test.name} - ${teacher.name}${section ? ` - Section ${section}` : ''}`,
-    subject: String(teacher.subjects ?? '').split(',')[0].trim(),
-  });
-  return selectAssessmentById.get(info.lastInsertRowid);
 }
 
 // GET /api/teachers/roster?school_id=1&test_id=2&section=B (no section: the

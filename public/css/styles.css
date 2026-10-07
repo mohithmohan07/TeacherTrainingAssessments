@@ -327,16 +327,32 @@ td.right, th.right { text-align: right; white-space: nowrap; }
 
 /* lightbox */
 
+/* Pictures of pages, one at a time. A bar on top says whose they are; each page
+   fits the screen until zoomed, and the page underneath does not scroll. */
 .lightbox {
-  position: fixed; inset: 0;
-  background: rgba(10, 18, 26, 0.86);
-  display: grid; place-items: center;
-  padding: 28px;
-  z-index: 60;
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; flex-direction: column;
+  background: rgba(10, 18, 26, 0.92); color: #fff;
 }
-
-.lightbox img { max-width: 100%; max-height: 100%; border-radius: 8px; }
-.lightbox .close { position: absolute; top: 18px; right: 22px; color: #fff; background: none; border: none; font-size: 28px; cursor: pointer; }
+html.lightbox-open { overflow: hidden; }
+.lightbox-bar {
+  flex: none; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px;
+  padding: 10px 16px; background: #0b141c;
+}
+.lightbox-title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 12px; min-width: 0; }
+.lightbox-title strong { font-size: 15px; }
+.lightbox-count { font-size: 13px; color: #b8c4d0; }
+.lightbox-tools { display: flex; flex-wrap: wrap; gap: 8px; }
+.lightbox-body { flex: 1; min-height: 0; display: flex; }
+.lightbox-stage { flex: 1; min-width: 0; overflow: auto; display: flex; padding: 14px; }
+.lightbox-stage img {
+  margin: auto; min-width: 0; min-height: 0; max-width: 100%; max-height: 100%;
+  object-fit: contain; background: #fff; border-radius: 6px; cursor: zoom-in;
+}
+.lightbox.zoomed .lightbox-stage img { max-height: none; cursor: zoom-out; }
+.lightbox-nav { flex: none; width: 52px; border: none; background: none; color: #fff; font-size: 46px; line-height: 1; cursor: pointer; }
+.lightbox-nav:disabled { opacity: 0.25; cursor: default; }
+.lightbox-nav[hidden] { display: none; }
 
 /* toasts */
 
@@ -937,3 +953,19 @@ details.paper-form-card > summary { cursor: pointer; list-style-position: inside
   .picker-slots { border-right: none; border-bottom: 1px solid var(--border); }
   .picker-pdf { min-height: 50vh; }
 }
+
+/* Moving pages filed under the wrong teacher. */
+.modal.move-pages { width: min(560px, 100%); }
+.move-pages-body { display: grid; gap: 14px; padding: 16px 20px; overflow-y: auto; }
+.move-pages-body .hint { margin: 0; }
+
+/* Shown while the scanner works: whose paper the pages will be filed under. */
+.modal.scan-progress { width: min(480px, 100%); }
+.modal.scan-progress:focus { outline: none; }
+.scan-progress-body { display: grid; gap: 10px; padding: 16px 20px; }
+.scan-progress-body .marking-state { margin-top: 0; }
+.scan-progress-body .hint { margin: 0; }
+
+/* The row that has just had pages filed, so it is plain where they went. */
+tr.just-filed > td { animation: just-filed 3.5s ease-out; }
+@keyframes just-filed { 0%, 50% { background: var(--ok-soft); } 100% { background: transparent; } }

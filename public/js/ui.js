@@ -96,21 +96,118 @@ export function logoFor(school, large = false) {
 }
 
 export function openLightbox(src, alt) {
-  const close = () => {
-    overlay.remove();
-    document.removeEventListener('keydown', onKey);
+  viewPages({ title: alt ?? '', pages: [{ src, name: alt ?? '' }] });
+}
+
+// Pictures of pages, shown one at a time over the screen. Each page fits the
+// screen; Zoom in (or a click on the page) shows it full width to read, and
+// the arrows or arrow keys go through the pages. Close, Escape, a click beside
+// the page or the browser's Back button closes it, and the screen underneath
+// stays as it was. `pages` is a list of { src, name }. `loadPages` can fetch
+// the full list once the first page is showing, and `action` ({ label, run })
+// adds a button that closes the pictures and runs.
+export function viewPages({ title = '', pages, start = 0, loadPages = null, action = null }) {
+  let list = pages;
+  let index = Math.min(Math.max(start, 0), list.length - 1);
+  let zoomed = false;
+  let open = true;
+
+  const image = h('img', { alt: '' });
+  const counter = h('span', { class: 'lightbox-count' });
+  const zoom = h('button', { class: 'btn btn-sm', type: 'button' });
+  const prev = h('button', { class: 'lightbox-nav', type: 'button', title: 'Previous page', 'aria-label': 'Previous page' }, '‹');
+  const next = h('button', { class: 'lightbox-nav', type: 'button', title: 'Next page', 'aria-label': 'Next page' }, '›');
+  const stage = h('div', { class: 'lightbox-stage' }, image);
+
+  const show = () => {
+    const page = list[index];
+    if (image.getAttribute('src') !== page.src) image.src = page.src;
+    image.alt = page.name || title;
+    counter.textContent = list.length > 1 ? `Page ${index + 1} of ${list.length}` : '';
+    prev.hidden = next.hidden = list.length < 2;
+    prev.disabled = index === 0;
+    next.disabled = index === list.length - 1;
+    overlay.classList.toggle('zoomed', zoomed);
+    zoom.textContent = zoomed ? 'Fit to screen' : 'Zoom in';
   };
+  const go = (step) => {
+    const to = Math.min(Math.max(index + step, 0), list.length - 1);
+    if (to === index) return;
+    index = to;
+    show();
+    stage.scrollTo(0, 0);
+  };
+  const toggleZoom = () => {
+    zoomed = !zoomed;
+    show();
+    stage.scrollTo(0, 0);
+  };
+
+  // Opening adds a step to the browser's history, so Back closes the pictures
+  // rather than leaving the page under them. Closing any other way takes the
+  // step off again; the promise settles once it has.
+  const close = ({ fromHistory = false } = {}) =>
+    new Promise((resolve) => {
+      if (!open) return resolve();
+      open = false;
+      overlay.remove();
+      document.documentElement.classList.remove('lightbox-open');
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('popstate', onHistory);
+      window.removeEventListener('hashchange', onHistory);
+      if (fromHistory || !history.state?.lightbox) return resolve();
+      window.addEventListener('popstate', () => resolve(), { once: true });
+      history.back();
+    });
+  const onHistory = () => close({ fromHistory: true });
   const onKey = (event) => {
     if (event.key === 'Escape') close();
+    else if (event.key === 'ArrowLeft') go(-1);
+    else if (event.key === 'ArrowRight') go(1);
   };
+
+  image.addEventListener('click', toggleZoom);
+  zoom.addEventListener('click', toggleZoom);
+  prev.addEventListener('click', () => go(-1));
+  next.addEventListener('click', () => go(1));
+  stage.addEventListener('click', (event) => {
+    if (event.target === stage) close();
+  });
+
+  const extra = action
+    ? h('button', { class: 'btn btn-sm', type: 'button', onclick: async () => { await close(); action.run(); } }, action.label)
+    : null;
+
   const overlay = h(
     'div',
-    { class: 'lightbox', onclick: (event) => { if (event.target === overlay) close(); } },
-    h('button', { class: 'close', title: 'Close', onclick: close }, '×'),
-    h('img', { src, alt: alt ?? '' })
+    { class: 'lightbox', role: 'dialog', 'aria-modal': 'true', 'aria-label': title || 'Page' },
+    h(
+      'div',
+      { class: 'lightbox-bar' },
+      h('div', { class: 'lightbox-title' }, title ? h('strong', {}, title) : null, counter),
+      h('div', { class: 'lightbox-tools' }, extra, zoom, h('button', { class: 'btn btn-sm', type: 'button', onclick: () => close() }, 'Close ×'))
+    ),
+    h('div', { class: 'lightbox-body' }, prev, stage, next)
   );
+
+  show();
+  history.pushState({ ...history.state, lightbox: true }, '');
+  window.addEventListener('popstate', onHistory);
+  window.addEventListener('hashchange', onHistory);
   document.addEventListener('keydown', onKey);
+  document.documentElement.classList.add('lightbox-open');
   document.body.append(overlay);
+
+  loadPages?.().then(
+    (all) => {
+      if (!open || !all?.length) return;
+      const current = list[index].src;
+      list = all;
+      index = Math.max(0, all.findIndex((page) => page.src === current));
+      show();
+    },
+    () => {} // the page already showing is enough
+  );
 }
 
 export function field(label, control, { span = false, hint } = {}) {

@@ -119,6 +119,16 @@ the first one shows small beside the count, so pages in the wrong column are
 easy to spot: **Swap** on the row (or on the assessment's own page) swaps the
 question paper and the answer paper, and pressing it again swaps them back.
 
+Clicking the small page shows every page of that paper, fitted to the screen,
+under the name of the teacher they are filed under: **Zoom in** (or a click on
+the page) shows a page full width to read, the arrows go through the pages,
+and **Close**, Escape or the browser's Back button closes them. Pages filed
+under the wrong teacher can be moved from there with **Wrong teacher? Move
+these pages**, or with **Move to another teacher** on the assessment's own
+page: pick the teacher, and they go to that teacher's sitting in the same test
+and section, after any pages it already has. A paper that has been marked
+keeps its pages.
+
 ### Scanning straight from the scanner
 
 A web page cannot reach a scanner by itself, so a small helper runs on the
@@ -134,6 +144,8 @@ scanner helper** on the Assessments page).
    may ask whether the site can reach apps on this device; choose Allow.
 3. The row buttons now read **Scan**. Put the pages in the feeder and press
    Scan: every page in the feeder is scanned and filed against that teacher.
+   While the scanner works, a dialog names the teacher the pages will be filed
+   under; if it is the wrong one, press **Stop** and nothing is filed.
    **Both sides** scans both sides of each sheet and drops blank backs.
 
 The helper listens on `127.0.0.1:17645` only, answers only this app's pages,

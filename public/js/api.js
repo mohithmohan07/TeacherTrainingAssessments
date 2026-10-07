@@ -88,6 +88,8 @@ export const assessmentsApi = {
   // Checks the Written Expression of a sitting marked before Evaluate did.
   checkWriting: (id) => api.postJson(`/api/assessments/${id}/writing`, {}),
   swap: (id) => api.postJson(`/api/assessments/${id}/swap`, {}),
+  // Moves pages filed under the wrong teacher to the right one.
+  move: (id, teacherId, kinds) => api.postJson(`/api/assessments/${id}/move`, { teacher_id: teacherId, kinds }),
   setPapers: (id, paperIds) => api.putJson(`/api/assessments/${id}/papers`, { paper_ids: paperIds }),
   remove: (id) => api.del(`/api/assessments/${id}`),
   uploadFiles: (id, formData) => api.postForm(`/api/assessments/${id}/files`, formData),
