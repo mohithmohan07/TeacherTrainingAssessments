@@ -118,6 +118,7 @@ function waitingPanel(data, board) {
   else if (report.status === 'running') reportLine = 'The school report is being written.';
   else if (report.status === 'failed') reportLine = 'The school report could not be written. Open it to try again.';
   else if (report.old_layout) reportLine = 'The school report was written in the earlier layout. Rebuild it for the simpler one.';
+  else if (report.old_words) reportLine = 'The school report was written before reports used plain words. Rebuild it to get them.';
   else if (report.stale) reportLine = 'New marks have come in since the school report was written.';
 
   return h(
@@ -155,7 +156,7 @@ function resultsPanel(data, grades) {
       ? h(
           'div',
           { class: 'dash-potential' },
-          h('h4', {}, 'Potential Identifier'),
+          h('h4', {}, 'Strengths and Potential'),
           potential
             .filter((p) => p.teachers.length)
             .map((p) =>

@@ -9,12 +9,12 @@ export const MARKINGS = [
   {
     key: 'standard',
     label: 'Standard',
-    meaning: 'Every question counts. A question not attempted scores 0 and stays in the total.',
+    meaning: 'Every question counts. A question left blank gets 0 and stays in the total.',
   },
   {
     key: 'lenient',
     label: 'Lenient',
-    meaning: 'Questions not attempted are left out of the marks and the total, so the score covers only what the teacher answered.',
+    meaning: 'Only the questions answered count. Questions left blank are not in the marks or the total, so the score covers only what the teacher answered.',
   },
 ];
 

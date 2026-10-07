@@ -1,7 +1,7 @@
 import express from 'express';
 import db from '../db.js';
 import { GRADES, testFor } from '../results.js';
-import { findReport, isOldLayout, isOutOfDate, schoolOverview, schoolReportIsStale } from '../reports.js';
+import { findReport, isOldLayout, isOutOfDate, lacksPlainWords, schoolOverview, schoolReportIsStale } from '../reports.js';
 
 const router = express.Router();
 
@@ -25,11 +25,11 @@ const selectOpenSittings = db.prepare(`
 `);
 
 const POTENTIAL_LEVELS = [
-  { level: 'mentor', headline: 'Mentor Potential' },
-  { level: 'strong', headline: 'Strong Performer' },
-  { level: 'emerging', headline: 'Strength to Build On' },
-  { level: 'developing', headline: 'Developing Steadily' },
-  { level: 'support', headline: 'Priority for Support' },
+  { level: 'mentor', headline: 'Can Guide Other Teachers' },
+  { level: 'strong', headline: 'Strong in Every Section' },
+  { level: 'emerging', headline: 'Strong in Some Sections' },
+  { level: 'developing', headline: 'Fair in Every Section' },
+  { level: 'support', headline: 'Needs Help First' },
 ];
 
 // One school's picture in one test: what is waiting to be done, and how its
@@ -78,6 +78,7 @@ function schoolSummary(school, test) {
       written_at: schoolReport.written_at,
       stale: schoolReportIsStale(schoolReport, overview),
       old_layout: isOldLayout(schoolReport),
+      old_words: lacksPlainWords(schoolReport),
     },
   };
 }

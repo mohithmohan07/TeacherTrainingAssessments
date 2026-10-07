@@ -70,7 +70,7 @@ function progressCard(tests, grades) {
     h(
       'div',
       { class: 'table-wrap' },
-      h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Test'), keys.map((key) => h('th', {}, key ? `Section ${key}` : 'Paper')), h('th', {}, 'Potential Identifier'))), h('tbody', {}, rows))
+      h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Test'), keys.map((key) => h('th', {}, key ? `Section ${key}` : 'Paper')), h('th', {}, 'Strengths and Potential'))), h('tbody', {}, rows))
     )
   );
 }
@@ -130,7 +130,7 @@ function testCard(teacher, entry) {
         )
       : h('p', { class: 'hint' }, 'Nothing has been evaluated in this test yet.'),
     sections.length ? h('div', { class: 'chips', style: 'margin-top:8px' }, writingChip(sections, { teacherName: teacher.name })) : null,
-    potential ? h('p', {}, h('strong', {}, 'Potential Identifier: '), potentialBadge(potential), ' ', h('span', { class: 'hint' }, `${potential.meaning} ${potential.evidence}`)) : null,
+    potential ? h('p', {}, h('strong', {}, 'Strengths and Potential: '), potentialBadge(potential), ' ', h('span', { class: 'hint' }, `${potential.meaning} ${potential.evidence}`)) : null,
     report?.teacher?.practice_ideas?.length
       ? h('div', {}, h('h3', { class: 'subhead' }, 'Practice Ideas from the Teacher’s Report'), h('ul', {}, report.teacher.practice_ideas.map((idea) => h('li', {}, idea))))
       : null,
