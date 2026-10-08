@@ -19,6 +19,9 @@ export function paperFacts(paper) {
   ].filter(Boolean).join(' · ');
 }
 
+// Matches the stylesheet's width for stacking the dialog.
+const narrow = () => window.matchMedia('(max-width: 760px)').matches;
+
 // The small first-page picture of a paper, or a PDF badge without one.
 export function paperThumb(paper, className = 'paper-thumb') {
   return paper.preview_name
@@ -127,7 +130,7 @@ export async function choosePaper({ teacher, section = '', current = [] }) {
               ? h(
                   'button',
                   { class: 'btn-link picker-show', type: 'button', onclick: () => { previewSection = slot.section; drawSlots(); drawPreview(); } },
-                  previewSection === slot.section ? 'Shown on the right' : 'Show this paper'
+                  previewSection === slot.section ? (narrow() ? 'Shown below' : 'Shown on the right') : 'Show this paper'
                 )
               : null
           );
@@ -142,7 +145,7 @@ export async function choosePaper({ teacher, section = '', current = [] }) {
       const slot = data.slots.find((s) => s.section === previewSection);
       const paper = slot && !coveredBy(slot.section) ? byId.get(choice.get(slot.section)) : null;
       if (!paper) {
-        mount(previewBox, h('div', { class: 'picker-empty' }, 'Choose a paper on the left to see it here.'));
+        mount(previewBox, h('div', { class: 'picker-empty' }, narrow() ? 'Choose a paper above to see it here.' : 'Choose a paper on the left to see it here.'));
         return;
       }
       const reasons = { level: 'level', subject: 'subject', board: 'board' };
@@ -157,7 +160,13 @@ export async function choosePaper({ teacher, section = '', current = [] }) {
         ),
         matched.length ? h('p', { class: 'hint', style: 'margin:0 0 6px' }, `Matches the teacher’s ${matched.join(', ')}.`) : null,
         paper.notes ? h('p', { class: 'notice picker-note' }, paper.notes) : null,
-        h('iframe', { class: 'picker-pdf', src: `${pdfUrl(paper)}#view=FitH`, title: paper.title })
+        // Phone browsers do not show a PDF inside the page, so a phone gets
+        // the first page as a picture, and "Open in a new tab" for the rest.
+        !narrow()
+          ? h('iframe', { class: 'picker-pdf', src: `${pdfUrl(paper)}#view=FitH`, title: paper.title })
+          : paper.preview_name
+            ? h('img', { class: 'picker-page', src: `/uploads/${paper.preview_name}`, alt: `First page of ${paper.title}` })
+            : h('p', { class: 'empty' }, 'Press “Open in a new tab” to see this paper.')
       );
     }
 

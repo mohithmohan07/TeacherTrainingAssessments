@@ -1249,7 +1249,9 @@ function scanGroup(assessment, kind, label, files, refresh) {
     dialog.close();
   });
 
-  const dropzoneLabel = h('span', {}, 'Drop scanned images here, or click to choose files');
+  // On a phone the same file picker can take photos with the camera.
+  const touch = window.matchMedia('(pointer: coarse)').matches;
+  const dropzoneLabel = h('span', {}, touch ? 'Tap to take photos of the pages or choose images' : 'Drop scanned images here, or click to choose files');
 
   const dropzone = h(
     'div',

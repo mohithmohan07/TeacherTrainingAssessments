@@ -80,6 +80,19 @@ a { color: var(--accent); }
 .nav a:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
 .nav a.active { background: rgba(255, 255, 255, 0.16); color: #fff; font-weight: 600; }
 
+.menu-toggle {
+  display: none; align-items: center; gap: 8px;
+  font: inherit; font-size: 14px; font-weight: 600; color: #fff;
+  padding: 8px 12px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.08); cursor: pointer;
+}
+.menu-icon, .menu-icon::before, .menu-icon::after {
+  display: block; width: 16px; height: 2px; border-radius: 1px; background: currentColor; position: relative;
+}
+.menu-icon::before, .menu-icon::after { content: ""; position: absolute; left: 0; }
+.menu-icon::before { top: -5px; }
+.menu-icon::after { top: 5px; }
+
 .sidebar-foot { margin-top: auto; font-size: 12px; color: #93a9bf; }
 .sidebar-foot code { background: rgba(255,255,255,.12); padding: 1px 5px; border-radius: 4px; }
 
@@ -440,8 +453,17 @@ html.lightbox-open { overflow: hidden; }
 /* Screens only: a printed A4 page is narrower than this too. */
 @media screen and (max-width: 860px) {
   .app { grid-template-columns: minmax(0, 1fr); }
-  .sidebar { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 12px 16px; }
-  .nav { flex-direction: row; flex-wrap: wrap; }
+  /* A slim bar on top; the pages fold away behind the Menu button. */
+  .sidebar {
+    position: sticky; top: 0; z-index: 40;
+    flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 0 16px; padding: 10px 16px;
+  }
+  .brand-mark { width: 34px; height: 34px; }
+  .menu-toggle { display: inline-flex; }
+  .nav { display: none; flex-basis: 100%; padding: 8px 0 4px; }
+  .sidebar.menu-open .nav { display: flex; }
+  .nav a { padding: 12px; font-size: 15.5px; }
   .sidebar-foot { display: none; }
   .view { padding: 20px 16px 48px; }
 }
@@ -956,6 +978,7 @@ details.paper-form-card > summary { cursor: pointer; list-style-position: inside
 .picker-note { margin: 0 0 8px; padding: 8px 12px; font-size: 13px; }
 .picker-pdf { flex: 1; width: 100%; min-height: 60vh; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); }
 .picker-empty { margin: auto; color: var(--muted); }
+.picker-page { width: 100%; height: auto; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
 
 @media (max-width: 760px) {
   .picker-body { grid-template-columns: 1fr; overflow-y: auto; }
@@ -978,3 +1001,63 @@ details.paper-form-card > summary { cursor: pointer; list-style-position: inside
 /* The row that has just had pages filed, so it is plain where they went. */
 tr.just-filed > td { animation: just-filed 3.5s ease-out; }
 @keyframes just-filed { 0%, 50% { background: var(--ok-soft); } 100% { background: transparent; } }
+
+/* ---------- phones ---------- */
+
+@media screen and (max-width: 640px) {
+  /* 16px text in fields stops phones zooming in when one is tapped. */
+  input[type="text"], input[type="email"], input[type="date"], input[type="number"], input[type="search"], input[type="password"], select, textarea { font-size: 16px; }
+  input[type="file"] { max-width: 100%; }
+  .test-picker { flex-wrap: wrap; }
+  .test-picker input[type="file"] { flex: 1 1 100%; }
+
+  .page-head { flex-direction: column; gap: 12px; }
+  .page-actions { align-items: center; }
+  .page-head h1 { font-size: 22px; }
+  .detail-head { flex-wrap: wrap; gap: 12px; }
+  .card { padding: 16px; }
+  .btn { padding: 10px 14px; }
+  .btn-sm { padding: 8px 12px; }
+  .form-grid { grid-template-columns: minmax(0, 1fr); }
+  .grid-2 { grid-template-columns: minmax(0, 1fr); }
+  .stat-row { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .stat { padding: 12px 14px; }
+  .stat .value { font-size: 24px; }
+  .toasts { left: 12px; right: 12px; bottom: 12px; }
+  .toast { max-width: none; }
+
+  /* Every row of the app's tables becomes a small card: the first cell is
+     its title, and each other cell carries its column's heading. */
+  .view table.stack-on-phone, .view table.stack-on-phone tbody, .view table.stack-on-phone tr, .view table.stack-on-phone td, .view table.stack-on-phone tfoot { display: block; width: 100%; min-width: 0; }
+  .view table.stack-on-phone thead { display: none; }
+  .view table.stack-on-phone tr { padding: 12px 0; border-bottom: 1px solid var(--border); }
+  .view table.stack-on-phone tbody tr:hover { background: none; }
+  .view table.stack-on-phone td { padding: 4px 0; border: none; text-align: left; white-space: normal; min-width: 0; }
+  .view table.stack-on-phone td:first-child { font-size: 15px; }
+  .view table.stack-on-phone td:not(:first-child)[data-label]::before {
+    content: attr(data-label); display: block; margin-bottom: 2px;
+    font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; color: var(--muted);
+  }
+  .view table.stack-on-phone td:empty { display: none; }
+  .view table.stack-on-phone td.right { padding-top: 8px; }
+  .view table.stack-on-phone td.right > * { justify-content: flex-start; }
+
+  /* Dialogs fill the screen, with their buttons in easy reach. */
+  .modal-backdrop { padding: 0; place-items: end stretch; }
+  .modal, .modal.marking-choice, .modal.move-pages, .modal.scan-progress, .modal.writing-report {
+    width: 100%; max-height: calc(100vh - 24px); max-height: calc(100dvh - 24px); border-radius: var(--radius) var(--radius) 0 0;
+  }
+  .modal-head { padding: 14px 16px 10px; }
+  .modal-foot { padding: 10px 16px; flex-wrap: wrap; }
+  .modal-foot .btn { flex: 1 1 auto; justify-content: center; }
+
+  .lightbox-nav { width: 36px; font-size: 36px; }
+  .lightbox-stage { padding: 8px; }
+
+  .paper-sheet { padding: 20px 16px; }
+}
+
+/* Scanning runs through the helper on the laptop, so a phone does not offer it. */
+@media screen and (max-width: 640px) and (pointer: coarse) {
+  .scanner-panel { display: none; }
+}
