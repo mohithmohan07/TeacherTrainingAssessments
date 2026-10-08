@@ -22,7 +22,7 @@ import { readAnswers } from './reading.js';
 import { OPENAI_IMAGE_TYPES, pageInputs } from './paper-inputs.js';
 import { PAPER_SECTIONS, allPapers, presentPaper, rankPapers, setSittingPapers, teacherProfile } from './papers.js';
 import { attachStoredPages, removeStoredFile } from './scans.js';
-import { currentAssessmentFor } from './sittings.js';
+import { sittingForPaper } from './sittings.js';
 import { MARKINGS, testFor } from './results.js';
 import { startEvaluation } from './evaluate.js';
 
@@ -52,6 +52,13 @@ const setPageSort = db.prepare('UPDATE bulk_pages SET section = @section, questi
 const setPageLanguage = db.prepare('UPDATE bulk_pages SET language = ? WHERE id = ?');
 const setPageSection = db.prepare('UPDATE bulk_pages SET section = ? WHERE id = ? AND item_id = ?');
 const deleteItemRow = db.prepare('DELETE FROM bulk_items WHERE id = ?');
+
+// What pages are sorted into: a section, except that Section B can come
+// more than once, since a teacher sits a Section B paper for each subject
+// they teach. 'B2' and 'B3' are a second and third Section B paper.
+export const GROUPS = ['A', 'B', 'B2', 'B3', 'C'];
+const sectionOf = (group) => (group ? group[0] : null);
+const groupLabel = (group) => (group.length > 1 ? `Section B (paper ${group.slice(1)})` : `Section ${group}`);
 
 const parse = (text, fallback) => {
   try {
@@ -151,12 +158,13 @@ export function chooseTeacher(item, teacherId) {
 
 export function choosePapers(item, papers) {
   const chosen = parse(item.papers, {});
-  for (const key of PAPER_SECTIONS) {
+  for (const key of GROUPS) {
     if (!(key in (papers ?? {}))) continue;
     const id = Number(papers[key]) || null;
+    const section = sectionOf(key);
     if (id) {
       const paper = selectPaper.get(id);
-      if (!paper || !String(paper.sections).split(',').includes(key)) return `That paper has no Section ${key}. Choose a Section ${key} paper.`;
+      if (!paper || !String(paper.sections).split(',').includes(section)) return `That paper has no Section ${section}. Choose a Section ${section} paper.`;
     }
     chosen[key] = id;
   }
@@ -164,10 +172,10 @@ export function choosePapers(item, papers) {
   return null;
 }
 
-// Moves pages between sections, or out of use (section null).
+// Moves pages between sections (or Section B papers), or out of use (null).
 export function choosePageSections(item, pages) {
   for (const { id, section } of pages ?? []) {
-    setPageSection.run(PAPER_SECTIONS.includes(section) ? section : null, Number(id), item.id);
+    setPageSection.run(GROUPS.includes(section) ? section : null, Number(id), item.id);
   }
 }
 
@@ -241,48 +249,49 @@ const SORT_INSTRUCTIONS = `You are helping file a teacher's answers to a teacher
 - Section A: communication skills.
 - Section B: knowledge of the teacher's subject, child psychology and classroom management. Its papers differ by subject, school level, board and language (a Kannada or Hindi teacher's Section B paper is written in Kannada or Hindi).
 - Section C: computer knowledge and digital teaching skills.
-A teacher may have sat one, two or all three sections. Questions are usually numbered across the sections (often Section A Q1 to Q4, Section B Q5 to Q8, Section C Q9 to Q11), but some papers start again at Q1, so the numbers alone are not enough.
+A teacher may have sat one, two or all three sections. A teacher who teaches more than one subject may also have sat more than one Section B paper, one for each subject (for example Mathematics and Science, or Kannada and Hindi), and their answers to each are on separate pages. Questions are usually numbered across the sections (often Section A Q1 to Q4, Section B Q5 to Q8, Section C Q9 to Q11), but some papers start again at Q1, so the numbers alone are not enough.
 
 You are given candidate QUESTION PAPERS from the school's paper library, each with its id, then a CATALOGUE of every other paper in the library, then every page of ONE TEACHER'S ANSWER SHEETS from one PDF, in order. The answer sheets do not say which section or which question paper they answer. Pages a teacher wrote in a language other than English come with a reading of the handwriting in that language; the reading may have mistakes, so check it against the picture.
 
 Work out, by matching the answers against the questions:
-- For every page, the section it answers ("A", "B" or "C"), and the question labels answered on it, as printed on the paper ("5A", "5B", "9"). Use "none" only for a page with no answers at all, such as a blank page or a cover sheet.
-- For every section, whether the teacher sat it, and the id of the question paper they answered. A section with no pages was not sat: give paper_id 0.
+- For every page, the section it answers ("A", "B" or "C"), the id of the question paper it answers, and the question labels answered on it, as printed on the paper ("5A", "5B", "9"). Use section "none" and paper_id 0 only for a page with no answers at all, such as a blank page or a cover sheet.
+- In papers, every question paper the teacher answered: its section, its id, how sure you are and why. Give one entry for Section A and one for Section C if they were sat, and one for each Section B paper: two entries when the teacher answered two subjects' Section B papers. A section with no pages was not sat, so it has no entry.
 
 How to match:
 - Compare what each answer talks about with what each question asks: the situation in a case study, the names of children, subjects, tools and terms. An answer about a phishing email answers the Section C question about it; an answer about calming an anxious child in a maths class answers that Section B question.
 - Handwriting can be hard to read. When a word cannot be read, use the words and lines around it, and the question the previous answer was for, to work out which question comes next. Answers usually follow the order of the questions, and a page that carries on the previous page's answer is in the same section.
 - A teacher may write one section in English and another in Kannada, Hindi or another language. Match each section on its own, and choose the paper in the language its answers are in.
+- Before deciding that a teacher sat two Section B papers, check the answers really belong to two different papers: they answer different subjects' questions (the situations, topics and terms differ), and the question numbers repeat (two answers to Q5, for example). Answers that continue one paper's questions are one paper, even when they run over many pages.
 - Prefer a candidate paper. Choose another paper from the catalogue only when no candidate fits and the catalogue clearly names the right one.
 - Set confidence to "high" when the answers plainly match the paper's questions, "medium" when most do, and "low" when you are guessing. In reason, say briefly in plain English what matched, for example "Answers mention the phishing email and file folders in Q9 and Q10."`;
 
 const SORT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['pages', 'sections'],
+  required: ['pages', 'papers'],
   properties: {
     pages: {
       type: 'array',
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['page', 'section', 'questions'],
+        required: ['page', 'section', 'paper_id', 'questions'],
         properties: {
           page: { type: 'integer' },
           section: { type: 'string', enum: ['A', 'B', 'C', 'none'] },
+          paper_id: { type: 'integer' },
           questions: { type: 'array', items: { type: 'string' } },
         },
       },
     },
-    sections: {
+    papers: {
       type: 'array',
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['section', 'sat', 'paper_id', 'confidence', 'reason'],
+        required: ['section', 'paper_id', 'confidence', 'reason'],
         properties: {
           section: { type: 'string', enum: ['A', 'B', 'C'] },
-          sat: { type: 'boolean' },
           paper_id: { type: 'integer' },
           confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
           reason: { type: 'string' },
@@ -304,6 +313,12 @@ export function candidatePapers(teacher, school, papers) {
     const { ranked } = rankPapers(papers, profile, key);
     const fitting = ranked.filter((r) => r.score > 0);
     for (const { paper } of (fitting.length ? fitting : ranked).slice(0, CANDIDATES_PER_SECTION)) chosen.set(paper.id, paper);
+  }
+  // A teacher of two subjects may have sat Section B for each, so the best
+  // Section B papers for every subject they teach are candidates too.
+  for (const subject of profile.subjects) {
+    const { ranked } = rankPapers(papers, { ...profile, subjects: new Set([subject]) }, 'B');
+    for (const { paper } of ranked.filter((r) => r.reasons.includes('subject')).slice(0, 2)) chosen.set(paper.id, paper);
   }
   return [...chosen.values()];
 }
@@ -459,39 +474,63 @@ async function sortItem(id) {
   saveSort(id, teacher, school, library, pages, sorted, result);
 }
 
-// What the sorting found, checked: page sections as given, and for every
-// section with pages a paper that holds that section, falling back to the
-// library's best fit for the teacher when the one named does not.
+// What the sorting found, checked. Pages go to their section; Section B
+// pages go to a group per paper ('B', 'B2', 'B3', in the order the papers
+// first appear), so a teacher's two Section B papers are filed and marked
+// apart. Every group with pages gets a paper that holds its section, falling
+// back to the library's best fit for the teacher when the one named does not.
 const saveSort = db.transaction((id, teacher, school, library, pages, sorted, result) => {
+  const holds = (paper, section) => paper && String(paper.sections).split(',').includes(section);
   const byNumber = new Map((sorted.pages ?? []).map((p) => [Number(p.page), p]));
-  const used = new Set();
+  const named = new Map((sorted.papers ?? []).map((p) => [Number(p.paper_id), p]));
+  const bGroups = new Map(); // Section B paper id → group
+  const papers = {};
+  let lastB = null;
   pages.forEach((page, i) => {
     const found = byNumber.get(i + 1);
     const section = PAPER_SECTIONS.includes(found?.section) ? found.section : null;
-    if (section) used.add(section);
+    let group = section;
+    if (section === 'B') {
+      const paper = library.find((p) => p.id === Number(found.paper_id));
+      if (holds(paper, 'B') && !bGroups.has(paper.id) && bGroups.size < 3) {
+        bGroups.set(paper.id, bGroups.size ? `B${bGroups.size + 1}` : 'B');
+        papers[bGroups.get(paper.id)] = paper.id;
+      }
+      // A page whose paper is not clear stays with the Section B paper before it.
+      group = (holds(paper, 'B') && bGroups.get(paper.id)) || lastB || 'B';
+      lastB = group;
+    } else if (section) {
+      const paper = library.find((p) => p.id === Number(found.paper_id));
+      if (!papers[section] && holds(paper, section)) papers[section] = paper.id;
+    }
+    page.group = group;
     setPageSort.run({
       id: page.id,
-      section,
+      section: group,
       questions: (found?.questions ?? []).map((q) => String(q).trim()).filter(Boolean).join(', '),
     });
   });
 
   const profile = teacherProfile(teacher, school);
-  const papers = {};
-  for (const key of PAPER_SECTIONS) {
-    const said = (sorted.sections ?? []).find((s) => s.section === key);
-    if (!used.has(key)) {
-      papers[key] = null;
+  for (const group of GROUPS) {
+    const section = sectionOf(group);
+    if (!pages.some((page) => page.group === group)) {
+      delete papers[group];
       continue;
     }
-    const named = said?.paper_id ? library.find((p) => p.id === Number(said.paper_id)) : null;
-    const fits = named && String(named.sections).split(',').includes(key);
-    const fallback = fits ? null : rankPapers(library, profile, key).suggested;
-    papers[key] = fits ? named.id : fallback?.id ?? null;
-    result.sections[key] = {
-      confidence: fits ? (['high', 'medium', 'low'].includes(said.confidence) ? said.confidence : 'low') : 'low',
+    // The paper named for the section, when the pages named none.
+    if (!papers[group]) {
+      const said = (sorted.papers ?? []).find((p) => p.section === section && holds(library.find((x) => x.id === Number(p.paper_id)), section));
+      if (said) papers[group] = Number(said.paper_id);
+    }
+    const fits = Boolean(papers[group]);
+    const fallback = fits ? null : rankPapers(library, profile, section).suggested;
+    if (!fits) papers[group] = fallback?.id ?? null;
+    const said = fits ? named.get(papers[group]) : null;
+    result.sections[group] = {
+      confidence: fits ? (['high', 'medium', 'low'].includes(said?.confidence) ? said.confidence : 'medium') : 'low',
       reason: fits
-        ? String(said.reason ?? '').trim()
+        ? String(said?.reason ?? '').trim()
         : fallback
           ? 'The answers did not clearly match a paper, so this is the library’s best fit for the teacher. Check it.'
           : 'The answers did not clearly match a paper. Choose it.',
@@ -504,10 +543,8 @@ const saveSort = db.transaction((id, teacher, school, library, pages, sorted, re
 
 /* ------------------------------------------------------------ presenting */
 
-const selectSitting = db.prepare(
-  `SELECT a.*, (SELECT COUNT(*) FROM assessment_files f WHERE f.assessment_id = a.id AND f.kind = 'response') AS response_count
-     FROM assessments a WHERE a.teacher_id = ? AND a.test_id = ? AND a.section IS ? ORDER BY a.id DESC LIMIT 1`
-);
+const countResponse = db.prepare("SELECT COUNT(*) AS n FROM assessment_files WHERE assessment_id = ? AND kind = 'response'");
+const selectTest = db.prepare('SELECT * FROM tests WHERE id = ?');
 
 // One PDF as the review screen shows it: its teacher, its pages, the paper
 // for each section, and what stops it being filed or is worth knowing first.
@@ -516,12 +553,19 @@ export function presentItem(item, others = []) {
   const result = parse(item.result, null);
   const chosen = parse(item.papers, {});
   const teacher = item.teacher_id ? selectTeacher.get(item.teacher_id) : null;
-  const sections = PAPER_SECTIONS.map((key) => {
+  const test = selectTest.get(item.test_id);
+  // A second or third Section B paper shows only once pages are put in it.
+  const groups = GROUPS.filter((key) => key.length === 1 || pages.some((p) => p.section === key));
+  const sections = groups.map((key) => {
     const count = pages.filter((p) => p.section === key).length;
     const paper = chosen[key] ? selectPaper.get(chosen[key]) : null;
-    const sitting = teacher && count ? selectSitting.get(teacher.id, item.test_id, key) : null;
+    const found = teacher && count ? sittingForPaper(teacher, test, sectionOf(key), paper?.id ?? null, { create: false }) : null;
+    const sitting = found ? { ...found, response_count: countResponse.get(found.id).n } : null;
     return {
       key,
+      section: sectionOf(key),
+      // With two Section B papers, each is named by its subject.
+      label: key[0] === 'B' && groups.filter((g) => g[0] === 'B').length > 1 && paper?.subject ? `Section B (${paper.subject})` : groupLabel(key),
       pages: count,
       paper: paper ? presentPaper(paper) : null,
       confidence: result?.sections?.[key]?.confidence ?? null,
@@ -546,9 +590,11 @@ export function presentItem(item, others = []) {
   if (!teacher) problems.push('Choose the teacher.');
   if (!pages.some((p) => p.section)) problems.push(sorting ? '' : 'Put at least one page in Section A, B or C.');
   for (const s of sections) {
-    if (s.pages && !s.paper) problems.push(`Choose the Section ${s.key} question paper.`);
-    if (s.existing === 'marking') problems.push(`${teacher.name}’s Section ${s.key} is being marked. Wait for it to finish.`);
+    if (s.pages && !s.paper) problems.push(`Choose the ${s.label} question paper.`);
+    if (s.existing === 'marking') problems.push(`${teacher.name}’s ${s.label} is being marked. Wait for it to finish.`);
   }
+  const bPapers = sections.filter((s) => s.section === 'B' && s.pages && s.paper).map((s) => s.paper.id);
+  if (new Set(bPapers).size < bPapers.length) problems.push('Two Section B groups have the same question paper. Move their pages into one, or choose the other subject’s paper.');
 
   const notes = [];
   if (result?.name_written && item.matched_by === 'file' && result.sheet_teacher_id && result.sheet_teacher_id !== item.teacher_id) {
@@ -558,8 +604,8 @@ export function presentItem(item, others = []) {
     notes.push(`Another PDF here is also for ${teacher.name}. Both are filed under them if you keep both.`);
   }
   for (const s of sections) {
-    if (s.existing === 'has_pages') notes.push(`${teacher.name} already has ${pagesOf(s.existing_pages)} of Section ${s.key} answers. These go after them.`);
-    if (s.existing === 'marked') notes.push(`${teacher.name}’s Section ${s.key} is already marked. These pages start a new Section ${s.key} sitting in this test.`);
+    if (s.existing === 'has_pages') notes.push(`${teacher.name} already has ${pagesOf(s.existing_pages)} of ${s.label} answers${s.section === 'B' && s.paper ? ` for ${s.paper.title}` : ''}. These go after them.`);
+    if (s.existing === 'marked') notes.push(`${teacher.name}’s ${s.label}${s.section === 'B' && s.paper ? ` (${s.paper.title})` : ''} is already marked. These pages start a new sitting for it in this test, and its newer marks replace the old.`);
   }
   notes.push(...(result?.notes ?? []));
 
@@ -619,22 +665,24 @@ const fileItem = (item, test) => {
   const unused = pages.filter((p) => !p.section);
   const sittings = db.transaction(() => {
     const done = [];
-    for (const key of PAPER_SECTIONS) {
+    for (const key of GROUPS) {
       const mine = pages.filter((p) => p.section === key);
       if (!mine.length) continue;
-      const sitting = currentAssessmentFor(teacher, test, key);
+      const section = sectionOf(key);
+      const sitting = sittingForPaper(teacher, test, section, chosen[key]);
       attachStoredPages(
         sitting.id,
         'response',
         mine.map((page, i) => ({
           stored_name: page.stored_name,
-          original_name: `${teacher.name} - answer paper - Section ${key} - p${i + 1}.jpg`,
+          original_name: `${teacher.name} - answer paper - Section ${section} - p${i + 1}.jpg`,
           mime_type: page.mime_type,
           size_bytes: page.size_bytes,
         }))
       );
       setSittingPapers(sitting.id, [chosen[key]]);
-      done.push({ teacher: { id: teacher.id, name: teacher.name }, section: key, pages: mine.length, assessment_id: sitting.id });
+      const subject = section === 'B' ? selectPaper.get(chosen[key])?.subject ?? '' : '';
+      done.push({ teacher: { id: teacher.id, name: teacher.name }, section, subject, pages: mine.length, assessment_id: sitting.id });
     }
     // The pages now belong to the sittings, so only the rows go.
     deleteItemRow.run(item.id);

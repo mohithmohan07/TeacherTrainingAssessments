@@ -1038,3 +1038,4 @@ tr.just-filed > td { animation: just-filed 3.5s ease-out; }
 .bulk-preview-scroll img { display: block; width: 100%; border: 1px solid var(--border); border-radius: 6px; }
 .bulk-preview-scroll .marking-state { margin-top: 0; }
 @media (max-width: 860px) { .bulk-preview-scroll { max-height: 70vh; } }
+.bulk-page.section-B2, .bulk-page.section-B3 { border-top-color: #8a5a9e; }

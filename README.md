@@ -170,7 +170,12 @@ are, which sections they cover or which paper was sat; each one is sorted:
    that fit the teacher (their level, subject and board), using what each
    answer talks about, the names and terms in it and the order of the
    questions, to say which section each page answers and which paper each
-   section was sat on. A section with no pages was not sat.
+   section was sat on. A section with no pages was not sat. A teacher who
+   teaches two subjects may have sat a Section B paper for each: their
+   answers are split by paper ("Section B, paper 2" on the review screen),
+   and each paper is filed and marked against its own question paper. The
+   teacher's results add the papers' marks into one Section B grade, and the
+   reports name the subjects it covers.
 
 Nothing is filed until it is checked. Each PDF shows its teacher, its pages
 coloured by section and the question paper chosen for each section, all of

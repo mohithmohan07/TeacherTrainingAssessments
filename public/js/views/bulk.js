@@ -10,7 +10,17 @@ import { loadPdfjs, pagesOf } from '../evidence.js';
 import { paperFacts } from '../paper-picker.js';
 import { chooseMarking } from '../marking-choice.js';
 
-const SECTIONS = ['A', 'B', 'C'];
+// Where a page can go. A teacher who teaches two subjects may have sat a
+// Section B paper for each, so Section B can hold a second and third paper.
+const PLACES = [
+  { value: 'A', label: 'Section A' },
+  { value: 'B', label: 'Section B' },
+  { value: 'B2', label: 'Section B, paper 2' },
+  { value: 'B3', label: 'Section B, paper 3' },
+  { value: 'C', label: 'Section C' },
+  { value: '', label: 'Not used' },
+];
+const placesFor = (item) => PLACES.filter((p) => p.value !== 'B3' || item.pages.some((page) => page.section === 'B2' || page.section === 'B3'));
 const pageCount = (n) => `${n} page${n === 1 ? '' : 's'}`;
 
 /* ------------------------------------------------------ PDFs to pictures */
@@ -366,7 +376,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
         teacherSelect,
         h('small', { class: 'hint' }, [how, languages].filter(Boolean).join(' '))
       ),
-      h('div', { class: 'bulk-sections' }, SECTIONS.map((key) => sectionBox(item, key, sorting))),
+      h('div', { class: 'bulk-sections' }, item.sections.map((section) => sectionBox(item, section, sorting))),
       pagesStrip(item),
       item.problems.length || item.notes.length
         ? h(
@@ -379,14 +389,14 @@ export async function renderBulk(root, query = new URLSearchParams()) {
     );
   }
 
-  function sectionBox(item, key, sorting) {
-    const section = item.sections.find((s) => s.key === key);
+  function sectionBox(item, section, sorting) {
+    const { key, label } = section;
     const pages = item.pages.filter((p) => p.section === key);
     const questions = [...new Set(pages.flatMap((p) => (p.questions ? p.questions.split(', ') : [])))];
-    const options = library.papers.filter((p) => p.sections.includes(key));
+    const options = library.papers.filter((p) => p.sections.includes(section.section));
     const paperSelect = h(
       'select',
-      { 'aria-label': `Section ${key} question paper`, disabled: !pages.length },
+      { 'aria-label': `${label} question paper`, disabled: !pages.length },
       h('option', { value: '' }, pages.length ? 'Choose the question paper' : 'Not sat'),
       options.map((p) => h('option', { value: String(p.id) }, p.title))
     );
@@ -400,7 +410,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
       h(
         'div',
         { class: 'bulk-section-head' },
-        h('strong', {}, `Section ${key}`),
+        h('strong', {}, label),
         pages.length && confidence ? h('span', { class: `badge confidence-${section.confidence}` }, confidence) : null
       ),
       h(
@@ -414,7 +424,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
       section.paper && pages.length ? h('small', { class: 'hint' }, paperFacts(section.paper)) : null,
       section.reason && pages.length ? h('small', { class: 'bulk-reason' }, section.reason) : null,
       pages.length && section.paper
-        ? h('button', { class: 'btn-link', type: 'button', onclick: () => preview(item, key) }, `Preview Section ${key}`)
+        ? h('button', { class: 'btn-link', type: 'button', onclick: () => preview(item, key) }, `Preview ${label}`)
         : null
     );
   }
@@ -426,7 +436,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
       item.pages.map((page, i) => {
         const pick = select(
           `page-${page.id}`,
-          [...SECTIONS.map((key) => ({ value: key, label: `Section ${key}` })), { value: '', label: 'Not used' }],
+          placesFor(item),
           { value: page.section ?? '', id: `bulk-page-${page.id}` }
         );
         pick.addEventListener('change', () => change(item, { pages: [{ id: page.id, section: pick.value || null }] }));
@@ -452,7 +462,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
   // A section's question paper beside the teacher's answers to it. Pages can
   // be moved to another section from here.
   function preview(item, start) {
-    let current = start ?? SECTIONS.find((key) => item.pages.some((p) => p.section === key));
+    let current = start ?? item.sections.find((s) => s.pages)?.key ?? 'A';
     let shown = item;
     const tabs = h('div', { class: 'segmented', role: 'group', 'aria-label': 'Section' });
     const body = h('div', { class: 'bulk-preview-body' });
@@ -479,17 +489,17 @@ export async function renderBulk(root, query = new URLSearchParams()) {
     function draw() {
       mount(
         tabs,
-        SECTIONS.map((key) => {
+        shown.sections.map(({ key, label }) => {
           const count = shown.pages.filter((p) => p.section === key).length;
           return h(
             'button',
             { type: 'button', class: key === current ? 'active' : '', 'aria-pressed': String(key === current), onclick: () => { current = key; draw(); } },
-            `Section ${key}${count ? ` (${count})` : ' · not sat'}`
+            `${label}${count ? ` (${count})` : ' · not sat'}`
           );
         })
       );
-      const section = shown.sections.find((s) => s.key === current);
-      const pages = shown.pages.filter((p) => p.section === current);
+      const section = shown.sections.find((s) => s.key === current) ?? shown.sections[0];
+      const pages = shown.pages.filter((p) => p.section === section.key);
       mount(
         body,
         h(
@@ -500,7 +510,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
                 h('div', { class: 'hint' }, h('strong', {}, section.paper.title), ` · ${paperFacts(section.paper)}`),
                 paperPages(section.paper),
               ]
-            : h('div', { class: 'picker-empty' }, pages.length ? `Choose the Section ${current} question paper on the PDF’s card.` : `No pages answer Section ${current}, so it was not sat.`)
+            : h('div', { class: 'picker-empty' }, pages.length ? `Choose the ${section.label} question paper on the PDF’s card.` : `No pages answer ${section.label}, so it was not sat.`)
         ),
         h(
           'div',
@@ -510,7 +520,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
                 const n = shown.pages.indexOf(page) + 1;
                 const pick = select(
                   `preview-page-${page.id}`,
-                  [...SECTIONS.map((key) => ({ value: key, label: `Section ${key}` })), { value: '', label: 'Not used' }],
+                  placesFor(shown),
                   { value: page.section ?? '', id: `preview-page-${page.id}` }
                 );
                 pick.addEventListener('change', async () => {
@@ -615,7 +625,7 @@ function filedCard(filed, boardLink, marks, evaluateAll) {
             const mark = stateOf(row.assessment_id);
             return [
               i ? ', ' : '',
-              h('a', { href: `#/assessments/${row.assessment_id}` }, `Section ${row.section}`),
+              h('a', { href: `#/assessments/${row.assessment_id}` }, `Section ${row.section}${row.subject && row.section === 'B' ? ` (${row.subject})` : ''}`),
               ` (${pageCount(row.pages)}${mark && label[mark.state] ? `, ${label[mark.state]}` : ''})`,
             ];
           })
