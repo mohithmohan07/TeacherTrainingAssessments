@@ -1030,7 +1030,7 @@ tr.just-filed > td { animation: just-filed 3.5s ease-out; }
 .badge.confidence-medium { background: var(--accent-soft); color: var(--accent); }
 .badge.confidence-low { background: var(--warn-soft); color: var(--warn); }
 .bulk-pages { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 10px; margin-top: 14px; }
-.bulk-page { display: grid; gap: 4px; padding: 6px; border: 1px solid var(--border); border-radius: 8px; border-top-width: 4px; font-size: 12px; }
+.bulk-page { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; padding: 6px; border: 1px solid var(--border); border-radius: 8px; border-top-width: 4px; font-size: 12px; }
 .bulk-page.section-A { border-top-color: #4a7bb0; }
 .bulk-page.section-B { border-top-color: #b07a2a; }
 .bulk-page.section-C { border-top-color: #3f8f6a; }
@@ -1111,6 +1111,9 @@ tr.just-filed > td { animation: just-filed 3.5s ease-out; }
   .modal, .modal.marking-choice, .modal.move-pages, .modal.scan-progress, .modal.writing-report {
     width: 100%; max-height: calc(100vh - 24px); max-height: calc(100dvh - 24px); border-radius: var(--radius) var(--radius) 0 0;
   }
+  .bulk-preview-tabs { padding: 10px 16px 0; }
+  .bulk-preview-body { padding: 10px 16px 16px; }
+  .bulk-pages { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .modal-head { padding: 14px 16px 10px; }
   .modal-foot { padding: 10px 16px; flex-wrap: wrap; }
   .modal-foot .btn { flex: 1 1 auto; justify-content: center; }
@@ -1119,6 +1122,15 @@ tr.just-filed > td { animation: just-filed 3.5s ease-out; }
   .lightbox-stage { padding: 8px; }
 
   .paper-sheet { padding: 20px 16px; }
+}
+
+/* The side-by-side preview stacks on narrow screens: the question paper,
+   then the answers, all in one scrolling sheet. */
+@media screen and (max-width: 860px) {
+  .modal.bulk-preview { height: calc(100vh - 24px); height: calc(100dvh - 24px); }
+  .bulk-preview-body { display: block; overflow-y: auto; }
+  .bulk-preview-scroll { max-height: 60vh; }
+  .bulk-preview-answers { overflow: visible; margin-top: 14px; padding-right: 0; }
 }
 
 /* Scanning runs through the helper on the laptop, so a phone does not offer it. */

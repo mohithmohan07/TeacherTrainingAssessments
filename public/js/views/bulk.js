@@ -462,6 +462,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
   // A section's question paper beside the teacher's answers to it. Pages can
   // be moved to another section from here.
   function preview(item, start) {
+    const narrow = window.matchMedia('(max-width: 860px)').matches;
     let current = start ?? item.sections.find((s) => s.pages)?.key ?? 'A';
     let shown = item;
     const tabs = h('div', { class: 'segmented', role: 'group', 'aria-label': 'Section' });
@@ -553,7 +554,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
         h(
           'div',
           { class: 'modal-head' },
-          h('div', {}, h('h2', {}, `${item.teacher?.name ?? item.file_name}: question paper and answers`), h('p', { class: 'hint' }, 'The question paper is on the left, the teacher’s answers to it on the right. Move a page that belongs to another section with its “Move to” list.')),
+          h('div', {}, h('h2', {}, `${item.teacher?.name ?? item.file_name}: question paper and answers`), h('p', { class: 'hint' }, `The question paper is ${narrow ? 'first, the teacher’s answers to it below' : 'on the left, the teacher’s answers to it on the right'}. Move a page that belongs to another section with its “Move to” list.`)),
           h('button', { class: 'modal-close', type: 'button', title: 'Close', onclick: close }, '×')
         ),
         h('div', { class: 'bulk-preview-tabs' }, tabs),
