@@ -6,9 +6,12 @@ on your machine.
 
 - **Dashboard** — the screen it opens on. For each school, in its newest test
   (or another picked on the card): who is waiting (nothing uploaded, scanned
-  but not evaluated, marking failed, report not built), how many teachers sat
-  each section and their grades in it, and the potential identifier counts,
-  with names linking to teacher profiles. Grades only, per section. The
+  but not evaluated, marking failed, report not built), how many teachers'
+  papers are marked in each section and their grades in it, and the potential
+  identifier counts, with names linking to teacher profiles. Under each
+  section are the teachers whose papers are still to mark, and those with no
+  answers uploaded for it, so the figures add up to every teacher whose
+  answers are in. Grades only, per section. The
   papers waiting for Evaluate, and those whose marking failed (with why),
   can each be evaluated all at once from there.
 - **Schools & teachers** — add each school with its logo and contact details,
