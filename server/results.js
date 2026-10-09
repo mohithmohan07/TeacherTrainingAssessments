@@ -6,7 +6,7 @@
 import crypto from 'node:crypto';
 import db from './db.js';
 import { levelsFromText } from './papers.js';
-import { levelFor as writingLevelFor, sectionWriting } from './writing.js';
+import { sectionWriting } from './writing.js';
 
 // Grade bands, applied to each section's percentage, named in everyday words.
 export const GRADES = [
@@ -26,7 +26,11 @@ export const SECTION_TITLES = {
 
 // A section's name in every report's text: the programme's title for it, the
 // same for every teacher, so a reader never needs to know what a letter means.
-export const sectionTitleOf = (section) => SECTION_TITLES[section.key] ?? section.title ?? section.name;
+export const sectionTitleOf = (section) => {
+  const title = SECTION_TITLES[section.key] ?? section.title ?? section.name;
+  // One of a teacher's Section B papers in different subjects.
+  return section.subject ? `${title} (${section.subject})` : title;
+};
 
 // What a strong result in each section suggests a teacher could take on.
 const SECTION_ROLES = {
@@ -170,16 +174,16 @@ const selectSectionBPapers = db.prepare(
 
 // Every section the teacher has results for in this test, A to Z. Section B
 // is written for the teacher's subject, and a teacher of two subjects can sit
-// a Section B paper for each: their marks are added into one Section B
-// result, which names the subjects. Otherwise a section marked again (a
-// re-sit of the same paper) replaces the earlier marks.
+// a Section B paper for each: each paper gets its own result and grade,
+// named by its subject, "Section B (Mathematics)". Otherwise a section marked
+// again (a re-sit of the same paper) replaces the earlier marks.
 export function teacherResults(teacherId, testId) {
   const byPart = new Map();
   const sittings = selectSittings.all(teacherId, testId);
   for (const sitting of sittings) {
     // The last marking that finished; a re-mark that failed leaves it in place.
     const result = sitting.ai_result ? JSON.parse(sitting.ai_result) : null;
-    const common = { assessment_id: sitting.id, assessment_ids: [sitting.id], date: sitting.assessment_date, evaluated_at: sitting.ai_evaluated_at };
+    const common = { assessment_id: sitting.id, date: sitting.assessment_date, evaluated_at: sitting.ai_evaluated_at };
     if (result) {
       const bPapers = selectSectionBPapers.all(sitting.id);
       for (const section of sittingSections(result)) {
@@ -187,7 +191,7 @@ export function teacherResults(teacherId, testId) {
         byPart.set(`${section.key}|${part}`, {
           ...section,
           ...common,
-          subjects: section.key === 'B' ? bPapers.map((p) => p.subject).filter(Boolean) : [],
+          subject: section.key === 'B' ? bPapers.map((p) => p.subject).filter(Boolean).join(' and ') : '',
           summary: result.summary,
           strengths: result.strengths,
           areas_to_improve: result.areas_to_improve,
@@ -195,71 +199,19 @@ export function teacherResults(teacherId, testId) {
       }
     } else if (sitting.status === 'evaluated' && sitting.score !== null && Number(sitting.max_score) > 0) {
       // Marked by hand, without a question-by-question breakdown.
-      byPart.set('|', { ...describe({ key: '', awarded: sitting.score, max: Number(sitting.max_score), questions: [] }), ...common, subjects: [] });
+      byPart.set('|', { ...describe({ key: '', awarded: sitting.score, max: Number(sitting.max_score), questions: [] }), ...common, subject: '' });
     }
   }
-  const bySection = new Map();
-  for (const entry of byPart.values()) {
-    if (!bySection.has(entry.key)) bySection.set(entry.key, []);
-    bySection.get(entry.key).push(entry);
-  }
-  return [...bySection.values()]
-    .map((parts) => (parts.length === 1 ? parts[0] : combineParts(parts)))
-    .sort((a, b) => a.key.localeCompare(b.key));
-}
-
-// One Section B result from a teacher's Section B papers in different
-// subjects: the marks and totals added up and graded together, each paper's
-// questions named with its subject, and each paper's own result kept in parts.
-function combineParts(parts) {
-  const sum = (key) => round(parts.reduce((total, p) => total + (Number(p[key]) || 0), 0));
-  const label = (p) => p.subjects.join(' and ');
-  const latest = parts.reduce((a, b) => (String(b.evaluated_at ?? '') > String(a.evaluated_at ?? '') ? b : a));
-  const combined = describe({
-    key: parts[0].key,
-    awarded: sum('awarded'),
-    max: sum('max'),
-    left_out: sum('left_out'),
-    left_out_marks: sum('left_out_marks'),
-    marking: parts.some((p) => p.marking === 'lenient') ? 'lenient' : 'standard',
-    questions: parts.flatMap((p) => p.questions.map((q) => (label(p) ? { ...q, question: `${q.question} (${label(p)})` } : q))),
-  });
-  return {
-    ...combined,
-    writing: combineWriting(parts.map((p) => p.writing)),
-    assessment_id: parts[0].assessment_id,
-    assessment_ids: parts.flatMap((p) => p.assessment_ids),
-    date: latest.date,
-    evaluated_at: latest.evaluated_at,
-    subjects: parts.flatMap((p) => p.subjects),
-    parts: parts.map((p) => ({ subjects: p.subjects, awarded: p.awarded, max: p.max, percent: p.percent, grade: p.grade, assessment_id: p.assessment_id })),
-    summary: parts.map((p) => (label(p) ? `${label(p)}: ${p.summary}` : p.summary)).filter(Boolean).join(' '),
-    strengths: parts.flatMap((p) => p.strengths ?? []),
-    areas_to_improve: parts.flatMap((p) => p.areas_to_improve ?? []),
-  };
-}
-
-// The Written Expression of the papers combined: the scores averaged over
-// the papers judged, and every error listed.
-function combineWriting(list) {
-  const present = list.filter(Boolean);
-  if (!present.length) return null;
-  const unchecked = present.find((w) => !w.checked);
-  if (unchecked) return unchecked;
-  const judged = present.filter((w) => w.judged);
-  const errors = present.flatMap((w) => w.errors ?? []);
-  if (!judged.length) return { ...present[0], errors };
-  const mean = (values) => Math.round((values.reduce((a, b) => a + b, 0) / values.length) * 10) / 10;
-  const score = mean(judged.map((w) => w.score));
-  return {
-    checked: true,
-    judged: true,
-    score,
-    level: judged.length === 1 ? judged[0].level : writingLevelFor(score),
-    summary: judged.map((w) => w.summary).filter(Boolean).join(' '),
-    criteria: judged[0].criteria.map((c, i) => ({ label: c.label, score: mean(judged.map((w) => Number(w.criteria[i]?.score) || 0)) })),
-    errors,
-  };
+  const results = [...byPart.values()];
+  // Only a section with more than one paper names its subjects; a single
+  // Section B stays "Section B", as it always has.
+  return results
+    .map((s) => {
+      const several = results.filter((other) => other.key === s.key).length > 1;
+      const { subject, ...rest } = s;
+      return several && subject ? { ...rest, subject, name: `${s.name} (${subject})` } : rest;
+    })
+    .sort((a, b) => a.key.localeCompare(b.key) || String(a.subject ?? '').localeCompare(String(b.subject ?? '')));
 }
 
 // The potential identifier on the management report. It is worked out from
@@ -313,7 +265,8 @@ export function potentialFor(sections) {
   }
 
   const areas = Object.keys(SECTION_TITLES);
-  const sat = graded.filter((s) => areas.includes(s.key)).length;
+  // Two Section B papers are still one of the three sections.
+  const sat = new Set(graded.filter((s) => areas.includes(s.key)).map((s) => s.key)).size;
   return {
     level,
     headline,
@@ -322,7 +275,7 @@ export function potentialFor(sections) {
     developing: graded.filter((s) => s.grade === 'C').map((s) => s.name),
     support: support.map((s) => s.name),
     roles: exemplary.filter((s) => SECTION_ROLES[s.key]).map((s) => ({ section: s.name, role: SECTION_ROLES[s.key] })),
-    evidence: sat && sat < areas.length ? `Based on ${sat} of ${areas.length} sections so far.` : graded.length === areas.length ? `Based on all ${areas.length} sections.` : `Based on ${graded.length} section${graded.length === 1 ? '' : 's'}.`,
+    evidence: sat && sat < areas.length ? `Based on ${sat} of ${areas.length} sections so far.` : sat === areas.length ? `Based on all ${areas.length} sections.` : `Based on ${graded.length} section${graded.length === 1 ? '' : 's'}.`,
     provisional: sat < areas.length,
   };
 }
@@ -368,7 +321,7 @@ export function fingerprint(value) {
 }
 
 export function resultsBasis(sections) {
-  return sections.map((s) => [s.key, s.assessment_ids?.length > 1 ? s.assessment_ids : s.assessment_id, s.awarded, s.max, s.evaluated_at]);
+  return sections.map((s) => [s.key, s.assessment_id, s.awarded, s.max, s.evaluated_at]);
 }
 
 /* ------------------------------------------------------------------- tests */

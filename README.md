@@ -173,9 +173,11 @@ are, which sections they cover or which paper was sat; each one is sorted:
    section was sat on. A section with no pages was not sat. A teacher who
    teaches two subjects may have sat a Section B paper for each: their
    answers are split by paper ("Section B, paper 2" on the review screen),
-   and each paper is filed and marked against its own question paper. The
-   teacher's results add the papers' marks into one Section B grade, and the
-   reports name the subjects it covers.
+   and each paper is filed and marked against its own question paper. Each
+   paper also gets its own grade, named by its subject ("Section B
+   (Mathematics)", "Section B (Science)"), in the teacher's reports, profile
+   and training plan. The School Report counts that teacher once in Section
+   B, and both papers' percentages go into the Section B average.
 
 Nothing is filed until it is checked. Each PDF shows its teacher, its pages
 coloured by section and the question paper chosen for each section, all of

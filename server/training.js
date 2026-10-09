@@ -198,7 +198,7 @@ function apportion(total, weights) {
 }
 
 const about = (s) => `${sectionTitleOf(s)} (${s.grade_label}, ${s.percent}%)`;
-const summarise = ({ key, name, title, grade, grade_label, percent }) => ({ key, name, title, grade, grade_label, percent });
+const summarise = ({ key, name, title, subject, grade, grade_label, percent }) => ({ key, name, title, ...(subject ? { subject } : {}), grade, grade_label, percent });
 
 // A teacher's plan from their section results, or null when no paths are set
 // up or nothing has been graded. Blocks run in order: the sections that need
