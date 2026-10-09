@@ -5,6 +5,7 @@ import {
 import { schoolsApi, teachersApi, assessmentsApi, testsApi, reportsApi, bulkApi } from '../api.js';
 import { choosePaper, paperFacts, paperThumb } from '../paper-picker.js';
 import { chooseMarking } from '../marking-choice.js';
+import { evaluateAllButton, failedReasons } from '../unmarked.js';
 import { movePages } from '../move-pages.js';
 import { WRITING_NAME, checkedSections, openWritingReport, writingChip, writingLine } from '../writing.js';
 import {
@@ -79,12 +80,14 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
   async function load() {
     state.tests = await testsApi.list(state.schoolId);
     if (!state.tests.some((t) => String(t.id) === String(state.testId))) state.testId = String(state.tests[0].id);
-    const [roster, assessments, bulk] = await Promise.all([
+    const [roster, assessments, bulk, unmarked] = await Promise.all([
       teachersApi.roster(state.schoolId, state.testId, state.section),
       assessmentsApi.list({ school_id: state.schoolId, test_id: state.testId }),
       bulkApi.list(state.schoolId, state.testId).catch(() => ({ items: [] })),
+      bulkApi.unmarked(state.schoolId, state.testId).catch(() => ({ failed: [] })),
     ]);
     state.bulkWaiting = bulk.items.length;
+    state.failed = unmarked.failed;
     state.roster = roster.teachers;
     state.librarySize = roster.library_size;
     state.assessments = assessments;
@@ -181,6 +184,20 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
             { class: 'notice' },
             `${state.bulkWaiting} answer paper PDF${state.bulkWaiting === 1 ? ' is' : 's are'} waiting to be checked and filed for this test. `,
             h('a', { href: `#/assessments/upload-all?school=${state.schoolId}&test=${state.testId}` }, 'Check and file them')
+          )
+        : null,
+      // Failed papers can be in any section, not only the one on the board.
+      state.failed?.length
+        ? h(
+            'div',
+            { class: 'notice notice-danger' },
+            h(
+              'div',
+              { class: 'notice-row' },
+              h('span', {}, `Marking failed for ${state.failed.length} paper${state.failed.length === 1 ? '' : 's'} in this test.`),
+              evaluateAllButton({ schoolId: state.schoolId, testId: state.testId, which: 'failed', count: state.failed.length, after: load })
+            ),
+            failedReasons(state.failed)
           )
         : null,
       h(

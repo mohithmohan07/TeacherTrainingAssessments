@@ -19,6 +19,15 @@ export function friendly(message) {
   return error;
 }
 
+// One that should pass by itself, such as OpenAI staying too busy or too slow
+// for a while when a school's papers are marked together. Marking that fails
+// this way is tried once more (evaluate.js).
+export function passing(message) {
+  const error = friendly(message);
+  error.passing = true;
+  return error;
+}
+
 // Many requests sent together (a school's answer papers matched or marked at
 // once) can pass OpenAI's limit on tokens per minute. It then answers 429 and
 // says how long to wait; the request is sent again after that wait, or a
@@ -75,7 +84,7 @@ export async function requestJson({ instructions, content, name, schema, task, r
         await pause(waitBefore(null, null, attempt));
         continue;
       }
-      throw friendly(
+      throw passing(
         error.name === 'TimeoutError'
           ? `OpenAI took more than five minutes to ${task}. ${retry}`
           : `Could not reach OpenAI: ${error.message}`
@@ -92,7 +101,8 @@ export async function requestJson({ instructions, content, name, schema, task, r
   if (!res.ok) {
     const detail = payload?.error?.message ?? `HTTP ${res.status}`;
     if (res.status === 401) throw friendly(`OpenAI rejected the API key in OPENAI_API_KEY (${detail}).`);
-    if (res.status === 429) throw friendly(`OpenAI refused the request: rate limit or no credit left on the account (${detail}).`);
+    if (busy(res, payload)) throw passing(`OpenAI stayed too busy to ${task} (${detail}). ${retry}`);
+    if (res.status === 429) throw friendly(`OpenAI refused the request: no credit left on the account (${detail}).`);
     throw friendly(`OpenAI returned an error: ${detail}`);
   }
 

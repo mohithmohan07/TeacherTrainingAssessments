@@ -8,7 +8,9 @@ on your machine.
   (or another picked on the card): who is waiting (nothing uploaded, scanned
   but not evaluated, marking failed, report not built), how many teachers sat
   each section and their grades in it, and the potential identifier counts,
-  with names linking to teacher profiles. Grades only, per section.
+  with names linking to teacher profiles. Grades only, per section. The
+  papers waiting for Evaluate, and those whose marking failed (with why),
+  can each be evaluated all at once from there.
 - **Schools & teachers** — add each school with its logo and contact details,
   then add its teachers one at a time or import a whole list from Excel.
 - **Assessments** — pick a school and a test, then scan or upload each
@@ -193,7 +195,13 @@ nothing: **Evaluate all** (with one Standard or Lenient choice) marks the
 sections just filed, as many at once as the memory allows, or each can be
 evaluated on its own. When many requests go together, OpenAI and Gemini may
 ask the app to slow down; it waits as long as they ask and sends the request
-again. PDFs not yet filed wait on the page for the next visit.
+again. A marking that still fails for a reason like that (OpenAI or Gemini
+staying too busy, taking more than five minutes, or a dropped connection) is
+tried once more by itself a minute or two later. Any that fail after that
+show why, and are marked again all at once by **Evaluate all again** on the
+dashboard or the Assessments board, or by the button under the filed papers
+here.
+PDFs not yet filed wait on the page for the next visit.
 
 ### Uploading image files
 

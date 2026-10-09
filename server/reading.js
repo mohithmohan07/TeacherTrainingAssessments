@@ -155,7 +155,11 @@ export async function readAnswers(files, languages) {
         garbled: 'Gemini sent back a reading of the answers that was cut off or garbled. Press Evaluate to try again.',
       });
     } catch (error) {
-      if (error instanceof GeminiError) throw friendly(`Reading the answers with Gemini failed: ${error.message}`);
+      if (error instanceof GeminiError) {
+        const failure = friendly(`Reading the answers with Gemini failed: ${error.message}`);
+        failure.passing = error.passing;
+        throw failure;
+      }
       throw error;
     }
     // Pages are matched by number, or in order if Gemini numbered them some

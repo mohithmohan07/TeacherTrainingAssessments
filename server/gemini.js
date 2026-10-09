@@ -11,10 +11,13 @@ export function geminiConfigured() {
   return Boolean(process.env.GEMINI_API_KEY);
 }
 
+// `passing` marks a failure that should pass by itself, such as Gemini staying
+// too busy or too slow for a while (see openai.js).
 export class GeminiError extends Error {
-  constructor(message, status = 502) {
+  constructor(message, status = 502, { passing = false } = {}) {
     super(message);
     this.status = status;
+    this.passing = passing;
   }
 }
 
@@ -36,7 +39,9 @@ async function callGemini(key, parts, generationConfig, timeoutMs) {
     });
   } catch (error) {
     const timedOut = error.name === 'TimeoutError' || error.name === 'AbortError';
-    throw new GeminiError(timedOut ? 'Gemini took too long to answer. Please try again.' : `Could not reach Gemini: ${error.message}`);
+    const failure = new GeminiError(timedOut ? 'Gemini took too long to answer. Please try again.' : `Could not reach Gemini: ${error.message}`, 502, { passing: true });
+    failure.timedOut = timedOut;
+    throw failure;
   }
   return { response, payload: await response.json().catch(() => null) };
 }
@@ -44,13 +49,22 @@ async function callGemini(key, parts, generationConfig, timeoutMs) {
 // Many requests at once (a school's answer papers read together) can pass
 // Gemini's limit per minute. It then answers 429 and says how long to wait;
 // the request is sent again after that wait, or a longer one each time, as it
-// is after a passing server error.
+// is after a passing server error or a dropped connection. A request that ran
+// out of time is not sent again here.
 const RETRIES = 10;
+const BUSY = [429, 500, 502, 503, 504];
 
 async function callGeminiPatiently(key, parts, generationConfig, timeoutMs) {
   for (let attempt = 0; ; attempt += 1) {
-    const result = await callGemini(key, parts, generationConfig, timeoutMs);
-    if (attempt >= RETRIES || ![429, 500, 502, 503, 504].includes(result.response.status)) return result;
+    let result;
+    try {
+      result = await callGemini(key, parts, generationConfig, timeoutMs);
+    } catch (error) {
+      if (error.timedOut || attempt >= RETRIES) throw error;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(60_000, 2000 * 2 ** attempt) * (1 + Math.random() / 2)));
+      continue;
+    }
+    if (attempt >= RETRIES || !BUSY.includes(result.response.status)) return result;
     const delay = (result.payload?.error?.details ?? []).find((d) => String(d?.['@type']).endsWith('RetryInfo'))?.retryDelay;
     const asked = delay ? parseFloat(delay) * 1000 : 0;
     const wait = Math.min(60_000, Math.max(asked, 2000 * 2 ** attempt)) * (1 + Math.random() / 2);
@@ -90,9 +104,9 @@ export async function generateJson({
       throw new GeminiError(`Gemini does not know the model "${GEMINI_MODEL}". Set GEMINI_MODEL to a current model name.`);
     }
     if (response.status === 429) {
-      throw new GeminiError('Gemini says the usage limit has been reached. Wait a minute and try again, or check the quota on the Google account.');
+      throw new GeminiError('Gemini says the usage limit has been reached. Wait a minute and try again, or check the quota on the Google account.', 502, { passing: true });
     }
-    throw new GeminiError(`Gemini returned an error: ${detail}`);
+    throw new GeminiError(`Gemini returned an error: ${detail}`, 502, { passing: BUSY.includes(response.status) });
   }
 
   const candidate = payload?.candidates?.[0];

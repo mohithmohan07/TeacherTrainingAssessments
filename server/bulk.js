@@ -751,6 +751,50 @@ async function markOne({ id, marking: choice }) {
   }
 }
 
+// The sittings Evaluate all has yet to start, which count as being marked.
+export const queuedForMarking = () => toMark.map((job) => job.id);
+
+// The sittings of a test with no marks that are not being marked: those whose
+// marking failed, with the reason, and those waiting for Evaluate (answer
+// pages filed, Evaluate not pressed yet, or left waiting when the server
+// restarted). The dashboard and the board offer to evaluate each group at once.
+const selectUnmarked = db.prepare(`
+  SELECT a.id, a.section, a.subject, a.ai_status, a.ai_error, t.id AS teacher_id, t.name AS teacher_name,
+         EXISTS (SELECT 1 FROM assessment_files f WHERE f.assessment_id = a.id AND f.kind = 'response') AS has_answers
+    FROM assessments a
+    JOIN teachers t ON t.id = a.teacher_id
+   WHERE a.school_id = ? AND a.test_id = ? AND a.status != 'evaluated' AND a.ai_status != 'running'
+   ORDER BY t.name COLLATE NOCASE, a.section, a.id
+`);
+
+export function unmarkedSittings(schoolId, testId) {
+  const queued = new Set(queuedForMarking());
+  const failed = [];
+  const waiting = [];
+  for (const row of selectUnmarked.all(schoolId, testId)) {
+    if (queued.has(row.id)) continue;
+    const sitting = {
+      id: row.id,
+      teacher: { id: row.teacher_id, name: row.teacher_name },
+      paper: row.section ? `Section ${row.section}${row.section === 'B' && row.subject ? ` (${row.subject})` : ''}` : 'Full paper',
+    };
+    if (row.ai_status === 'failed') failed.push({ ...sitting, error: row.ai_error || 'The marking did not finish.' });
+    else if (row.has_answers) waiting.push(sitting);
+  }
+  return { failed, waiting };
+}
+
+// Evaluate pressed once for every sitting of a test whose marking failed
+// (`which` is 'failed') or that is waiting for Evaluate ('waiting'), with one
+// Standard or Lenient choice. Returns how many were started, or the problem.
+export function evaluateUnmarked(schoolId, testId, which, markingChoice) {
+  const sittings = unmarkedSittings(schoolId, testId)[which];
+  if (!Array.isArray(sittings)) return { error: 'Say which papers to evaluate.' };
+  if (!sittings.length) return { started: 0 };
+  const problem = evaluateSittings(sittings.map((sitting) => sitting.id), markingChoice);
+  return problem ? { error: problem } : { started: sittings.length };
+}
+
 export function markingState(ids) {
   return ids.map((id) => {
     const row = db.prepare('SELECT id, ai_status, ai_error, status FROM assessments WHERE id = ?').get(id);

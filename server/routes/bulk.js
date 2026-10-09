@@ -5,7 +5,8 @@ import { uploadPdfPages } from '../uploads.js';
 import { discardUploads } from '../scans.js';
 import { testFor } from '../results.js';
 import {
-  addItem, evaluateSittings, markingState, matchAll, choosePageSections, choosePapers, chooseTeacher, fileReady, itemFor, presentItem, presentItems, queueSort, removeItem,
+  addItem, evaluateSittings, evaluateUnmarked, markingState, matchAll, choosePageSections, choosePapers, chooseTeacher, fileReady, itemFor, presentItem, presentItems, queueSort, removeItem,
+  unmarkedSittings,
 } from '../bulk.js';
 
 const router = express.Router();
@@ -99,6 +100,25 @@ router.post('/evaluate', (req, res) => {
   const problem = evaluateSittings(ids, req.body.marking ?? 'standard');
   if (problem) return res.status(400).json({ error: problem });
   res.status(202).json(markingState(ids));
+});
+
+// GET /api/bulk/unmarked?school_id=1&test_id=2: the test's sittings whose
+// marking failed, with the reasons, and those waiting for Evaluate.
+router.get('/unmarked', (req, res) => {
+  const { school, test } = schoolAndTest(req.query);
+  if (!school) return res.status(400).json({ error: 'Pick a school.' });
+  res.json(unmarkedSittings(school.id, test.id));
+});
+
+// Evaluate pressed once for all of them: { which: 'failed' } evaluates every
+// sitting of the test whose marking failed again, { which: 'waiting' } every
+// one waiting for Evaluate, as many at once as the server's memory allows.
+router.post('/evaluate-unmarked', (req, res) => {
+  const { school, test } = schoolAndTest(req.body);
+  if (!school) return res.status(400).json({ error: 'Pick a school.' });
+  const { started, error } = evaluateUnmarked(school.id, test.id, req.body.which, req.body.marking ?? 'standard');
+  if (error) return res.status(400).json({ error });
+  res.json({ started });
 });
 
 // GET /api/bulk/marking?ids=1,2,3: how far the marking of those sittings has got.
