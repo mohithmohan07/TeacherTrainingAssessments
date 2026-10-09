@@ -282,7 +282,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
       { class: 'card' },
       h('h2', {}, '2. Find the question papers'),
       matching
-        ? h('div', { class: 'marking-state' }, h('span', { class: 'spinner' }), `Matching ${matching} PDF${matching === 1 ? '' : 's'} at once. Keep this page open until it finishes: the app goes to sleep when nobody is using it.`)
+        ? h('div', { class: 'marking-state' }, h('span', { class: 'spinner' }), `Matching ${matching} PDF${matching === 1 ? '' : 's'} at once. You can leave this page; matching carries on.`)
         : null,
       unmatched
         ? [
@@ -693,7 +693,7 @@ function filedCard(filed, boardLink, marks, evaluateAll) {
       'p',
       { class: 'hint' },
       marks
-        ? `Marked ${done} of ${filed.length}${failed ? `, ${failed} failed (open it to see why and Evaluate again)` : ''}.${going ? ' Keep this page open until it finishes: the app goes to sleep when nobody is using it.' : ''}`
+        ? `Marked ${done} of ${filed.length}${failed ? `, ${failed} failed (open it to see why and Evaluate again)` : ''}.${going ? ' You can leave this page; marking carries on.' : ''}`
         : 'Nothing has been marked yet. Evaluate all marks every section below, or open one section to Evaluate it on its own. On the Assessments board they are under Papers: Section A, B or C.'
     ),
     h(

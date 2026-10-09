@@ -28,6 +28,7 @@ import { sittingForPaper } from './sittings.js';
 import { MARKINGS, testFor } from './results.js';
 import { startEvaluation } from './evaluate.js';
 import { jobsAtOnce } from './capacity.js';
+import { keepAwake } from './idle.js';
 
 /* ------------------------------------------------------------- the rows */
 
@@ -208,15 +209,17 @@ function pump() {
   while (running < MATCHING_AT_ONCE && waiting.length) {
     const id = waiting.shift();
     running += 1;
-    sortItem(id)
-      .catch((error) => {
-        console.error(`Sorting bulk PDF ${id} failed:`, error);
-        if (selectItem.get(id)) setStatus.run('failed', error.userMessage ?? `Matching failed: ${error.message}`, id);
-      })
-      .finally(() => {
-        running -= 1;
-        pump();
-      });
+    keepAwake(
+      sortItem(id)
+        .catch((error) => {
+          console.error(`Sorting bulk PDF ${id} failed:`, error);
+          if (selectItem.get(id)) setStatus.run('failed', error.userMessage ?? `Matching failed: ${error.message}`, id);
+        })
+        .finally(() => {
+          running -= 1;
+          pump();
+        })
+    );
   }
 }
 
@@ -727,10 +730,12 @@ function markNext() {
   while (marking < MARKING_AT_ONCE && toMark.length) {
     const job = toMark.shift();
     marking += 1;
-    markOne(job).finally(() => {
-      marking -= 1;
-      markNext();
-    });
+    keepAwake(
+      markOne(job).finally(() => {
+        marking -= 1;
+        markNext();
+      })
+    );
   }
 }
 

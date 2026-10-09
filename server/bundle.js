@@ -19,6 +19,7 @@ import { teacherResults } from './results.js';
 import { friendly } from './openai.js';
 import { getFramework } from './training.js';
 import { ZipFile } from './zip.js';
+import { keepAwake } from './idle.js';
 
 const PORT = Number(process.env.PORT ?? 3000);
 const ZIP_DIR = path.join(os.tmpdir(), 'teacher-report-zips');
@@ -219,22 +220,24 @@ export function startZip(schoolId, testId, viewer) {
   };
   jobs.set(keyOf(school.id, test.id), job);
   busy = true;
-  makeZip(job, plan, school)
-    .then(() => {
-      job.status = 'done';
-    })
-    .catch((error) => {
-      console.error(`Making the report zip for test ${test.id} failed:`, error);
-      job.status = 'failed';
-      job.error = error.userMessage ?? 'The reports could not be printed. Try again in a minute.';
-      fs.rm(job.file, { force: true }, () => {});
-    })
-    .finally(() => {
-      busy = false;
-      job.current = null;
-      job.finished_at = new Date().toISOString();
-      setTimeout(() => forget(job), KEEP_MS).unref();
-    });
+  keepAwake(
+    makeZip(job, plan, school)
+      .then(() => {
+        job.status = 'done';
+      })
+      .catch((error) => {
+        console.error(`Making the report zip for test ${test.id} failed:`, error);
+        job.status = 'failed';
+        job.error = error.userMessage ?? 'The reports could not be printed. Try again in a minute.';
+        fs.rm(job.file, { force: true }, () => {});
+      })
+      .finally(() => {
+        busy = false;
+        job.current = null;
+        job.finished_at = new Date().toISOString();
+        setTimeout(() => forget(job), KEEP_MS).unref();
+      })
+  );
   return null;
 }
 

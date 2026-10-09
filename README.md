@@ -161,9 +161,9 @@ pages into pictures and uploads them; the PDFs themselves are not changed.
 Uploading matches nothing. Once every PDF is up, **Find the question papers**
 matches them all at the same time, as many at once as the server's memory
 allows (all of a school's PDFs with the 10 GB in `fly.toml`, one at a time
-with 512 MB). Keep the page open until it finishes: the app goes to sleep
-when nobody is using it. The PDFs need not say whose answers they are, which
-sections they cover or which paper was sat; matching works each one out:
+with 512 MB). It carries on if the page is closed. The PDFs need not say
+whose answers they are, which sections they cover or which paper was sat;
+matching works each one out:
 
 1. **The teacher** comes from the file name ("Keshava.pdf",
    "Archana_BM.pdf"), or else from the name written on the sheets, which
@@ -478,8 +478,13 @@ so a school's answer PDFs can be matched and marked all at once, and
 `NODE_OPTIONS` lets Node use about 8 GB of it. Fly applies `[[vm]]` on every
 deploy, so change it there rather than with `fly scale`; keep
 `--max-old-space-size` about 2 GB under the memory. With less memory the app
-simply does fewer at once. Fly stops the machine when nobody is using the app
-(`auto_stop_machines = 'stop'`), so it is paid for only while it runs.
+simply does fewer at once. The app stops itself once nobody has used it for
+10 minutes and nothing is running in the background, such as matching,
+marking, report writing or a zip being printed (`server/idle.js`), and Fly
+starts it again on the next visit, so it is paid for only while it runs.
+Fly's own stopping is turned off (`auto_stop_machines = 'off'`) because it
+goes by web traffic alone and could stop the app in the middle of that work
+once the page was closed.
 
 The image also has Chromium's headless shell in it, which prints the reports
 for **Download all reports**. While it prints, Chromium needs up to about

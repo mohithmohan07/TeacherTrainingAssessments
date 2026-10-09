@@ -25,6 +25,7 @@ import { counts, markingOf, sectionKey } from './results.js';
 import { OPENAI_IMAGE_TYPES, pageInputs, questionPaperInputs } from './paper-inputs.js';
 import { EXPECTED_ANSWER_RULE, QUESTION_TEXT_RULE } from './answers.js';
 import { checkWriting, writingOf } from './writing.js';
+import { keepAwake } from './idle.js';
 
 const EXAMINER = 'You are an experienced examiner marking a teacher training assessment.';
 
@@ -128,10 +129,12 @@ export function startEvaluation(assessmentId, marking = 'standard') {
   }
 
   markRunning.run(assessment.id);
-  evaluate(assessment, { paper, library, response }, markingOf(marking)).catch((error) => {
-    console.error(`Evaluating assessment ${assessment.id} failed:`, error);
-    markFailed.run(error.userMessage ?? `Marking failed: ${error.message}`, assessment.id);
-  });
+  keepAwake(
+    evaluate(assessment, { paper, library, response }, markingOf(marking)).catch((error) => {
+      console.error(`Evaluating assessment ${assessment.id} failed:`, error);
+      markFailed.run(error.userMessage ?? `Marking failed: ${error.message}`, assessment.id);
+    })
+  );
   return null;
 }
 
