@@ -4,7 +4,9 @@ async function handle(response) {
   const isJson = (response.headers.get('content-type') ?? '').includes('application/json');
   const payload = isJson ? await response.json() : null;
   if (!response.ok) {
-    throw new Error(payload?.error ?? `Request failed (${response.status})`);
+    const error = new Error(payload?.error ?? `Request failed (${response.status})`);
+    error.status = response.status;
+    throw error;
   }
   return payload;
 }

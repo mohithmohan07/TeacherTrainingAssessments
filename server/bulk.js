@@ -181,9 +181,10 @@ export function choosePageSections(item, pages) {
 
 /* -------------------------------------------------------------- sorting */
 
-// PDFs are sorted two at a time, in the order they were uploaded, so a big
-// upload does not send every PDF to OpenAI at once.
-const RUNNING_AT_ONCE = 2;
+// PDFs are sorted one at a time, in the order they were uploaded. Each sort
+// holds the teacher's pages and up to a dozen question papers in memory to
+// send to OpenAI, and two at once ran the 512 MB server out of memory.
+const RUNNING_AT_ONCE = 1;
 const waiting = [];
 let running = 0;
 

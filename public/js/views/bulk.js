@@ -117,7 +117,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
         data.set('test_id', test.id);
         data.set('file_name', file.name);
         for (const page of pages) data.append('pages', page);
-        await bulkApi.add(data);
+        await addWithRetries(data, file.name, row);
         row.state = 'done';
         row.text = `Uploaded ${pageCount(pages.length)}. Sorting below.`;
         await refresh();
@@ -128,6 +128,31 @@ export async function renderBulk(root, query = new URLSearchParams()) {
           : `Not uploaded: ${error.message}`;
       }
       drawUploads();
+    }
+  }
+
+  // The server can drop a request while it restarts (Fly answers 502), so a
+  // PDF is sent again a few times before it counts as not uploaded. A PDF the
+  // server did take before the answer was lost is not sent twice.
+  const RETRY_WAITS = [3000, 8000, 15000, 30000];
+  const serverDropped = (error) => error instanceof TypeError || [502, 503, 504].includes(error.status);
+
+  async function addWithRetries(data, fileName, row) {
+    const before = new Set(state.items.map((item) => item.id));
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await bulkApi.add(data);
+      } catch (error) {
+        if (!serverDropped(error) || attempt >= RETRY_WAITS.length) throw error;
+        row.text = 'The server did not answer. Trying again…';
+        drawUploads();
+        await new Promise((resolve) => setTimeout(resolve, RETRY_WAITS[attempt]));
+        const taken = await bulkApi
+          .list(school.id, test.id)
+          .then((listed) => listed.items.find((item) => !before.has(item.id) && item.file_name === fileName))
+          .catch(() => null);
+        if (taken) return taken;
+      }
     }
   }
 
