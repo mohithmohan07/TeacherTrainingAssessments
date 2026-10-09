@@ -1,9 +1,10 @@
 // Every teacher's answer paper at once, as scanned PDFs. Each PDF is made
-// into page pictures here in the browser, uploaded, and sorted on the server:
-// whose answers they are, which section each page answers, and which library
-// paper each section was sat on. Everything can be checked and changed, side
-// by side with the question paper, before it is filed. Filing never marks
-// anything; Evaluate does.
+// into page pictures here in the browser and uploaded. Once they are all up,
+// "Find the question papers" has the server match every one at the same
+// time: whose answers they are, which section each page answers, and which
+// library paper each section was sat on. Everything can be checked and
+// changed, side by side with the question paper, before it is filed. Filing
+// never marks anything; Evaluate does.
 import { h, mount, toast, select, viewPages, confirmAction } from '../ui.js';
 import { bulkApi, papersApi, schoolsApi, teachersApi, testsApi } from '../api.js';
 import { loadPdfjs, pagesOf } from '../evidence.js';
@@ -101,6 +102,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
     const rows = pdfs.map((file) => ({ name: file.name, text: 'Waiting…', state: 'waiting' }));
     state.uploads.push(...rows);
     drawUploads();
+    drawReview();
     // One PDF at a time, so a long upload never holds every page in memory.
     for (const [i, file] of pdfs.entries()) {
       const row = rows[i];
@@ -117,9 +119,9 @@ export async function renderBulk(root, query = new URLSearchParams()) {
         data.set('test_id', test.id);
         data.set('file_name', file.name);
         for (const page of pages) data.append('pages', page);
-        await bulkApi.add(data);
+        await addWithRetries(data, file.name, row);
         row.state = 'done';
-        row.text = `Uploaded ${pageCount(pages.length)}. Sorting below.`;
+        row.text = `Uploaded ${pageCount(pages.length)}.`;
         await refresh();
       } catch (error) {
         row.state = 'failed';
@@ -128,6 +130,34 @@ export async function renderBulk(root, query = new URLSearchParams()) {
           : `Not uploaded: ${error.message}`;
       }
       drawUploads();
+    }
+    drawReview();
+  }
+
+  const uploading = () => state.uploads.some((row) => ['waiting', 'working'].includes(row.state));
+
+  // The server can drop a request while it restarts (Fly answers 502), so a
+  // PDF is sent again a few times before it counts as not uploaded. A PDF the
+  // server did take before the answer was lost is not sent twice.
+  const RETRY_WAITS = [3000, 8000, 15000, 30000];
+  const serverDropped = (error) => error instanceof TypeError || [502, 503, 504].includes(error.status);
+
+  async function addWithRetries(data, fileName, row) {
+    const before = new Set(state.items.map((item) => item.id));
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await bulkApi.add(data);
+      } catch (error) {
+        if (!serverDropped(error) || attempt >= RETRY_WAITS.length) throw error;
+        row.text = 'The server did not answer. Trying again…';
+        drawUploads();
+        await new Promise((resolve) => setTimeout(resolve, RETRY_WAITS[attempt]));
+        const taken = await bulkApi
+          .list(school.id, test.id)
+          .then((listed) => listed.items.find((item) => !before.has(item.id) && item.file_name === fileName))
+          .catch(() => null);
+        if (taken) return taken;
+      }
     }
   }
 
@@ -159,7 +189,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
         'div',
         { class: 'card' },
         h('h2', {}, '1. Upload the answer papers'),
-        h('p', { class: 'hint' }, `They are sorted for ${test.name} at ${school.name}. Nothing is filed until you check it below, and nothing is marked until you press Evaluate.`),
+        h('p', { class: 'hint' }, `For ${test.name} at ${school.name}. Upload every PDF first: nothing is matched while they upload. Nothing is filed until you check it below, and nothing is marked until you press Evaluate.`),
         dropzone,
         shown.length
           ? h('ul', { class: 'bulk-progress' }, shown.map((row) => h('li', { class: row.state }, h('strong', {}, row.name), ' ', h('span', {}, row.text))))
@@ -228,6 +258,53 @@ export async function renderBulk(root, query = new URLSearchParams()) {
     await refresh();
   }
 
+  // "Find the question papers": every PDF not matched yet is matched at once.
+  async function matchAll() {
+    state.busy = true;
+    drawReview();
+    try {
+      const result = await bulkApi.match(school.id, test.id);
+      state.items = result.items;
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+    state.busy = false;
+    drawReview();
+    schedulePoll();
+  }
+
+  function matchCard() {
+    const unmatched = state.items.filter((item) => ['new', 'failed'].includes(item.sort_status)).length;
+    const matching = state.items.filter((item) => ['waiting', 'running'].includes(item.sort_status)).length;
+    const waitForUploads = uploading();
+    return h(
+      'div',
+      { class: 'card' },
+      h('h2', {}, '2. Find the question papers'),
+      matching
+        ? h('div', { class: 'marking-state' }, h('span', { class: 'spinner' }), `Matching ${matching} PDF${matching === 1 ? '' : 's'} at once. You can leave this page; matching carries on.`)
+        : null,
+      unmatched
+        ? [
+            h('p', { class: 'hint' }, waitForUploads
+              ? 'Wait until every PDF has uploaded, then match them all at once.'
+              : 'Every PDF is matched at the same time: its teacher, which pages answer which section, and the question paper for each section.'),
+            h(
+              'button',
+              { class: 'btn btn-primary', type: 'button', disabled: waitForUploads || state.busy, onclick: matchAll },
+              waitForUploads
+                ? 'Find the question papers'
+                : unmatched === state.items.length
+                  ? `Find the question papers for all ${unmatched}`
+                  : `Find the question papers for the ${unmatched} not matched yet`
+            ),
+          ]
+        : matching
+          ? null
+          : h('p', { class: 'hint', style: 'margin:0' }, `All ${state.items.length} PDF${state.items.length === 1 ? ' is' : 's are'} matched. Check a few below, then file them.`)
+    );
+  }
+
   // Evaluate, pressed once for every section just filed.
   async function evaluateAll() {
     const ids = state.filed.map((row) => row.assessment_id);
@@ -256,7 +333,8 @@ export async function renderBulk(root, query = new URLSearchParams()) {
   function drawReview() {
     const ready = state.items.filter((item) => item.ready).length;
     const sorting = state.items.filter((item) => ['waiting', 'running'].includes(item.sort_status)).length;
-    const need = state.items.length - ready - sorting;
+    const unmatched = state.items.filter((item) => item.sort_status === 'new').length;
+    const need = state.items.length - ready - sorting - unmatched;
     const fileButton = h(
       'button',
       { class: 'btn btn-primary', type: 'button', disabled: !ready || state.busy, onclick: fileAll },
@@ -279,6 +357,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
 
     mount(
       reviewBox,
+      state.items.length ? matchCard() : null,
       state.filed?.length ? filedCard(state.filed, boardLink, state.marks, evaluateAll) : null,
       h(
         'div',
@@ -289,7 +368,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
           h(
             'div',
             {},
-            h('h2', {}, '2. Check and file'),
+            h('h2', {}, '3. Check and file'),
             h(
               'p',
               { class: 'hint', style: 'margin:0' },
@@ -297,10 +376,11 @@ export async function renderBulk(root, query = new URLSearchParams()) {
                 ? [
                     `${state.items.length} PDF${state.items.length === 1 ? '' : 's'}`,
                     ready ? `${ready} ready` : '',
-                    sorting ? `${sorting} being sorted` : '',
+                    sorting ? `${sorting} being matched` : '',
+                    unmatched ? `${unmatched} not matched yet` : '',
                     need ? `${need} need${need === 1 ? 's' : ''} you` : '',
                   ].filter(Boolean).join(' · ')
-                : 'Answer papers you upload appear here once they are sorted.'
+                : 'Answer papers you upload appear here.'
             )
           ),
           state.items.length ? fileButton : null
@@ -315,11 +395,14 @@ export async function renderBulk(root, query = new URLSearchParams()) {
 
   function itemCard(item) {
     const sorting = ['waiting', 'running'].includes(item.sort_status);
+    const unmatched = item.sort_status === 'new';
     const status = sorting
-      ? h('span', { class: 'badge running' }, item.sort_status === 'waiting' ? 'Waiting to be sorted' : 'Sorting…')
-      : item.ready
-        ? h('span', { class: 'badge evaluated' }, 'Ready to file')
-        : h('span', { class: 'badge scanned' }, 'Needs you');
+      ? h('span', { class: 'badge running' }, item.sort_status === 'waiting' ? 'Waiting to be matched' : 'Matching…')
+      : unmatched
+        ? h('span', { class: 'badge draft' }, 'Not matched yet')
+        : item.ready
+          ? h('span', { class: 'badge evaluated' }, 'Ready to file')
+          : h('span', { class: 'badge scanned' }, 'Needs you');
 
     const teacherSelect = select(
       'teacher',
@@ -350,13 +433,13 @@ export async function renderBulk(root, query = new URLSearchParams()) {
           h('button', { class: 'btn btn-sm', type: 'button', disabled: !item.pages.some((p) => p.section), onclick: () => preview(item) }, 'Preview'),
           sorting
             ? null
-            : h('button', { class: 'btn btn-sm', type: 'button', title: 'Have the pages sorted again', onclick: async () => {
+            : h('button', { class: 'btn btn-sm', type: 'button', title: 'Find this PDF’s teacher, sections and question papers', onclick: async () => {
                 try {
                   replaceItem(await bulkApi.sort(item.id));
                 } catch (error) {
                   toast(error.message, 'error');
                 }
-              } }, 'Sort again'),
+              } }, unmatched ? 'Match' : 'Match again'),
           h('button', { class: 'btn btn-sm btn-danger', type: 'button', onclick: async () => {
             if (!confirmAction(`Remove ${item.file_name}? Its pages are deleted and nothing is filed.`)) return;
             try {
@@ -418,7 +501,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
         { class: 'hint' },
         pages.length
           ? `${pageCount(pages.length)}${questions.length ? ` · answers ${questions.slice(0, 8).join(', ')}${questions.length > 8 ? '…' : ''}` : ''}`
-          : sorting ? 'Sorting…' : 'No pages: not sat'
+          : item.sort_status === 'new' ? 'Not matched yet' : sorting ? 'Matching…' : 'No pages: not sat'
       ),
       paperSelect,
       section.paper && pages.length ? h('small', { class: 'hint' }, paperFacts(section.paper)) : null,

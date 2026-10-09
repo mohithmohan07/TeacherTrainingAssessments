@@ -47,6 +47,7 @@ import {
   trainingPlanFor,
   writtenPlan,
 } from './training.js';
+import { keepAwake } from './idle.js';
 
 // The layout reports are written in. A report written in an earlier one is
 // not shown: it counts as out of date and the page asks for a rebuild.
@@ -109,19 +110,21 @@ function queue(key, reportRow, work) {
   }
   const job = { again: false };
   building.set(key, job);
-  (async () => {
-    do {
-      job.again = false;
-      markRunning.run(reportRow.id);
-      try {
-        await inTurn(work);
-      } catch (error) {
-        console.error(`Writing report ${reportRow.id} failed:`, error);
-        markFailed.run(error.userMessage ?? `The report could not be written: ${error.message}`, reportRow.id);
-      }
-    } while (job.again);
-    building.delete(key);
-  })();
+  keepAwake(
+    (async () => {
+      do {
+        job.again = false;
+        markRunning.run(reportRow.id);
+        try {
+          await inTurn(work);
+        } catch (error) {
+          console.error(`Writing report ${reportRow.id} failed:`, error);
+          markFailed.run(error.userMessage ?? `The report could not be written: ${error.message}`, reportRow.id);
+        }
+      } while (job.again);
+      building.delete(key);
+    })()
+  );
 }
 
 function reportRowFor(kind, schoolId, testId, teacherId) {

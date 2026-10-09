@@ -4,7 +4,9 @@ async function handle(response) {
   const isJson = (response.headers.get('content-type') ?? '').includes('application/json');
   const payload = isJson ? await response.json() : null;
   if (!response.ok) {
-    throw new Error(payload?.error ?? `Request failed (${response.status})`);
+    const error = new Error(payload?.error ?? `Request failed (${response.status})`);
+    error.status = response.status;
+    throw error;
   }
   return payload;
 }
@@ -96,11 +98,12 @@ export const assessmentsApi = {
   removeFile: (id, fileId) => api.del(`/api/assessments/${id}/files/${fileId}`),
 };
 
-// Every teacher's answer paper uploaded at once as PDFs, sorted, then filed.
+// Every teacher's answer paper uploaded at once as PDFs, matched, then filed.
 export const bulkApi = {
   list: (schoolId, testId) => api.get(`/api/bulk?${new URLSearchParams({ school_id: schoolId, test_id: testId })}`),
   add: (formData) => api.postForm('/api/bulk', formData),
   update: (id, body) => api.putJson(`/api/bulk/${id}`, body),
+  match: (schoolId, testId) => api.postJson('/api/bulk/match', { school_id: schoolId, test_id: testId }),
   sort: (id) => api.postJson(`/api/bulk/${id}/sort`, {}),
   remove: (id) => api.del(`/api/bulk/${id}`),
   evaluate: (ids, marking) => api.postJson('/api/bulk/evaluate', { ids, marking }),

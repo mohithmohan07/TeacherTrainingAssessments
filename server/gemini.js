@@ -41,6 +41,23 @@ async function callGemini(key, parts, generationConfig, timeoutMs) {
   return { response, payload: await response.json().catch(() => null) };
 }
 
+// Many requests at once (a school's answer papers read together) can pass
+// Gemini's limit per minute. It then answers 429 and says how long to wait;
+// the request is sent again after that wait, or a longer one each time, as it
+// is after a passing server error.
+const RETRIES = 10;
+
+async function callGeminiPatiently(key, parts, generationConfig, timeoutMs) {
+  for (let attempt = 0; ; attempt += 1) {
+    const result = await callGemini(key, parts, generationConfig, timeoutMs);
+    if (attempt >= RETRIES || ![429, 500, 502, 503, 504].includes(result.response.status)) return result;
+    const delay = (result.payload?.error?.details ?? []).find((d) => String(d?.['@type']).endsWith('RetryInfo'))?.retryDelay;
+    const asked = delay ? parseFloat(delay) * 1000 : 0;
+    const wait = Math.min(60_000, Math.max(asked, 2000 * 2 ** attempt)) * (1 + Math.random() / 2);
+    await new Promise((resolve) => setTimeout(resolve, wait));
+  }
+}
+
 // Sends one prompt, followed by any other `parts` such as scanned pages, and
 // returns the model's reply parsed as JSON. `schema` is a JSON Schema that
 // Gemini shapes its output to. `nothing` (given Gemini's reason) and `garbled`
@@ -59,9 +76,9 @@ export async function generateJson({
   }
 
   const content = [{ text: prompt }, ...parts];
-  let { response, payload } = await callGemini(key, content, outputFormats.current(schema), timeoutMs);
+  let { response, payload } = await callGeminiPatiently(key, content, outputFormats.current(schema), timeoutMs);
   if (response.status === 400 && /responseFormat|unknown name|invalid json payload/i.test(payload?.error?.message ?? '')) {
-    ({ response, payload } = await callGemini(key, content, outputFormats.legacy(schema), timeoutMs));
+    ({ response, payload } = await callGeminiPatiently(key, content, outputFormats.legacy(schema), timeoutMs));
   }
 
   if (!response.ok) {

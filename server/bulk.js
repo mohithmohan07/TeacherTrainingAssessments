@@ -1,7 +1,9 @@
 // Answer papers uploaded all at once, as PDFs, one teacher's answers in each.
 // The PDFs say nothing about whose answers they are, which sections they
-// cover or which question paper was sat, so each one is sorted before it is
-// filed:
+// cover or which question paper was sat, so each one is matched before it is
+// filed. Uploading matches nothing: once every PDF is up, "Find the question
+// papers" matches them all at the same time, as many at once as the server's
+// memory allows. Matching a PDF:
 //   1. Its teacher comes from the file name, or else from the name written on
 //      the sheets, which OpenAI reads while it checks the language of every
 //      page.
@@ -25,6 +27,8 @@ import { attachStoredPages, removeStoredFile } from './scans.js';
 import { sittingForPaper } from './sittings.js';
 import { MARKINGS, testFor } from './results.js';
 import { startEvaluation } from './evaluate.js';
+import { jobsAtOnce } from './capacity.js';
+import { keepAwake } from './idle.js';
 
 /* ------------------------------------------------------------- the rows */
 
@@ -38,7 +42,7 @@ const selectPaper = db.prepare('SELECT * FROM papers WHERE id = ?');
 
 const insertItem = db.prepare(
   `INSERT INTO bulk_items (school_id, test_id, file_name, teacher_id, matched_by, sort_status)
-   VALUES (@school_id, @test_id, @file_name, @teacher_id, @matched_by, 'waiting')`
+   VALUES (@school_id, @test_id, @file_name, @teacher_id, @matched_by, 'new')`
 );
 const insertPage = db.prepare(
   `INSERT INTO bulk_pages (item_id, stored_name, mime_type, size_bytes, position)
@@ -117,8 +121,8 @@ export function teacherFromFileName(fileName, teachers) {
 
 /* ------------------------------------------------------------- adding */
 
-// Adds one PDF's pages, already made into pictures by the browser, and
-// queues it for sorting.
+// Adds one PDF's pages, already made into pictures by the browser. It waits
+// to be matched until "Find the question papers" is pressed.
 export const addItem = (school, test, fileName, files) => {
   const teacher = teacherFromFileName(fileName, selectSchoolTeachers.all(school.id));
   const id = db.transaction(() => {
@@ -134,7 +138,6 @@ export const addItem = (school, test, fileName, files) => {
     );
     return info.lastInsertRowid;
   })();
-  queueSort(id);
   return id;
 };
 
@@ -181,11 +184,20 @@ export function choosePageSections(item, pages) {
 
 /* -------------------------------------------------------------- sorting */
 
-// PDFs are sorted two at a time, in the order they were uploaded, so a big
-// upload does not send every PDF to OpenAI at once.
-const RUNNING_AT_ONCE = 2;
+// As many PDFs are matched at once as the server's memory allows (each holds
+// the teacher's pages and up to a dozen question papers while they go to
+// OpenAI, under 100 MB), in the order they were uploaded.
+export const MATCHING_AT_ONCE = jobsAtOnce(150);
 const waiting = [];
 let running = 0;
+
+// "Find the question papers": every PDF of the test not matched yet, or whose
+// matching failed, is matched now. Returns how many were started.
+export function matchAll(schoolId, testId) {
+  const items = selectItems.all(schoolId, testId).filter((item) => ['new', 'failed'].includes(item.sort_status));
+  for (const item of items) queueSort(item.id);
+  return items.length;
+}
 
 export function queueSort(id) {
   setStatus.run('waiting', null, id);
@@ -194,22 +206,24 @@ export function queueSort(id) {
 }
 
 function pump() {
-  while (running < RUNNING_AT_ONCE && waiting.length) {
+  while (running < MATCHING_AT_ONCE && waiting.length) {
     const id = waiting.shift();
     running += 1;
-    sortItem(id)
-      .catch((error) => {
-        console.error(`Sorting bulk PDF ${id} failed:`, error);
-        if (selectItem.get(id)) setStatus.run('failed', error.userMessage ?? `Sorting failed: ${error.message}`, id);
-      })
-      .finally(() => {
-        running -= 1;
-        pump();
-      });
+    keepAwake(
+      sortItem(id)
+        .catch((error) => {
+          console.error(`Sorting bulk PDF ${id} failed:`, error);
+          if (selectItem.get(id)) setStatus.run('failed', error.userMessage ?? `Matching failed: ${error.message}`, id);
+        })
+        .finally(() => {
+          running -= 1;
+          pump();
+        })
+    );
   }
 }
 
-// PDFs that were being sorted when the server stopped start again.
+// PDFs that were being matched when the server stopped start again.
 db.prepare("UPDATE bulk_items SET sort_status = 'waiting' WHERE sort_status = 'running'").run();
 for (const { id } of db.prepare("SELECT id FROM bulk_items WHERE sort_status = 'waiting' ORDER BY id").all()) {
   waiting.push(id);
@@ -343,7 +357,7 @@ async function sortItem(id) {
   const pages = selectPages.all(id);
 
   if (!openaiConfigured()) {
-    throw friendly('OpenAI is not set up on the server (the OPENAI_API_KEY secret is missing), so these pages cannot be sorted automatically. Choose the teacher, sections and papers yourself.');
+    throw friendly('OpenAI is not set up on the server (the OPENAI_API_KEY secret is missing), so these pages cannot be matched automatically. Choose the teacher, sections and papers yourself.');
   }
   const unreadable = pages.filter((page) => !OPENAI_IMAGE_TYPES.has(page.mime_type));
   if (unreadable.length) throw friendly('Some pages are in a picture format OpenAI cannot read. Remove this PDF and upload it again.');
@@ -366,7 +380,7 @@ async function sortItem(id) {
     name: 'answer_sheets_first_look',
     schema: LOOK_SCHEMA,
     task: 'read the name and languages on these answer sheets',
-    retry: 'Press Sort again to try again.',
+    retry: 'Press Match again to try again.',
   });
 
   const written = String(look.name_written ?? '').trim();
@@ -401,8 +415,8 @@ async function sortItem(id) {
     setStatus.run(
       'needs_teacher',
       written
-        ? `The name written on the sheets, “${written}”, matches no teacher at this school. Choose the teacher, and the pages are sorted then.`
-        : 'No name is written on the sheets and the file name matches no teacher. Choose the teacher, and the pages are sorted then.',
+        ? `The name written on the sheets, “${written}”, matches no teacher at this school. Choose the teacher, and the pages are matched then.`
+        : 'No name is written on the sheets and the file name matches no teacher. Choose the teacher, and the pages are matched then.',
       id
     );
     return;
@@ -429,7 +443,7 @@ async function sortItem(id) {
   // 3. Which section each page answers, and which paper each section was sat on.
   const library = allPapers();
   const candidates = candidatePapers(teacher, school, library);
-  if (!candidates.length) throw friendly('The paper library has no papers yet. Import the paper pack on the Paper library page, then press Sort again.');
+  if (!candidates.length) throw friendly('The paper library has no papers yet. Import the paper pack on the Paper library page, then press Match again.');
   const candidateIds = new Set(candidates.map((p) => p.id));
   const catalogue = library.filter((p) => !candidateIds.has(p.id));
 
@@ -467,7 +481,7 @@ async function sortItem(id) {
     name: 'answer_sheets_sorted',
     schema: SORT_SCHEMA,
     task: 'match these answer sheets to the question papers',
-    retry: 'Press Sort again to try again.',
+    retry: 'Press Match again to try again.',
   });
 
   if (!selectItem.get(id)) return; // removed while it was being sorted
@@ -586,9 +600,11 @@ export function presentItem(item, others = []) {
 
   const problems = [];
   const sorting = ['waiting', 'running'].includes(item.sort_status);
-  if (sorting) problems.push('Still being sorted.');
+  const unmatched = item.sort_status === 'new';
+  if (sorting) problems.push('Still being matched.');
+  if (unmatched) problems.push('Not matched yet.');
   if (!teacher) problems.push('Choose the teacher.');
-  if (!pages.some((p) => p.section)) problems.push(sorting ? '' : 'Put at least one page in Section A, B or C.');
+  if (!pages.some((p) => p.section)) problems.push(sorting || unmatched ? '' : 'Put at least one page in Section A, B or C.');
   for (const s of sections) {
     if (s.pages && !s.paper) problems.push(`Choose the ${s.label} question paper.`);
     if (s.existing === 'marking') problems.push(`${teacher.name}’s ${s.label} is being marked. Wait for it to finish.`);
@@ -695,10 +711,9 @@ const fileItem = (item, test) => {
 /* ----------------------------------------------------------- evaluating */
 
 // Evaluate pressed once for every sitting just filed. It is still Evaluate:
-// nothing is marked without it. The sittings are marked two at a time, each
-// as if its own Evaluate had been pressed, so a school's worth of papers does
-// not go to OpenAI at once.
-const MARKING_AT_ONCE = 2;
+// nothing is marked without it. Each sitting is marked as if its own Evaluate
+// had been pressed, as many at once as the server's memory allows.
+export const MARKING_AT_ONCE = jobsAtOnce(100);
 const toMark = [];
 let marking = 0;
 const selectMarkState = db.prepare('SELECT ai_status FROM assessments WHERE id = ?');
@@ -715,10 +730,12 @@ function markNext() {
   while (marking < MARKING_AT_ONCE && toMark.length) {
     const job = toMark.shift();
     marking += 1;
-    markOne(job).finally(() => {
-      marking -= 1;
-      markNext();
-    });
+    keepAwake(
+      markOne(job).finally(() => {
+        marking -= 1;
+        markNext();
+      })
+    );
   }
 }
 
