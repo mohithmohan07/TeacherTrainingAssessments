@@ -1579,15 +1579,22 @@ function writingCard(assessment, onSaved) {
   );
 }
 
-// Which model read the answers, from the language they are in. Sittings
-// marked before the language check say nothing.
+// Which model read the answers, from the language they are in, and the pages
+// Gemini would not read, which OpenAI read from the scans. Sittings marked
+// before the language check say nothing.
 function readingNote(reading) {
   if (!reading) return '';
-  const names = reading.languages ?? [];
-  const languages = names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+  const listed = (names) => (names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`);
+  const languages = listed(reading.languages ?? []);
+  const unread = reading.unread_pages ?? [];
+  const about = `The answers are ${languages ? `in ${languages}` : 'not all in English'}`;
   if (reading.read_by === 'gemini') {
-    return `The answers are ${languages ? `in ${languages}` : 'not all in English'}, so Gemini (${reading.model}) read them first. `;
+    const skipped = unread.length
+      ? ` Gemini would not read page${unread.length === 1 ? '' : 's'} ${listed(unread.map(String))}, so OpenAI read ${unread.length === 1 ? 'it' : 'them'} from the scan${unread.length === 1 ? '' : 's'}.`
+      : '';
+    return `${about}, so Gemini (${reading.model}) read them first.${skipped} `;
   }
+  if (unread.length) return `${about}. Gemini would not read them, so OpenAI read them from the scans. `;
   return 'The answers are in English, so OpenAI read them itself. ';
 }
 

@@ -3,7 +3,8 @@
 // Answers all in English are then read and marked by OpenAI from the scans.
 // Answers in another language, or in English mixed with another, are read by
 // Gemini, which writes down each page in the teacher's own language and
-// script, and OpenAI marks that reading the same way it marks the scans.
+// script, and OpenAI marks that reading the same way it marks the scans. A
+// page Gemini will not read goes to OpenAI as its scan instead.
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { UPLOADS_DIR } from './db.js';
@@ -109,7 +110,12 @@ export async function answerLanguage({ paper, response }) {
   return { language, languages, pages_swapped: paper.length > 0 && raw.pages_swapped === true };
 }
 
-// Gemini's reading of the answer pages: the text of each page, in order.
+// Gemini's reading of the answer pages: the text of each page, in order, or
+// null for a page Gemini would not read. Gemini sometimes sends a batch of
+// pages back with nothing but a reason such as OTHER, and does so again each
+// time, so the pages of such a batch are then sent one at a time: one page it
+// will not read no longer keeps it from reading the others. The pages it
+// still will not read are left for OpenAI to read from the scans.
 export async function readAnswers(files, languages) {
   const why = languages.length ? `The answers are in ${listed(languages)}, so` : 'The answers are not all in English, so';
   if (!geminiConfigured()) {
@@ -142,39 +148,62 @@ export async function readAnswers(files, languages) {
 
   const texts = [];
   for (const batch of batches) {
-    const first = batch[0].number;
-    const last = batch.at(-1).number;
-    let raw;
     try {
-      raw = await generateJson({
-        prompt: `${READING_PROMPT}\n\n${first === last ? `This is page ${first}` : `These are pages ${first} to ${last}`} of ${pagesOf(pages.length)}.`,
-        parts: await pageParts(batch),
-        schema: READING_SCHEMA,
-        timeoutMs: 5 * 60 * 1000,
-        nothing: (reason) => `Gemini did not read the answer pages (${reason}). Press Evaluate to try again.`,
-        garbled: 'Gemini sent back a reading of the answers that was cut off or garbled. Press Evaluate to try again.',
-      });
+      readInto(texts, batch, await readBatch(batch, pages.length));
     } catch (error) {
-      if (error instanceof GeminiError) {
-        const failure = friendly(`Reading the answers with Gemini failed: ${error.message}`);
-        failure.passing = error.passing;
-        throw failure;
-      }
-      throw error;
+      if (!error.unusable) throw failed(error);
+      if (batch.length === 1) continue;
+      await Promise.all(
+        batch.map(async (page) => {
+          try {
+            readInto(texts, [page], await readBatch([page], pages.length));
+          } catch (pageError) {
+            if (!pageError.unusable) throw failed(pageError);
+          }
+        })
+      );
     }
-    // Pages are matched by number, or in order if Gemini numbered them some
-    // other way.
-    const read = Array.isArray(raw?.pages) ? raw.pages : [];
-    const byNumber = new Map(read.map((page) => [Number(page?.page), page]));
-    const numbered = batch.some((page) => byNumber.has(page.number));
-    batch.forEach((page, i) => {
-      texts[page.number - 1] = String((numbered ? byNumber.get(page.number) : read[i])?.text ?? '').trim();
-    });
   }
-  if (!texts.some(Boolean)) {
+  const unread = pages.filter((page) => texts[page.number - 1] === undefined);
+  unread.forEach((page) => (texts[page.number - 1] = null));
+  if (unread.length) {
+    console.warn(`Gemini would not read ${unread.length === pages.length ? 'any' : `${unread.length}`} of ${pagesOf(pages.length)} (${unread.map((page) => page.number).join(', ')}), so OpenAI reads ${unread.length === 1 ? 'it' : 'them'} from the scans.`);
+  }
+  if (texts.every((text) => text === '')) {
     throw friendly('Gemini found no writing on the answer pages. Check they are the teacher’s answers and the right way up, then press Evaluate again.');
   }
   return texts;
+}
+
+async function readBatch(batch, total) {
+  const first = batch[0].number;
+  const last = batch.at(-1).number;
+  return generateJson({
+    prompt: `${READING_PROMPT}\n\n${first === last ? `This is page ${first}` : `These are pages ${first} to ${last}`} of ${pagesOf(total)}.`,
+    parts: await pageParts(batch),
+    schema: READING_SCHEMA,
+    timeoutMs: 5 * 60 * 1000,
+    nothing: (reason) => `Gemini did not read the answer pages (${reason}). Press Evaluate to try again.`,
+    garbled: 'Gemini sent back a reading of the answers that was cut off or garbled. Press Evaluate to try again.',
+  });
+}
+
+// Pages are matched by number, or in order if Gemini numbered them some other
+// way.
+function readInto(texts, batch, raw) {
+  const read = Array.isArray(raw?.pages) ? raw.pages : [];
+  const byNumber = new Map(read.map((page) => [Number(page?.page), page]));
+  const numbered = batch.some((page) => byNumber.has(page.number));
+  batch.forEach((page, i) => {
+    texts[page.number - 1] = String((numbered ? byNumber.get(page.number) : read[i])?.text ?? '').trim();
+  });
+}
+
+function failed(error) {
+  if (!(error instanceof GeminiError)) return error;
+  const failure = friendly(`Reading the answers with Gemini failed: ${error.message}`);
+  failure.passing = error.passing;
+  return failure;
 }
 
 // Each page in a batch, read from disk only when its batch is sent: its

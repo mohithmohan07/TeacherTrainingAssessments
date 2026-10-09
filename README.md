@@ -102,10 +102,12 @@ an optional first-page picture of each, and a `manifest.json` of their labels:
 Levels are `pre-primary`, `primary`, `middle-school`, `secondary` and
 `senior-secondary`; none means any level. The board is `CBSE`, `ICSE`,
 `Karnataka State`, `Karnataka Pre-University`, or empty for any. `priority`
-breaks ties between near-identical papers, higher first. Importing a pack
-again skips papers already in the library, and a paper some sitting uses
-cannot be deleted. Packs are for papers kept out of this repository: they
-live in the app's data folder, not on GitHub.
+breaks ties between near-identical papers, higher first. A subject given as
+a paper's whole heading ("Arts & Crafts | Total Marks: 35 | ... Subject: Arts
+and Crafts") is kept as just the subject's name, here and on teachers.
+Importing a pack again skips papers already in the library, and a paper some
+sitting uses cannot be deleted. Packs are for papers kept out of this
+repository: they live in the app's data folder, not on GitHub.
 
 ## Uploading scans
 
@@ -237,9 +239,13 @@ answers are written in. Answers all in English are read and marked by OpenAI
 from the scans, as above. Answers in another language, or in English mixed
 with another (even a word or a line), are read by Gemini first: it writes down
 each page in the teacher's own language and script, without translating or
-correcting it, and OpenAI marks that reading the same way. The note under the
-marks says which it was and names the languages. A sitting marked before this
-check keeps its marks until you press **Evaluate again**.
+correcting it, and OpenAI marks that reading the same way. Gemini sometimes
+sends a few pages back unread, with nothing but a reason such as OTHER. Those
+pages are then sent to it one at a time, and a page it still will not read goes
+to OpenAI as its scan, so the paper is marked all the same. The note under the
+marks says which it was, names the languages and lists any pages OpenAI read
+from the scans. A sitting marked before this check keeps its marks until you
+press **Evaluate again**.
 
 Evaluate first asks how the marks are counted. OpenAI marks every answer the
 same way in both:
@@ -267,8 +273,8 @@ them: Excellent 8.5 and above, Good 7 to 8, Fair 5 to 6.5, Needs Practice
 below 5. Only answers written in words count; option letters, one-word
 answers and drawings are left out, and a section with too little writing says
 so instead of a score. Answers are judged in the language they are written in,
-from the scans for answers in English and from Gemini's reading for the rest.
-It changes no mark, grade, total or potential identifier, and a check that
+from the scans for answers in English and from Gemini's reading for the rest
+(with the scans of any pages Gemini would not read). It changes no mark, grade, total or potential identifier, and a check that
 fails leaves the marks in place.
 
 The score shows on the teacher's row on the board, on the assessment page and

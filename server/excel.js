@@ -1,5 +1,6 @@
 import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
+import { subjectName } from './papers.js';
 
 export const TEMPLATE_COLUMNS = [
   { header: 'Teacher Name', key: 'name', width: 30 },
@@ -223,7 +224,7 @@ export async function parseTeacherWorkbook(buffer) {
     const grade = read('grade');
     const subjects = read('subjects')
       .split(/[,;/]/)
-      .map((part) => part.trim())
+      .map(subjectName)
       .filter(Boolean)
       .join(', ');
     const email = read('email');

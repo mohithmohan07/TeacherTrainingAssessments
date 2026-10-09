@@ -34,7 +34,7 @@ export function paperLabelsFrom(body) {
   return {
     title: String(body.title ?? '').trim(),
     sections: sections.join(','),
-    subject: String(body.subject ?? '').trim(),
+    subject: subjectName(body.subject),
     levels: LEVEL_KEYS.filter((key) => levels.includes(key)).join(','),
     board: String(body.board ?? '').trim(),
     language: String(body.language ?? '').trim(),
@@ -111,6 +111,32 @@ export function subjectKeys(text) {
     }
   }
   return keys;
+}
+
+// A subject as a short name. Some were saved with a question paper's whole
+// heading, such as "Arts & Crafts | Target Grades: Up to 10 | Total Marks: 35 |
+// Time: 1 Hour ... Subject: Arts and Crafts", which then showed in every list
+// and label. From such a heading (it has a colon) the name after "Subject:"
+// is taken, or else the part before the first "|". Any other subject is kept
+// as it is.
+const HEADING_FIELD = /\s*(?:\||\b(?:(?:max(?:imum)?|total|target|assessed)\.?\s+)?(?:marks|time|duration|class(?:es)?|grades?|teacher|level|date|section|board|language|medium|name|code)\s*:)/i;
+
+export function subjectName(text) {
+  const value = String(text ?? '').replace(/\s+/g, ' ').trim();
+  if (!value.includes(':')) return value;
+  const named = value.split(/\bsubjects?\s*:/i);
+  if (named.length > 1) {
+    const name = named.at(-1).split(HEADING_FIELD)[0].replace(/^[\s:–—-]+|[\s,;.:–—-]+$/g, '');
+    if (name) return name;
+  }
+  const first = value.split('|')[0].trim();
+  return first && !first.includes(':') ? first : value;
+}
+
+// A teacher's subjects, "Maths, Science", with each one shortened the same way.
+export function subjectsText(text) {
+  const value = String(text ?? '').trim();
+  return value.includes(':') ? value.split(',').map(subjectName).filter(Boolean).join(', ') : value;
 }
 
 const ROMAN = { i: 1, ii: 2, iii: 3, iv: 4, v: 5, vi: 6, vii: 7, viii: 8, ix: 9, x: 10, xi: 11, xii: 12 };
@@ -429,3 +455,23 @@ export async function importPack(buffer) {
   }
   return result;
 }
+
+// Subjects saved before they were shortened (subjectName) are shortened once,
+// at startup: on the papers, on the sittings and the titles that name them,
+// and on the teachers.
+db.transaction(() => {
+  for (const paper of db.prepare("SELECT id, subject FROM papers WHERE subject LIKE '%:%'").all()) {
+    const subject = subjectName(paper.subject);
+    if (subject !== paper.subject) db.prepare('UPDATE papers SET subject = ? WHERE id = ?').run(subject, paper.id);
+  }
+  for (const sitting of db.prepare("SELECT id, title, subject FROM assessments WHERE subject LIKE '%:%'").all()) {
+    const subject = subjectName(sitting.subject);
+    if (subject === sitting.subject) continue;
+    const title = String(sitting.title ?? '').replaceAll(sitting.subject, subject);
+    db.prepare('UPDATE assessments SET subject = ?, title = ? WHERE id = ?').run(subject, title, sitting.id);
+  }
+  for (const teacher of db.prepare("SELECT id, subjects FROM teachers WHERE subjects LIKE '%:%'").all()) {
+    const subjects = subjectsText(teacher.subjects);
+    if (subjects !== teacher.subjects) db.prepare('UPDATE teachers SET subjects = ? WHERE id = ?').run(subjects, teacher.id);
+  }
+})();

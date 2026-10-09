@@ -423,7 +423,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
     }[item.matched_by] ?? (item.name_written ? `Name on the sheets: “${item.name_written}”.` : '');
 
     const languages = item.languages.length
-      ? `Written in ${item.languages.join(' and ')}.${item.read_by_gemini ? ` Gemini read the ${pageCount(item.read_by_gemini)} not in English.` : ''}`
+      ? `Written in ${item.languages.join(' and ')}.${item.read_by_gemini ? ` Gemini read ${pageCount(item.read_by_gemini)} not in English.` : ''}`
       : '';
 
     return h(
