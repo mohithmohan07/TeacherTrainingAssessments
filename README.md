@@ -157,8 +157,13 @@ upload never loses pages. See `scanner-helper/README.txt` for its settings.
 **Upload all answer papers (PDFs)** on the Assessments page takes every
 teacher's scanned answer paper in one go: one PDF per teacher, chosen together
 with **Upload files** or dropped on the page. The browser turns each PDF's
-pages into pictures and uploads them. The PDFs need not say whose answers they
-are, which sections they cover or which paper was sat; each one is sorted:
+pages into pictures and uploads them; the PDFs themselves are not changed.
+Uploading matches nothing. Once every PDF is up, **Find the question papers**
+matches them all at the same time, as many at once as the server's memory
+allows (all of a school's PDFs with the 10 GB in `fly.toml`, one at a time
+with 512 MB). Keep the page open until it finishes: the app goes to sleep
+when nobody is using it. The PDFs need not say whose answers they are, which
+sections they cover or which paper was sat; matching works each one out:
 
 1. **The teacher** comes from the file name ("Keshava.pdf",
    "Archana_BM.pdf"), or else from the name written on the sheets, which
@@ -185,8 +190,10 @@ which can be changed; **Preview** shows a section's question paper beside the
 teacher's answers to it. **File** puts each section's pages under the
 teacher's sitting for that section, with its question paper. Filing marks
 nothing: **Evaluate all** (with one Standard or Lenient choice) marks the
-sections just filed, two at a time, or each can be evaluated on its own.
-PDFs not yet filed wait on the page for the next visit.
+sections just filed, as many at once as the memory allows, or each can be
+evaluated on its own. When many requests go together, OpenAI and Gemini may
+ask the app to slow down; it waits as long as they ask and sends the request
+again. PDFs not yet filed wait on the page for the next visit.
 
 ### Uploading image files
 
@@ -466,11 +473,17 @@ Two things are different from running it on your laptop:
   needs you to sign in once. Without it the app is wide open, which is fine on
   your own laptop and not fine on the internet.
 
+The machine has 10 GB of memory on 8 shared CPUs (`[[vm]]` in `fly.toml`),
+so a school's answer PDFs can be matched and marked all at once, and
+`NODE_OPTIONS` lets Node use about 8 GB of it. Fly applies `[[vm]]` on every
+deploy, so change it there rather than with `fly scale`; keep
+`--max-old-space-size` about 2 GB under the memory. With less memory the app
+simply does fewer at once. Fly stops the machine when nobody is using the app
+(`auto_stop_machines = 'stop'`), so it is paid for only while it runs.
+
 The image also has Chromium's headless shell in it, which prints the reports
 for **Download all reports**. While it prints, Chromium needs up to about
-250 MB besides the app's own 150 MB or so, which fits in the machine's 512 MB.
-If a zip ever fails for lack of memory, give the machine 1 GB
-(`memory = '1gb'` under `[[vm]]` in `fly.toml`).
+250 MB besides the app's own memory.
 
 First install the Fly command line tool, if you have not already:
 

@@ -15,6 +15,7 @@ import papersRouter from './routes/papers.js';
 import trainingRouter from './routes/training.js';
 import bulkRouter from './routes/bulk.js';
 import { sendHelperZip } from './helper-download.js';
+import { MARKING_AT_ONCE, MATCHING_AT_ONCE } from './bulk.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 3000);
@@ -81,5 +82,6 @@ app.listen(PORT, () => {
   console.log(`\n  Teacher Training Assessments`);
   console.log(`  Open http://localhost:${PORT} in your browser`);
   console.log(`  Data is stored in ${DATA_DIR}`);
+  console.log(`  Answer PDFs are matched up to ${MATCHING_AT_ONCE} at once, and marked up to ${MARKING_AT_ONCE} at once.`);
   console.log(authEnabled ? '  Password protection is on.\n' : '  Password protection is off (set APP_PASSWORD to turn it on).\n');
 });

@@ -1034,7 +1034,7 @@ tr.just-filed > td { animation: just-filed 3.5s ease-out; }
 .bulk-page.section-A { border-top-color: #4a7bb0; }
 .bulk-page.section-B { border-top-color: #b07a2a; }
 .bulk-page.section-C { border-top-color: #3f8f6a; }
-.bulk-page.section-none { border-top-color: #c3ccd6; opacity: 0.8; }
+.bulk-page.section-none { border-top-color: #c3ccd6; }
 .bulk-page img { width: 100%; height: 130px; object-fit: cover; object-position: top; cursor: zoom-in; border-radius: 4px; background: var(--surface-2); }
 .bulk-page-foot { display: flex; flex-direction: column; color: var(--muted); }
 .bulk-page-foot span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

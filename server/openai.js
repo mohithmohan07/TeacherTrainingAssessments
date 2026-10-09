@@ -19,6 +19,31 @@ export function friendly(message) {
   return error;
 }
 
+// Many requests sent together (a school's answer papers matched or marked at
+// once) can pass OpenAI's limit on tokens per minute. It then answers 429 and
+// says how long to wait; the request is sent again after that wait, or a
+// longer one each time, for up to about a quarter of an hour, as it is after a
+// passing server error. No credit left on the account is not waited out.
+const RETRIES = 15;
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const busy = (res, payload) =>
+  (res.status === 429 && ![payload?.error?.code, payload?.error?.type].includes('insufficient_quota')) ||
+  [500, 502, 503, 504].includes(res.status);
+
+// The wait OpenAI asks for, in a header or in its message ("Please try again
+// in 12.5s"), or one that doubles each time if that is longer, up to a
+// minute. Up to half again is added at random, so requests that waited
+// together do not all come back at the same moment.
+function waitBefore(res, payload, attempt) {
+  const hint = /try again in (\d+(?:\.\d+)?)\s*(ms|s)\b/i.exec(payload?.error?.message ?? '');
+  const asked =
+    Number(res?.headers.get('retry-after-ms')) ||
+    Number(res?.headers.get('retry-after')) * 1000 ||
+    (hint ? Number(hint[1]) * (hint[2].toLowerCase() === 'ms' ? 1 : 1000) : 0);
+  return Math.min(60_000, Math.max(asked, 2000 * 2 ** attempt)) * (1 + Math.random() / 2);
+}
+
 // Sends one request and returns the parsed JSON object. `task` finishes the
 // sentence "OpenAI took more than five minutes to …" and `retry` says what to
 // press to try again, so every failure reads as advice.
@@ -31,26 +56,39 @@ export async function requestJson({ instructions, content, name, schema, task, r
     store: false,
   };
 
+  const sent = JSON.stringify(body);
   let res;
-  try {
-    res = await fetch(OPENAI_URL, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-  } catch (error) {
-    throw friendly(
-      error.name === 'TimeoutError'
-        ? `OpenAI took more than five minutes to ${task}. ${retry}`
-        : `Could not reach OpenAI: ${error.message}`
-    );
+  let payload;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      res = await fetch(OPENAI_URL, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          'content-type': 'application/json',
+        },
+        body: sent,
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      });
+    } catch (error) {
+      if (error.name !== 'TimeoutError' && attempt < RETRIES) {
+        await pause(waitBefore(null, null, attempt));
+        continue;
+      }
+      throw friendly(
+        error.name === 'TimeoutError'
+          ? `OpenAI took more than five minutes to ${task}. ${retry}`
+          : `Could not reach OpenAI: ${error.message}`
+      );
+    }
+    payload = await res.json().catch(() => null);
+    if (busy(res, payload) && attempt < RETRIES) {
+      await pause(waitBefore(res, payload, attempt));
+      continue;
+    }
+    break;
   }
 
-  const payload = await res.json().catch(() => null);
   if (!res.ok) {
     const detail = payload?.error?.message ?? `HTTP ${res.status}`;
     if (res.status === 401) throw friendly(`OpenAI rejected the API key in OPENAI_API_KEY (${detail}).`);

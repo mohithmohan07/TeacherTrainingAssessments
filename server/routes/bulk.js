@@ -1,11 +1,11 @@
-// Answer papers uploaded together as PDFs, sorted, checked and filed (bulk.js).
+// Answer papers uploaded together as PDFs, matched, checked and filed (bulk.js).
 import express from 'express';
 import db from '../db.js';
 import { uploadPdfPages } from '../uploads.js';
 import { discardUploads } from '../scans.js';
 import { testFor } from '../results.js';
 import {
-  addItem, evaluateSittings, markingState, choosePageSections, choosePapers, chooseTeacher, fileReady, itemFor, presentItem, presentItems, queueSort, removeItem,
+  addItem, evaluateSittings, markingState, matchAll, choosePageSections, choosePapers, chooseTeacher, fileReady, itemFor, presentItem, presentItems, queueSort, removeItem,
 } from '../bulk.js';
 
 const router = express.Router();
@@ -24,8 +24,8 @@ router.get('/', (req, res) => {
   res.json({ school: { id: school.id, name: school.name }, test: { id: test.id, name: test.name }, items: presentItems(school.id, test.id) });
 });
 
-// One PDF's pages, as pictures, with the PDF's file name. Sorting starts on
-// its own; nothing is filed or marked.
+// One PDF's pages, as pictures, with the PDF's file name. Nothing is
+// matched, filed or marked yet.
 router.post('/', uploadPdfPages.array('pages', 120), (req, res) => {
   const { school, test } = schoolAndTest(req.body);
   if (!school) {
@@ -57,11 +57,20 @@ router.put('/:id', (req, res) => {
   res.json(presentItem(itemFor(item.id), items));
 });
 
-// Sort again, for example after the paper pack was imported.
+// "Find the question papers": every PDF of the test not matched yet, or whose
+// matching failed, is matched at once.
+router.post('/match', (req, res) => {
+  const { school, test } = schoolAndTest(req.body);
+  if (!school) return res.status(400).json({ error: 'Pick a school.' });
+  const started = matchAll(school.id, test.id);
+  res.json({ started, items: presentItems(school.id, test.id) });
+});
+
+// Match one PDF again, for example after the paper pack was imported.
 router.post('/:id/sort', (req, res) => {
   const item = itemFor(req.params.id);
   if (!item) return res.status(404).json({ error: 'That PDF is no longer waiting to be filed.' });
-  if (['waiting', 'running'].includes(item.sort_status)) return res.status(400).json({ error: 'It is being sorted already.' });
+  if (['waiting', 'running'].includes(item.sort_status)) return res.status(400).json({ error: 'It is being matched already.' });
   queueSort(item.id);
   res.json(presentItem(itemFor(item.id)));
 });
@@ -82,7 +91,8 @@ router.post('/file', (req, res) => {
 });
 
 // Evaluate pressed for every sitting just filed, with one Standard or Lenient
-// choice for all of them. They are marked a couple at a time.
+// choice for all of them. They are marked as many at once as the server's
+// memory allows.
 router.post('/evaluate', (req, res) => {
   const ids = (Array.isArray(req.body.ids) ? req.body.ids : []).map(Number).filter((id) => db.prepare('SELECT 1 FROM assessments WHERE id = ?').get(id));
   if (!ids.length) return res.status(400).json({ error: 'There is nothing to evaluate.' });

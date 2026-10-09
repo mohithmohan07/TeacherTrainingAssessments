@@ -11,6 +11,9 @@ primary_region = 'ams'
 [env]
   DATA_DIR = '/data'
   PORT = '8080'
+  # Lets Node use most of the 10 GB below, so a school's answer PDFs can be
+  # matched and marked all at once. Keep it about 2 GB under the memory there.
+  NODE_OPTIONS = '--max-old-space-size=8192'
 
 [[mounts]]
   source = 'assessments_data'
@@ -19,7 +22,9 @@ primary_region = 'ams'
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = 'suspend'
+  # Stops when nobody is using the app, so it is paid for only while it runs.
+  # (Fly can suspend a machine instead only when it has 2 GB or less.)
+  auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 0
 
@@ -35,6 +40,9 @@ primary_region = 'ams'
     method = 'GET'
     path = '/healthz'
 
+# 10 GB, so a school's answer PDFs can be matched at once. A shared CPU takes
+# up to 2 GB each, so 10 GB needs 8 of them. Fly applies this on every deploy,
+# over anything set with `fly scale`.
 [[vm]]
-  size = 'shared-cpu-1x'
-  memory = '512mb'
+  size = 'shared-cpu-8x'
+  memory = '10gb'
