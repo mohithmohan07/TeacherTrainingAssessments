@@ -12,12 +12,14 @@ export function geminiConfigured() {
 }
 
 // `passing` marks a failure that should pass by itself, such as Gemini staying
-// too busy or too slow for a while (see openai.js).
+// too busy or too slow for a while (see openai.js). `unusable` marks a reply
+// that came back without what was asked for: empty, refused or garbled.
 export class GeminiError extends Error {
-  constructor(message, status = 502, { passing = false } = {}) {
+  constructor(message, status = 502, { passing = false, unusable = false } = {}) {
     super(message);
     this.status = status;
     this.passing = passing;
+    this.unusable = unusable;
   }
 }
 
@@ -116,13 +118,23 @@ export async function generateJson({
     .map((part) => part.text ?? '')
     .join('');
   if (!text) {
+    // Gemini gives a reason such as OTHER or SAFETY, and sometimes a message.
+    // Both go to the log so a refusal can be looked into later.
     const reason = candidate?.finishReason ?? payload?.promptFeedback?.blockReason ?? 'no content';
-    throw new GeminiError(nothing(reason));
+    console.warn('Gemini sent back no content:', JSON.stringify({
+      finishReason: candidate?.finishReason,
+      finishMessage: candidate?.finishMessage,
+      promptFeedback: payload?.promptFeedback,
+      safetyRatings: candidate?.safetyRatings,
+      usage: payload?.usageMetadata,
+    }));
+    throw new GeminiError(nothing(reason), 502, { unusable: true });
   }
 
   try {
     return JSON.parse(text);
   } catch {
-    throw new GeminiError(garbled);
+    console.warn(`Gemini sent back JSON that could not be read (finish reason ${candidate?.finishReason ?? 'none'}, ${text.length} characters).`);
+    throw new GeminiError(garbled, 502, { unusable: true });
   }
 }

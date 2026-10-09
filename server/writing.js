@@ -7,12 +7,13 @@
 // total. Answers are judged in the language they are written in.
 //
 // OpenAI judges from what the marking read: the scanned pages for answers in
-// English, or Gemini's reading for answers in other languages. Sittings
-// marked before the check get it when their reports are built, judged from
-// what the marking wrote down of each answer.
+// English, or Gemini's reading for answers in other languages, with the scans
+// of any pages Gemini would not read. Sittings marked before the check get it
+// when their reports are built, judged from what the marking wrote down of
+// each answer.
 import db from './db.js';
 import { OPENAI_MODEL, openaiConfigured, requestJson } from './openai.js';
-import { pageInputs } from './paper-inputs.js';
+import { pageInputs, readingInputs } from './paper-inputs.js';
 import { sectionKey, sectionName } from './results.js';
 
 export const WRITING_NAME = 'Written Expression';
@@ -129,25 +130,27 @@ function questionList(questions, full) {
 }
 
 // Checks the writing in a marked sitting's answers. `source` is what to judge
-// from: { pages } for the scanned answer pages, { reading } for Gemini's
-// reading of them, or nothing for what the marking wrote down. Returns the
-// check to keep with the marking, or null when nothing was written.
+// from: { pages } for the scanned answer pages, { reading, pages } for
+// Gemini's reading of them (a page it would not read is null there, and goes
+// as its scan from pages), or nothing for what the marking wrote down.
+// Returns the check to keep with the marking, or null when nothing was
+// written.
 export async function checkWriting(questions, source = {}) {
   if (!questions.some(written)) return null;
-  const from = source.pages?.length ? 'scans' : source.reading?.length ? 'reading' : 'transcripts';
+  const from = source.reading?.length ? 'reading' : source.pages?.length ? 'scans' : 'transcripts';
   const content = [];
+  let note = SOURCE_NOTES[from];
   if (from === 'scans') {
     content.push({ type: 'input_text', text: `TEACHER'S RESPONSE (${source.pages.length} page${source.pages.length === 1 ? '' : 's'}):` });
     content.push(...(await pageInputs("TEACHER'S RESPONSE", source.pages)));
   } else if (from === 'reading') {
-    source.reading.forEach((text, i) =>
-      content.push({ type: 'input_text', text: `TEACHER'S RESPONSE, page ${i + 1} of ${source.reading.length}:\n${text || '(nothing written on this page)'}` })
-    );
+    content.push(...(await readingInputs(source.reading, source.pages)));
+    if (source.reading.some((text) => text === null)) note += ' Pages that could not be read come as the scanned pages instead: judge the writing on those from the scans.';
   }
   content.push({ type: 'input_text', text: questionList(questions, from === 'transcripts') });
 
   const raw = await requestJson({
-    instructions: `${INSTRUCTIONS}\n\n${SOURCE_NOTES[from]}`,
+    instructions: `${INSTRUCTIONS}\n\n${note}`,
     content,
     name: 'written_expression',
     schema: SCHEMA,

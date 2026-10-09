@@ -48,6 +48,21 @@ export async function pageInputs(group, files) {
   return pages.flatMap((page, i) => [{ type: 'input_text', text: `${group}, page ${i + 1} of ${files.length}:` }, page]);
 }
 
+// The teacher's answers as read (reading.js), page by page: what was read of
+// each page, or the scanned page itself where it could not be read (its text
+// is null).
+export async function readingInputs(texts, files = []) {
+  const inputs = await Promise.all(
+    texts.map(async (text, i) => {
+      const label = `TEACHER'S RESPONSE, page ${i + 1} of ${texts.length}`;
+      if (text !== null && text !== undefined) return [{ type: 'input_text', text: `${label}:\n${text || '(nothing written on this page)'}` }];
+      if (!files[i]) return [{ type: 'input_text', text: `${label}:\n(this page could not be read)` }];
+      return [{ type: 'input_text', text: `${label}, the scanned page, as it could not be read:` }, await imageInput(files[i])];
+    })
+  );
+  return inputs.flat();
+}
+
 async function imageInput(file) {
   const data = await fs.readFile(path.join(UPLOADS_DIR, file.stored_name));
   return { type: 'input_image', image_url: `data:${file.mime_type};base64,${data.toString('base64')}`, detail: 'high' };

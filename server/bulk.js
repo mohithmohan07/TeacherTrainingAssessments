@@ -432,8 +432,13 @@ async function sortItem(id) {
     } else {
       try {
         const texts = await readAnswers(notEnglish, names);
-        notEnglish.forEach((page, i) => readings.set(page.id, texts[i]));
-        result.read_by_gemini = notEnglish.length;
+        notEnglish.forEach((page, i) => texts[i] !== null && readings.set(page.id, texts[i]));
+        result.read_by_gemini = texts.filter((text) => text !== null).length;
+        const unread = notEnglish.length - result.read_by_gemini;
+        if (unread) {
+          const which = unread === notEnglish.length ? `the page${unread === 1 ? '' : 's'}` : unread === 1 ? 'one of the pages' : `${unread} of the pages`;
+          result.notes.push(`Gemini would not read ${which} not in English, so OpenAI matched ${unread === 1 ? 'it' : 'them'} from the pictures alone.`);
+        }
       } catch (error) {
         result.notes.push(`Gemini could not read the pages that are not in English (${error.userMessage ?? error.message}), so OpenAI matched them from the pictures alone.`);
       }

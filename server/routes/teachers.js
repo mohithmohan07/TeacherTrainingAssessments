@@ -5,7 +5,7 @@ import { SCAN_KINDS, attachScans, discardUploads } from '../scans.js';
 import { buildTeacherTemplate, parseTeacherWorkbook } from '../excel.js';
 import { GRADES, potentialFor, teacherResults, testFor } from '../results.js';
 import { findReport, isOldLayout, isOutOfDate, lacksAnswers } from '../reports.js';
-import { PAPER_SECTIONS, allPapers, presentPaper, sittingPapers, suggestPapers, teacherProfile } from '../papers.js';
+import { PAPER_SECTIONS, allPapers, presentPaper, sittingPapers, subjectsText, suggestPapers, teacherProfile } from '../papers.js';
 import { currentAssessmentFor } from '../sittings.js';
 
 const router = express.Router();
@@ -22,7 +22,7 @@ function teacherFields(body) {
   return {
     name: String(body.name ?? '').trim(),
     grade: String(body.grade ?? '').trim(),
-    subjects: String(body.subjects ?? '').trim(),
+    subjects: subjectsText(body.subjects),
     email: String(body.email ?? '').trim(),
     phone: String(body.phone ?? '').trim(),
   };

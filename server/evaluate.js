@@ -4,25 +4,26 @@
 // (scanned pages, or PDFs confirmed from the paper library), and it reads both
 // and marks every question. Answers in another language, or mixed with one,
 // are read by Gemini first, and the model marks Gemini's reading of them
-// instead of the scans. It runs in the background: the request that
-// starts it returns straight away and the page polls the assessment until the
-// marking is done or has failed. Once it is done, the teacher's reports for
-// the test are rebuilt (reports.js). Evaluate also says how the marks are
-// counted: standard, or lenient, which leaves the questions the teacher did
-// not attempt out of the marks and the total (results.js). For every question
-// the marking also says what was asked and what a full-marks answer contains,
+// instead of the scans; a page Gemini will not read goes to the model as its
+// scan. It runs in the background: the request that starts it returns
+// straight away and the page polls the assessment until the marking is done
+// or has failed. Once it is done, the teacher's reports for the test are
+// rebuilt (reports.js). Evaluate also says how the marks are counted:
+// standard, or lenient, which leaves the questions the teacher did not
+// attempt out of the marks and the total (results.js). For every question the
+// marking also says what was asked and what a full-marks answer contains,
 // which the teacher's reports show beside what the teacher wrote. Once the
 // answers are marked, their Written Expression is checked from what was
 // marked (writing.js); that changes no mark.
 import db from './db.js';
 import { OPENAI_MODEL, friendly, openaiConfigured, requestJson } from './openai.js';
 import { GEMINI_MODEL } from './gemini.js';
-import { answerLanguage, readAnswers } from './reading.js';
+import { answerLanguage, listed, readAnswers } from './reading.js';
 import { queueTeacherReports } from './reports.js';
 import { swapScanKinds } from './scans.js';
 import { sittingPapers } from './papers.js';
 import { counts, markingOf, sectionKey } from './results.js';
-import { OPENAI_IMAGE_TYPES, pageInputs, questionPaperInputs } from './paper-inputs.js';
+import { OPENAI_IMAGE_TYPES, pageInputs, questionPaperInputs, readingInputs } from './paper-inputs.js';
 import { EXPECTED_ANSWER_RULE, QUESTION_TEXT_RULE } from './answers.js';
 import { checkWriting, writingOf } from './writing.js';
 import { keepAwake } from './idle.js';
@@ -51,7 +52,17 @@ Mark the response against the question paper:
 - Keep feedback short and specific: what was right, what was missing.
 - Write the feedback, summary, strengths and areas to improve in English, for the teacher's trainer.`;
 
-const instructionsFor = (read) => [EXAMINER, read ? READ_RESPONSE : SCANNED_RESPONSE, MARKING_RULES].join('\n\n');
+// Added when Gemini would not read some of the pages, or any of them: those
+// go to the model as the scanned pages (numbered from 1).
+function scannedPagesNote(unread, total) {
+  if (!unread.length) return '';
+  const which = unread.length === total
+    ? 'None of the pages could be read for you, so they come as the scanned pages themselves instead of a reading.'
+    : `Page${unread.length === 1 ? '' : 's'} ${listed(unread.map(String))} could not be read for you, so ${unread.length === 1 ? 'it comes' : 'they come'} as the scanned page${unread.length === 1 ? '' : 's'} instead of a reading.`;
+  return `${which} Read the teacher's writing on ${unread.length === 1 ? 'that page' : 'those pages'} yourself, in the language and script it is written in, and mark it the same way.`;
+}
+
+const instructionsFor = (read, note = '') => [EXAMINER, read ? READ_RESPONSE : SCANNED_RESPONSE, note, MARKING_RULES].filter(Boolean).join('\n\n');
 
 const RESULT_SCHEMA = {
   type: 'object',
@@ -178,20 +189,25 @@ async function evaluate(assessment, { paper, library, response }, marking) {
     writingSource = { pages: pagesSwapped ? paper : response };
   } else {
     // Gemini reads the pages the answers are on, which are the other group
-    // when the two were filed the wrong way round.
+    // when the two were filed the wrong way round. Pages Gemini would not
+    // read go to the model as their scans.
     const [questionPages, answerPages] = language.pages_swapped ? [response, paper] : [paper, response];
-    const pages = await readAnswers(answerPages, language.languages);
-    marks = await markAnswers(assessment, true, [
-      ...(await questionPaperInputs({ paper: questionPages, library })),
-      { type: 'input_text', text: `TEACHER'S RESPONSE (${pages.length} page${pages.length === 1 ? '' : 's'}), as read from the scans:` },
-      ...pages.map((text, i) => ({
-        type: 'input_text',
-        text: `TEACHER'S RESPONSE, page ${i + 1} of ${pages.length}:\n${text || '(nothing written on this page)'}`,
-      })),
-    ]);
+    const texts = await readAnswers(answerPages, language.languages);
+    const unread = texts.flatMap((text, i) => (text === null ? [i + 1] : []));
+    const none = unread.length === texts.length;
+    marks = await markAnswers(
+      assessment,
+      true,
+      [
+        ...(await questionPaperInputs({ paper: questionPages, library })),
+        { type: 'input_text', text: `TEACHER'S RESPONSE (${texts.length} page${texts.length === 1 ? '' : 's'}), ${none ? 'as the scanned pages' : 'as read from the scans'}:` },
+        ...(await readingInputs(texts, answerPages)),
+      ],
+      scannedPagesNote(unread, texts.length)
+    );
     pagesSwapped = language.pages_swapped;
-    reading = { ...language, read_by: 'gemini', model: GEMINI_MODEL };
-    writingSource = { reading: pages };
+    reading = { ...language, read_by: none ? 'openai' : 'gemini', model: none ? OPENAI_MODEL : GEMINI_MODEL, unread_pages: unread };
+    writingSource = none ? { pages: answerPages } : { reading: texts, pages: answerPages };
   }
   const questions = scopeToSection(marks.questions ?? [], assessment.section);
   if (!questions.length) {
@@ -217,10 +233,10 @@ async function evaluate(assessment, { paper, library, response }, marking) {
 }
 
 // `read` says the response is Gemini's reading of the answers rather than the
-// scanned pages.
-function markAnswers(assessment, read, content) {
+// scanned pages, and `note` says which pages of it are scans all the same.
+function markAnswers(assessment, read, content, note = '') {
   return requestJson({
-    instructions: instructionsFor(read) + sectionInstructions(assessment.section),
+    instructions: instructionsFor(read, note) + sectionInstructions(assessment.section),
     content,
     name: 'assessment_marks',
     schema: RESULT_SCHEMA,
@@ -295,15 +311,18 @@ export function normalise(raw) {
   };
 }
 
-// How the answers were read: the language they are in, and whether OpenAI
-// read them from the scans or Gemini read them first. Sittings marked before
-// the language check have none.
+// How the answers were read: the language they are in, whether OpenAI read
+// them from the scans or Gemini read them first, and the pages Gemini would
+// not read, which OpenAI read from the scans. Sittings marked before the
+// language check have none.
 function readingOf(reading) {
   if (!reading || typeof reading !== 'object') return null;
+  const unread = (Array.isArray(reading.unread_pages) ? reading.unread_pages : []).map(Number).filter(Number.isInteger);
   return {
     language: String(reading.language ?? ''),
     languages: (reading.languages ?? []).map(String),
     read_by: reading.read_by === 'gemini' ? 'gemini' : 'openai',
     model: String(reading.model ?? ''),
+    ...(unread.length ? { unread_pages: unread } : {}),
   };
 }

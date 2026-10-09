@@ -1,6 +1,7 @@
 // A teacher's current sitting in a test: what the board's row uploads to, and
 // where pages moved to that teacher go.
 import db from './db.js';
+import { subjectName } from './papers.js';
 
 // The most recently created sitting in the test for the full paper or the
 // section, not the latest by date: the date is editable, so a backdated entry
@@ -31,7 +32,7 @@ export function currentAssessmentFor(teacher, test, section = null) {
     test_id: test.id,
     section,
     title: `${test.name} - ${teacher.name}${section ? ` - Section ${section}` : ''}`,
-    subject: String(teacher.subjects ?? '').split(',')[0].trim(),
+    subject: subjectName(String(teacher.subjects ?? '').split(',')[0]),
   });
   return selectAssessmentById.get(info.lastInsertRowid);
 }
@@ -60,7 +61,7 @@ export function sittingForPaper(teacher, test, section, paperId, { create = true
   });
   if (open || !create) return open ?? null;
 
-  const subject = selectPaperRow.get(paperId)?.subject || String(teacher.subjects ?? '').split(',')[0].trim();
+  const subject = subjectName(selectPaperRow.get(paperId)?.subject) || subjectName(String(teacher.subjects ?? '').split(',')[0]);
   const info = insertAssessment.run({
     school_id: teacher.school_id,
     teacher_id: teacher.id,
