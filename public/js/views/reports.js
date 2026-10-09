@@ -131,7 +131,7 @@ function resultsTable(sections, { grades, section_titles: titles = {} }, { forTe
           h(
             'tr',
             {},
-            h('td', {}, h('strong', {}, titleCase(s.name)), s.title ? h('div', { class: 'hint' }, s.title) : null, s.date ? h('div', { class: 'hint' }, `Taken ${formatDate(s.date)}`) : null),
+            h('td', {}, h('strong', {}, titleCase(s.name)), s.title ? h('div', { class: 'hint' }, s.title) : null, s.subjects?.length > 1 ? h('div', { class: 'hint' }, `Covers the ${s.subjects.join(' and ')} papers, marked together`) : null, s.date ? h('div', { class: 'hint' }, `Taken ${formatDate(s.date)}`) : null),
             h('td', { class: 'right nowrap' }, `${marks(s.awarded)} / ${marks(s.max)}`, s.marking === 'lenient' ? h('div', { class: 'hint' }, 'Answered questions only') : null),
             h('td', { class: 'score-col' }, scoreBar(s.percent, grades, { label: s.name })),
             h('td', {}, gradeChip(s)),
@@ -461,7 +461,7 @@ async function fillDocument(box, doc, sitting, lead) {
 // page is in place.
 function evidenceSection(sections, evidence, { forTeacher }) {
   const sittings = (evidence ?? [])
-    .map((sitting) => ({ sitting, shown: sections.filter((s) => s.assessment_id === sitting.assessment_id), docs: sittingDocuments(sitting) }))
+    .map((sitting) => ({ sitting, shown: sections.filter((s) => (s.assessment_ids ?? [s.assessment_id]).includes(sitting.assessment_id)), docs: sittingDocuments(sitting) }))
     .filter(({ shown, docs }) => shown.length && docs.length);
   if (!sittings.length) return null;
 

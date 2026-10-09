@@ -102,3 +102,11 @@ export const attachScans = db.transaction((assessmentId, kind, files) => {
   });
   markScanned.run(assessmentId);
 });
+
+// Pages already on disk, such as the pages of a PDF uploaded with others and
+// sorted before filing (bulk.js), added after the pages of the same kind.
+export const attachStoredPages = db.transaction((assessmentId, kind, pages) => {
+  const startAt = nextPosition.get(assessmentId, kind).max_position + 1;
+  pages.forEach((page, index) => insertFile.run({ assessment_id: assessmentId, kind, ...page, position: startAt + index }));
+  markScanned.run(assessmentId);
+});

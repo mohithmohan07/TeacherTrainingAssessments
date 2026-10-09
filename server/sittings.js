@@ -35,3 +35,39 @@ export function currentAssessmentFor(teacher, test, section = null) {
   });
   return selectAssessmentById.get(info.lastInsertRowid);
 }
+
+// Section B is written for the teacher's subject, and a teacher who teaches
+// two subjects can sit a Section B paper for each in the same test. Each
+// paper has its own sitting, so it is marked against its own question paper.
+// The sitting for a Section B paper is the latest one not yet marked that
+// has that paper or no paper yet; any other section works as above. `create`
+// false finds the sitting without opening one.
+const selectSectionSittings = db.prepare(
+  'SELECT * FROM assessments WHERE teacher_id = ? AND test_id = ? AND section IS ? ORDER BY id DESC'
+);
+const selectPaperIds = db.prepare('SELECT paper_id FROM assessment_papers WHERE assessment_id = ? ORDER BY position');
+const selectPaperRow = db.prepare('SELECT * FROM papers WHERE id = ?');
+
+export function sittingForPaper(teacher, test, section, paperId, { create = true } = {}) {
+  if (section !== 'B' || !paperId) {
+    if (create) return currentAssessmentFor(teacher, test, section);
+    return selectLatestAssessment.get(teacher.id, test.id, section) ?? null;
+  }
+  const open = selectSectionSittings.all(teacher.id, test.id, section).find((sitting) => {
+    if (sitting.status === 'evaluated') return false;
+    const ids = selectPaperIds.all(sitting.id).map((row) => row.paper_id);
+    return !ids.length || (ids.length === 1 && ids[0] === paperId);
+  });
+  if (open || !create) return open ?? null;
+
+  const subject = selectPaperRow.get(paperId)?.subject || String(teacher.subjects ?? '').split(',')[0].trim();
+  const info = insertAssessment.run({
+    school_id: teacher.school_id,
+    teacher_id: teacher.id,
+    test_id: test.id,
+    section,
+    title: `${test.name} - ${teacher.name} - Section ${section}${subject ? ` (${subject})` : ''}`,
+    subject,
+  });
+  return selectAssessmentById.get(info.lastInsertRowid);
+}

@@ -22,7 +22,7 @@ function inTurn(work) {
 }
 
 let pdfjs = null;
-function loadPdfjs() {
+export function loadPdfjs() {
   pdfjs ??= import(`${PDFJS}/build/pdf.min.mjs`).then((lib) => {
     lib.GlobalWorkerOptions.workerSrc = `${PDFJS}/build/pdf.worker.min.mjs`;
     return lib;

@@ -61,7 +61,7 @@ function trainingState() {
 // those behind the results now and behind the written report, so the page
 // has them whichever it shows.
 function evidenceFor(teacherId, ...sectionLists) {
-  const ids = [...new Set(sectionLists.flat().map((s) => s.assessment_id).filter(Boolean))];
+  const ids = [...new Set(sectionLists.flat().flatMap((s) => s.assessment_ids ?? [s.assessment_id]).filter(Boolean))];
   return ids.flatMap((id) => {
     const sitting = selectSitting.get(id, teacherId);
     if (!sitting) return [];

@@ -328,8 +328,8 @@ export function questionsOf(section) {
 // A teacher's own reports keep the questions too, so a printed report always
 // shows the marks it was written from.
 function snapshot(sections, { questions = false } = {}) {
-  return sections.map(({ key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at, marking, left_out, left_out_marks, writing, ...rest }) => ({
-    key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at, marking, left_out, left_out_marks,
+  return sections.map(({ key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id, assessment_ids, subjects, evaluated_at, marking, left_out, left_out_marks, writing, ...rest }) => ({
+    key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id, assessment_ids, subjects, evaluated_at, marking, left_out, left_out_marks,
     ...(questions ? { questions: questionsOf({ ...rest, marking }), writing: writing ?? null } : {}),
   }));
 }
