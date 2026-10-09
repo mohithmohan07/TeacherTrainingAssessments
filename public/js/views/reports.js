@@ -131,7 +131,7 @@ function resultsTable(sections, { grades, section_titles: titles = {} }, { forTe
           h(
             'tr',
             {},
-            h('td', {}, h('strong', {}, titleCase(s.name)), s.title ? h('div', { class: 'hint' }, s.title) : null, s.subjects?.length > 1 ? h('div', { class: 'hint' }, `Covers the ${s.subjects.join(' and ')} papers, marked together`) : null, s.date ? h('div', { class: 'hint' }, `Taken ${formatDate(s.date)}`) : null),
+            h('td', {}, h('strong', {}, titleCase(s.name)), s.title ? h('div', { class: 'hint' }, s.title) : null, s.date ? h('div', { class: 'hint' }, `Taken ${formatDate(s.date)}`) : null),
             h('td', { class: 'right nowrap' }, `${marks(s.awarded)} / ${marks(s.max)}`, s.marking === 'lenient' ? h('div', { class: 'hint' }, 'Answered questions only') : null),
             h('td', { class: 'score-col' }, scoreBar(s.percent, grades, { label: s.name })),
             h('td', {}, gradeChip(s)),
@@ -211,7 +211,7 @@ function gradeKey(grades) {
 // Reports written before Written Expression take it from the results too.
 function withQuestions(sections, live) {
   return sections.map((s) => {
-    const now = live.find((l) => l.key === s.key);
+    const now = live.find((l) => l.key === s.key && l.name === s.name) ?? live.find((l) => l.key === s.key);
     return {
       ...s,
       questions: s.questions ?? now?.questions ?? [],
@@ -396,7 +396,7 @@ const UNSHOWN_TYPES = new Set(['image/tiff']);
 // "Section A", "Sections A and B", or the parts' own names.
 function partsNamed(sections) {
   const keys = sections.map((s) => s.key);
-  return keys.length > 1 && keys.every((key) => /^[A-Z]$/.test(key)) ? `Sections ${listing(keys)}` : listing(sections.map((s) => titleCase(s.name)));
+  return keys.length > 1 && new Set(keys).size === keys.length && keys.every((key) => /^[A-Z]$/.test(key)) ? `Sections ${listing(keys)}` : listing(sections.map((s) => titleCase(s.name)));
 }
 
 // A sitting's papers in the order they print: the question paper (papers
@@ -461,7 +461,7 @@ async function fillDocument(box, doc, sitting, lead) {
 // page is in place.
 function evidenceSection(sections, evidence, { forTeacher }) {
   const sittings = (evidence ?? [])
-    .map((sitting) => ({ sitting, shown: sections.filter((s) => (s.assessment_ids ?? [s.assessment_id]).includes(sitting.assessment_id)), docs: sittingDocuments(sitting) }))
+    .map((sitting) => ({ sitting, shown: sections.filter((s) => s.assessment_id === sitting.assessment_id), docs: sittingDocuments(sitting) }))
     .filter(({ shown, docs }) => shown.length && docs.length);
   if (!sittings.length) return null;
 
@@ -854,7 +854,7 @@ function sectionGrades(figures, grades) {
         h(
           'div',
           { class: 'grade-row' },
-          h('div', { class: 'grade-row-name' }, h('strong', {}, titleCase(s.name)), h('div', { class: 'hint' }, `${s.sat} took it · average ${s.average}%`)),
+          h('div', { class: 'grade-row-name' }, h('strong', {}, titleCase(s.name)), h('div', { class: 'hint' }, `${s.sat} took it${s.papers > s.sat ? ` (${s.papers} papers)` : ''} · average ${s.average}%`)),
           stackedBar(bands.map((g) => ({ key: g.grade, label: `Grade ${g.grade}, ${g.label}`, value: s.counts[g.grade] ?? 0 })), { label: s.name })
         )
       )
@@ -915,7 +915,7 @@ function teachersByStage(figures, needs, test) {
   const columns = [...needs].reverse();
   const gradeFor = { developing: 'C', support: 'D' };
   const who = (t, need) => {
-    const keys = gradeFor[need] ? t.sections.filter((s) => s.grade === gradeFor[need]).map((s) => s.key || 'paper') : [];
+    const keys = gradeFor[need] ? t.sections.filter((s) => s.grade === gradeFor[need]).map((s) => (s.subject ? `${s.key} ${s.subject}` : s.key || 'paper')) : [];
     return [h('a', { href: `#/teachers/${t.id}/report/${test.id}?for=management` }, t.name), keys.length ? h('span', { class: 'hint' }, ` (${keys.join(', ')})`) : null];
   };
   return h(

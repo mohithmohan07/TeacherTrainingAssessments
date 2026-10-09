@@ -246,7 +246,7 @@ export function emptyState(message, action) {
 
 // One section's result: "Section A 72% · B". The colour follows the grade.
 export function sectionChip(section, { short = false } = {}) {
-  const name = short && /^Section [A-Z]$/.test(section.name) ? section.name.slice(8) : section.name;
+  const name = short && /^Section [A-Z]( \(.+\))?$/.test(section.name) ? section.name.slice(8) : section.name;
   return h(
     'span',
     { class: `grade-chip grade-${section.grade ?? 'none'}`, title: section.grade_label ? `${section.name}: ${section.grade_label}` : section.name },

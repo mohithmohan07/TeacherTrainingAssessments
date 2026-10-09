@@ -43,12 +43,15 @@ export async function renderTeacherProfile(root, id) {
 // Each test in a row, each section in a column, with the change in
 // percentage points since the previous test that included that section.
 function progressCard(tests, grades) {
-  const keys = [...new Set(tests.flatMap((t) => t.sections.map((s) => s.key)))].sort();
+  // A column per section, and per subject for a teacher's Section B papers
+  // in different subjects.
+  const columnOf = (s) => (s.subject ? `${s.key} (${s.subject})` : s.key);
+  const keys = [...new Set(tests.flatMap((t) => t.sections.map(columnOf)))].sort();
   if (!keys.length) return null;
   const previous = {};
   const rows = tests.map((entry) => {
     const cells = keys.map((key) => {
-      const s = entry.sections.find((x) => x.key === key);
+      const s = entry.sections.find((x) => columnOf(x) === key);
       if (!s) return h('td', {}, h('span', { class: 'hint' }, 'not sat'));
       const change = previous[key] !== undefined && s.percent !== null ? s.percent - previous[key] : null;
       if (s.percent !== null) previous[key] = s.percent;

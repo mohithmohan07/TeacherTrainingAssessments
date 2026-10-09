@@ -328,8 +328,8 @@ export function questionsOf(section) {
 // A teacher's own reports keep the questions too, so a printed report always
 // shows the marks it was written from.
 function snapshot(sections, { questions = false } = {}) {
-  return sections.map(({ key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id, assessment_ids, subjects, evaluated_at, marking, left_out, left_out_marks, writing, ...rest }) => ({
-    key, name, title, awarded, max, percent, grade, grade_label, date, assessment_id, assessment_ids, subjects, evaluated_at, marking, left_out, left_out_marks,
+  return sections.map(({ key, name, title, subject, awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at, marking, left_out, left_out_marks, writing, ...rest }) => ({
+    key, name, title, ...(subject ? { subject } : {}), awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at, marking, left_out, left_out_marks,
     ...(questions ? { questions: questionsOf({ ...rest, marking }), writing: writing ?? null } : {}),
   }));
 }
@@ -523,7 +523,9 @@ function groupFigures(members, keys) {
   const sat = {};
   for (const key of keys) {
     const percents = members.flatMap((t) => t.sections.filter((s) => s.key === key && s.percent !== null).map((s) => s.percent));
-    sat[key] = percents.length;
+    // A teacher with Section B papers in two subjects counts once, and each
+    // paper's percentage goes into the average.
+    sat[key] = members.filter((t) => t.sections.some((s) => s.key === key && s.percent !== null)).length;
     averages[key] = percents.length ? Math.round(percents.reduce((a, b) => a + b, 0) / percents.length) : null;
   }
   const needs = Object.fromEntries(NEEDS.map((n) => [n.key, members.filter((t) => t.need === n.key).length]));
@@ -573,12 +575,14 @@ export function schoolOverview(schoolId, testId, { examples = false } = {}) {
       key,
       name: results[0]?.s.name ?? key,
       title: SECTION_TITLES[key] ?? '',
-      sat: results.length,
+      sat: new Set(results.map((r) => r.teacher.id)).size,
+      // More than sat when some teachers took Section B in two subjects.
+      papers: results.length,
       average: results.length ? Math.round(results.reduce((sum, r) => sum + r.s.percent, 0) / results.length) : null,
       counts,
       // Colleagues strong in a section alongside those who need support in it.
-      helpers: results.filter((r) => r.s.grade === 'A' || r.s.grade === 'B').map((r) => r.teacher.name),
-      needs: results.filter((r) => r.s.grade === 'D').map((r) => r.teacher.name),
+      helpers: [...new Set(results.filter((r) => r.s.grade === 'A' || r.s.grade === 'B').map((r) => r.teacher.name))],
+      needs: [...new Set(results.filter((r) => r.s.grade === 'D').map((r) => r.teacher.name))],
     };
   });
 
@@ -697,7 +701,7 @@ async function writeSchoolReport(schoolId, testId, reportId) {
     '',
     'Section averages across the teachers who sat each section:',
     ...overview.section_stats.map(
-      (s) => `${s.name}${s.title ? ` (${s.title})` : ''}: ${s.sat} sat, average ${s.average}%, grades ${Object.entries(s.counts).map(([g, n]) => `${g}: ${n}`).join(', ')}`
+      (s) => `${s.name}${s.title ? ` (${s.title})` : ''}: ${s.sat} sat${s.papers > s.sat ? ` (${s.papers} papers, as some teachers sat Section B in two subjects; the grades count papers)` : ''}, average ${s.average}%, grades ${Object.entries(s.counts).map(([g, n]) => `${g}: ${n}`).join(', ')}`
     ),
     '',
     'Teachers by need, from their lowest grade:',

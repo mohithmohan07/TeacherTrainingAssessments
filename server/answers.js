@@ -128,10 +128,9 @@ function sectionsNamed(keys) {
 // reasons come back to show on it.
 export async function addMissingAnswers(sections) {
   const problems = [];
-  const idsOf = (s) => s.assessment_ids ?? [s.assessment_id];
-  const sittings = [...new Set(sections.filter((s) => s.questions?.some(lacksAnswer)).flatMap(idsOf))];
+  const sittings = [...new Set(sections.filter((s) => s.questions?.some(lacksAnswer)).map((s) => s.assessment_id))];
   for (const id of sittings) {
-    const names = sectionsNamed(sections.filter((s) => idsOf(s).includes(id)).map((s) => s.key));
+    const names = sectionsNamed(sections.filter((s) => s.assessment_id === id).map((s) => s.key));
     try {
       const problem = await fillAnswers(id);
       if (problem) problems.push(`${names}: ${problem}.`);
