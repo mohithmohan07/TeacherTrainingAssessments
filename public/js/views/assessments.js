@@ -2,7 +2,7 @@ import {
   h, mount, field, input, textarea, select, toast, confirmAction, statusBadge,
   formatDate, formatBytes, emptyState, viewPages, sectionChip,
 } from '../ui.js';
-import { schoolsApi, teachersApi, assessmentsApi, testsApi, reportsApi } from '../api.js';
+import { schoolsApi, teachersApi, assessmentsApi, testsApi, reportsApi, bulkApi } from '../api.js';
 import { choosePaper, paperFacts, paperThumb } from '../paper-picker.js';
 import { chooseMarking } from '../marking-choice.js';
 import { movePages } from '../move-pages.js';
@@ -79,10 +79,12 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
   async function load() {
     state.tests = await testsApi.list(state.schoolId);
     if (!state.tests.some((t) => String(t.id) === String(state.testId))) state.testId = String(state.tests[0].id);
-    const [roster, assessments] = await Promise.all([
+    const [roster, assessments, bulk] = await Promise.all([
       teachersApi.roster(state.schoolId, state.testId, state.section),
       assessmentsApi.list({ school_id: state.schoolId, test_id: state.testId }),
+      bulkApi.list(state.schoolId, state.testId).catch(() => ({ items: [] })),
     ]);
+    state.bulkWaiting = bulk.items.length;
     state.roster = roster.teachers;
     state.librarySize = roster.library_size;
     state.assessments = assessments;
@@ -166,8 +168,21 @@ export async function renderAssessments(root, query = new URLSearchParams()) {
           {},
           h('h1', {}, 'Assessments'),
           h('p', {}, 'Confirm or upload each teacher’s question paper, upload their answer paper, then press Evaluate to have OpenAI mark it. Sections sat on different dates add up under the same test.')
+        ),
+        h(
+          'div',
+          { class: 'page-actions' },
+          h('a', { class: 'btn btn-primary', href: `#/assessments/upload-all?school=${state.schoolId}&test=${state.testId}` }, 'Upload all answer papers (PDFs)')
         )
       ),
+      state.bulkWaiting
+        ? h(
+            'p',
+            { class: 'notice' },
+            `${state.bulkWaiting} answer paper PDF${state.bulkWaiting === 1 ? ' is' : 's are'} waiting to be checked and filed for this test. `,
+            h('a', { href: `#/assessments/upload-all?school=${state.schoolId}&test=${state.testId}` }, 'Check and file them')
+          )
+        : null,
       h(
         'div',
         { class: 'card' },

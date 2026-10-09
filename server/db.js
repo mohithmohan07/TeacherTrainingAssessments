@@ -167,6 +167,43 @@ db.exec(`
 
   -- Settings kept on the server rather than in the code, as JSON by key.
   -- 'training' holds the growth paths the training plans are drawn from.
+  -- Answer papers uploaded together as PDFs, one teacher's answers in each,
+  -- waiting to be checked and filed (bulk.js). \`teacher_id\` is the teacher
+  -- the PDF is for, \`matched_by\` how that was found ('file', 'sheet' or
+  -- 'you'). \`papers\` is the question paper chosen for each section, as JSON
+  -- like {"A": 3, "B": 12, "C": null}; \`result\` is what the sorting found.
+  CREATE TABLE IF NOT EXISTS bulk_items (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    school_id   INTEGER NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    test_id     INTEGER NOT NULL REFERENCES tests(id) ON DELETE CASCADE,
+    file_name   TEXT NOT NULL,
+    teacher_id  INTEGER REFERENCES teachers(id) ON DELETE SET NULL,
+    matched_by  TEXT,
+    papers      TEXT NOT NULL DEFAULT '{}',
+    sort_status TEXT NOT NULL DEFAULT 'waiting',
+    sort_error  TEXT,
+    result      TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_bulk_items_test ON bulk_items(school_id, test_id);
+
+  -- The pages of a bulk PDF, as pictures, and the section each belongs to
+  -- ('A', 'B' or 'C'; NULL while unsorted or when the page is not used).
+  CREATE TABLE IF NOT EXISTS bulk_pages (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id     INTEGER NOT NULL REFERENCES bulk_items(id) ON DELETE CASCADE,
+    stored_name TEXT NOT NULL,
+    mime_type   TEXT,
+    size_bytes  INTEGER,
+    position    INTEGER NOT NULL,
+    section     TEXT,
+    questions   TEXT NOT NULL DEFAULT '',
+    language    TEXT NOT NULL DEFAULT ''
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_bulk_pages_item ON bulk_pages(item_id, position);
+
   CREATE TABLE IF NOT EXISTS settings (
     key        TEXT PRIMARY KEY,
     value      TEXT NOT NULL,

@@ -37,9 +37,9 @@ function remember(choice) {
 }
 
 // Opens the dialog. `current` is how the sitting was last marked, if it was;
-// `again` warns that the new marks replace the current ones. Resolves with
+// `title` replaces the heading; `again` warns that the new marks replace the current ones. Resolves with
 // 'standard' or 'lenient', or null if cancelled.
-export function chooseMarking({ teacherName = '', current = null, again = false } = {}) {
+export function chooseMarking({ teacherName = '', title = '', current = null, again = false } = {}) {
   return new Promise((resolve) => {
     let choice = [current, lastChoice()].find((key) => MARKINGS.some((m) => m.key === key)) ?? 'standard';
 
@@ -81,7 +81,7 @@ export function chooseMarking({ teacherName = '', current = null, again = false 
           h(
             'div',
             {},
-            h('h2', {}, teacherName ? `Evaluate ${teacherName}’s paper` : 'Evaluate this paper'),
+            h('h2', {}, title || (teacherName ? `Evaluate ${teacherName}’s paper` : 'Evaluate this paper')),
             h('p', { class: 'hint' }, 'OpenAI marks every answer the same way. Choose how the marks are counted.')
           ),
           h('button', { class: 'modal-close', type: 'button', title: 'Close', onclick: () => close(null) }, '×')

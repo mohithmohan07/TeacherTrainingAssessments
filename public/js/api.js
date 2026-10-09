@@ -96,6 +96,18 @@ export const assessmentsApi = {
   removeFile: (id, fileId) => api.del(`/api/assessments/${id}/files/${fileId}`),
 };
 
+// Every teacher's answer paper uploaded at once as PDFs, sorted, then filed.
+export const bulkApi = {
+  list: (schoolId, testId) => api.get(`/api/bulk?${new URLSearchParams({ school_id: schoolId, test_id: testId })}`),
+  add: (formData) => api.postForm('/api/bulk', formData),
+  update: (id, body) => api.putJson(`/api/bulk/${id}`, body),
+  sort: (id) => api.postJson(`/api/bulk/${id}/sort`, {}),
+  remove: (id) => api.del(`/api/bulk/${id}`),
+  evaluate: (ids, marking) => api.postJson('/api/bulk/evaluate', { ids, marking }),
+  marking: (ids) => api.get(`/api/bulk/marking?ids=${ids.join(',')}`),
+  file: (schoolId, testId, ids) => api.postJson('/api/bulk/file', { school_id: schoolId, test_id: testId, ...(ids ? { ids } : {}) }),
+};
+
 // The question paper library.
 export const papersApi = {
   list: () => api.get('/api/papers'),

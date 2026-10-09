@@ -13,6 +13,7 @@ import reportsRouter from './routes/reports.js';
 import dashboardRouter from './routes/dashboard.js';
 import papersRouter from './routes/papers.js';
 import trainingRouter from './routes/training.js';
+import bulkRouter from './routes/bulk.js';
 import { sendHelperZip } from './helper-download.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -53,6 +54,7 @@ app.use('/api/reports', reportsRouter);
 app.use('/api/dashboard', dashboardRouter);
 app.use('/api/papers', papersRouter);
 app.use('/api/training', trainingRouter);
+app.use('/api/bulk', bulkRouter);
 
 // The scanner helper, for the laptop the scanner is plugged into.
 app.get('/downloads/scanner-helper.zip', sendHelperZip);

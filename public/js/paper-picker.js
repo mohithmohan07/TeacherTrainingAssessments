@@ -4,6 +4,7 @@
 // Nothing is used until it is confirmed here.
 import { h, mount, toast } from './ui.js';
 import { papersApi } from './api.js';
+import { pagesOf } from './evidence.js';
 
 const pdfUrl = (paper) => `/uploads/${paper.stored_name}`;
 
@@ -21,6 +22,15 @@ export function paperFacts(paper) {
 
 // Matches the stylesheet's width for stacking the dialog.
 const narrow = () => window.matchMedia('(max-width: 760px)').matches;
+
+function paperAsPictures(paper) {
+  const box = h('div', { class: 'picker-pages' }, h('div', { class: 'marking-state' }, h('span', { class: 'spinner' }), 'Opening the paper…'));
+  pagesOf({ url: pdfUrl(paper), pdf: true }).then(
+    (pages) => mount(box, pages.map((src, i) => h('img', { class: 'picker-page', src, alt: `${paper.title}, page ${i + 1}` }))),
+    () => mount(box, h('p', { class: 'empty' }, 'The paper could not be shown here. Press “Open in a new tab” to see it.'))
+  );
+  return box;
+}
 
 // The small first-page picture of a paper, or a PDF badge without one.
 export function paperThumb(paper, className = 'paper-thumb') {
@@ -161,12 +171,10 @@ export async function choosePaper({ teacher, section = '', current = [] }) {
         matched.length ? h('p', { class: 'hint', style: 'margin:0 0 6px' }, `Matches the teacher’s ${matched.join(', ')}.`) : null,
         paper.notes ? h('p', { class: 'notice picker-note' }, paper.notes) : null,
         // Phone browsers do not show a PDF inside the page, so a phone gets
-        // the first page as a picture, and "Open in a new tab" for the rest.
-        !narrow()
-          ? h('iframe', { class: 'picker-pdf', src: `${pdfUrl(paper)}#view=FitH`, title: paper.title })
-          : paper.preview_name
-            ? h('img', { class: 'picker-page', src: `/uploads/${paper.preview_name}`, alt: `First page of ${paper.title}` })
-            : h('p', { class: 'empty' }, 'Press “Open in a new tab” to see this paper.')
+        // the paper drawn page by page as pictures.
+        narrow()
+          ? paperAsPictures(paper)
+          : h('iframe', { class: 'picker-pdf', src: `${pdfUrl(paper)}#view=FitH`, title: paper.title })
       );
     }
 

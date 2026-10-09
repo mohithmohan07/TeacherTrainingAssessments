@@ -6,7 +6,7 @@
 import crypto from 'node:crypto';
 import db from './db.js';
 import { levelsFromText } from './papers.js';
-import { sectionWriting } from './writing.js';
+import { levelFor as writingLevelFor, sectionWriting } from './writing.js';
 
 // Grade bands, applied to each section's percentage, named in everyday words.
 export const GRADES = [
@@ -162,19 +162,32 @@ const selectSittings = db.prepare(
     ORDER BY COALESCE(ai_evaluated_at, updated_at), id`
 );
 
-// Every section the teacher has results for in this test, A to Z.
+// The Section B papers a sitting was marked against, from the library.
+const selectSectionBPapers = db.prepare(
+  `SELECT p.id, p.subject, p.title FROM assessment_papers ap JOIN papers p ON p.id = ap.paper_id
+    WHERE ap.assessment_id = ? AND (',' || p.sections || ',') LIKE '%,B,%' ORDER BY ap.position`
+);
+
+// Every section the teacher has results for in this test, A to Z. Section B
+// is written for the teacher's subject, and a teacher of two subjects can sit
+// a Section B paper for each: their marks are added into one Section B
+// result, which names the subjects. Otherwise a section marked again (a
+// re-sit of the same paper) replaces the earlier marks.
 export function teacherResults(teacherId, testId) {
-  const bySection = new Map();
+  const byPart = new Map();
   const sittings = selectSittings.all(teacherId, testId);
   for (const sitting of sittings) {
     // The last marking that finished; a re-mark that failed leaves it in place.
     const result = sitting.ai_result ? JSON.parse(sitting.ai_result) : null;
-    const common = { assessment_id: sitting.id, date: sitting.assessment_date, evaluated_at: sitting.ai_evaluated_at };
+    const common = { assessment_id: sitting.id, assessment_ids: [sitting.id], date: sitting.assessment_date, evaluated_at: sitting.ai_evaluated_at };
     if (result) {
+      const bPapers = selectSectionBPapers.all(sitting.id);
       for (const section of sittingSections(result)) {
-        bySection.set(section.key, {
+        const part = section.key === 'B' && bPapers.length ? bPapers.map((p) => p.id).join(',') : '';
+        byPart.set(`${section.key}|${part}`, {
           ...section,
           ...common,
+          subjects: section.key === 'B' ? bPapers.map((p) => p.subject).filter(Boolean) : [],
           summary: result.summary,
           strengths: result.strengths,
           areas_to_improve: result.areas_to_improve,
@@ -182,10 +195,71 @@ export function teacherResults(teacherId, testId) {
       }
     } else if (sitting.status === 'evaluated' && sitting.score !== null && Number(sitting.max_score) > 0) {
       // Marked by hand, without a question-by-question breakdown.
-      bySection.set('', { ...describe({ key: '', awarded: sitting.score, max: Number(sitting.max_score), questions: [] }), ...common });
+      byPart.set('|', { ...describe({ key: '', awarded: sitting.score, max: Number(sitting.max_score), questions: [] }), ...common, subjects: [] });
     }
   }
-  return [...bySection.values()].sort((a, b) => a.key.localeCompare(b.key));
+  const bySection = new Map();
+  for (const entry of byPart.values()) {
+    if (!bySection.has(entry.key)) bySection.set(entry.key, []);
+    bySection.get(entry.key).push(entry);
+  }
+  return [...bySection.values()]
+    .map((parts) => (parts.length === 1 ? parts[0] : combineParts(parts)))
+    .sort((a, b) => a.key.localeCompare(b.key));
+}
+
+// One Section B result from a teacher's Section B papers in different
+// subjects: the marks and totals added up and graded together, each paper's
+// questions named with its subject, and each paper's own result kept in parts.
+function combineParts(parts) {
+  const sum = (key) => round(parts.reduce((total, p) => total + (Number(p[key]) || 0), 0));
+  const label = (p) => p.subjects.join(' and ');
+  const latest = parts.reduce((a, b) => (String(b.evaluated_at ?? '') > String(a.evaluated_at ?? '') ? b : a));
+  const combined = describe({
+    key: parts[0].key,
+    awarded: sum('awarded'),
+    max: sum('max'),
+    left_out: sum('left_out'),
+    left_out_marks: sum('left_out_marks'),
+    marking: parts.some((p) => p.marking === 'lenient') ? 'lenient' : 'standard',
+    questions: parts.flatMap((p) => p.questions.map((q) => (label(p) ? { ...q, question: `${q.question} (${label(p)})` } : q))),
+  });
+  return {
+    ...combined,
+    writing: combineWriting(parts.map((p) => p.writing)),
+    assessment_id: parts[0].assessment_id,
+    assessment_ids: parts.flatMap((p) => p.assessment_ids),
+    date: latest.date,
+    evaluated_at: latest.evaluated_at,
+    subjects: parts.flatMap((p) => p.subjects),
+    parts: parts.map((p) => ({ subjects: p.subjects, awarded: p.awarded, max: p.max, percent: p.percent, grade: p.grade, assessment_id: p.assessment_id })),
+    summary: parts.map((p) => (label(p) ? `${label(p)}: ${p.summary}` : p.summary)).filter(Boolean).join(' '),
+    strengths: parts.flatMap((p) => p.strengths ?? []),
+    areas_to_improve: parts.flatMap((p) => p.areas_to_improve ?? []),
+  };
+}
+
+// The Written Expression of the papers combined: the scores averaged over
+// the papers judged, and every error listed.
+function combineWriting(list) {
+  const present = list.filter(Boolean);
+  if (!present.length) return null;
+  const unchecked = present.find((w) => !w.checked);
+  if (unchecked) return unchecked;
+  const judged = present.filter((w) => w.judged);
+  const errors = present.flatMap((w) => w.errors ?? []);
+  if (!judged.length) return { ...present[0], errors };
+  const mean = (values) => Math.round((values.reduce((a, b) => a + b, 0) / values.length) * 10) / 10;
+  const score = mean(judged.map((w) => w.score));
+  return {
+    checked: true,
+    judged: true,
+    score,
+    level: judged.length === 1 ? judged[0].level : writingLevelFor(score),
+    summary: judged.map((w) => w.summary).filter(Boolean).join(' '),
+    criteria: judged[0].criteria.map((c, i) => ({ label: c.label, score: mean(judged.map((w) => Number(w.criteria[i]?.score) || 0)) })),
+    errors,
+  };
 }
 
 // The potential identifier on the management report. It is worked out from
@@ -294,7 +368,7 @@ export function fingerprint(value) {
 }
 
 export function resultsBasis(sections) {
-  return sections.map((s) => [s.key, s.assessment_id, s.awarded, s.max, s.evaluated_at]);
+  return sections.map((s) => [s.key, s.assessment_ids?.length > 1 ? s.assessment_ids : s.assessment_id, s.awarded, s.max, s.evaluated_at]);
 }
 
 /* ------------------------------------------------------------------- tests */

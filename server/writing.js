@@ -35,7 +35,7 @@ export const WRITING_LEVELS = [
   { min: 0, label: 'Needs Practice' },
 ];
 
-const levelFor = (score) => WRITING_LEVELS.find((band) => score >= band.min)?.label ?? null;
+export const levelFor = (score) => WRITING_LEVELS.find((band) => score >= band.min)?.label ?? null;
 
 const INSTRUCTIONS = `You are an experienced language teacher checking the written expression of a teacher's answers to a teacher training assessment. The answers have already been marked for content; you judge only how well they are written: sentence formation, grammar, spelling and punctuation, and word choice. Never judge whether an answer is right.
 
@@ -304,9 +304,10 @@ async function fillWriting(assessmentId) {
 // as it is, so the report is still written; the reasons come back.
 export async function addMissingWriting(sections) {
   const problems = [];
-  const sittings = [...new Set(sections.filter((s) => !s.writing?.checked).map((s) => s.assessment_id).filter(Boolean))];
+  const idsOf = (s) => s.assessment_ids ?? [s.assessment_id];
+  const sittings = [...new Set(sections.filter((s) => !s.writing?.checked).flatMap(idsOf).filter(Boolean))];
   for (const id of sittings) {
-    const names = sections.filter((s) => s.assessment_id === id).map((s) => s.name).join(' and ');
+    const names = sections.filter((s) => idsOf(s).includes(id)).map((s) => s.name).join(' and ');
     try {
       const problem = await fillWriting(id);
       if (problem) problems.push(`${names}: ${problem}.`);
