@@ -4,6 +4,7 @@
 // Nothing is used until it is confirmed here.
 import { h, mount, toast } from './ui.js';
 import { papersApi } from './api.js';
+import { pagesOf } from './evidence.js';
 
 const pdfUrl = (paper) => `/uploads/${paper.stored_name}`;
 
@@ -17,6 +18,18 @@ export function paperFacts(paper) {
     paper.language && paper.language !== 'English' ? paper.language : '',
     paper.total_marks ? `${paper.total_marks} marks` : '',
   ].filter(Boolean).join(' · ');
+}
+
+// Matches the stylesheet's width for stacking the dialog.
+const narrow = () => window.matchMedia('(max-width: 760px)').matches;
+
+function paperAsPictures(paper) {
+  const box = h('div', { class: 'picker-pages' }, h('div', { class: 'marking-state' }, h('span', { class: 'spinner' }), 'Opening the paper…'));
+  pagesOf({ url: pdfUrl(paper), pdf: true }).then(
+    (pages) => mount(box, pages.map((src, i) => h('img', { class: 'picker-page', src, alt: `${paper.title}, page ${i + 1}` }))),
+    () => mount(box, h('p', { class: 'empty' }, 'The paper could not be shown here. Press “Open in a new tab” to see it.'))
+  );
+  return box;
 }
 
 // The small first-page picture of a paper, or a PDF badge without one.
@@ -127,7 +140,7 @@ export async function choosePaper({ teacher, section = '', current = [] }) {
               ? h(
                   'button',
                   { class: 'btn-link picker-show', type: 'button', onclick: () => { previewSection = slot.section; drawSlots(); drawPreview(); } },
-                  previewSection === slot.section ? 'Shown on the right' : 'Show this paper'
+                  previewSection === slot.section ? (narrow() ? 'Shown below' : 'Shown on the right') : 'Show this paper'
                 )
               : null
           );
@@ -142,7 +155,7 @@ export async function choosePaper({ teacher, section = '', current = [] }) {
       const slot = data.slots.find((s) => s.section === previewSection);
       const paper = slot && !coveredBy(slot.section) ? byId.get(choice.get(slot.section)) : null;
       if (!paper) {
-        mount(previewBox, h('div', { class: 'picker-empty' }, 'Choose a paper on the left to see it here.'));
+        mount(previewBox, h('div', { class: 'picker-empty' }, narrow() ? 'Choose a paper above to see it here.' : 'Choose a paper on the left to see it here.'));
         return;
       }
       const reasons = { level: 'level', subject: 'subject', board: 'board' };
@@ -157,7 +170,11 @@ export async function choosePaper({ teacher, section = '', current = [] }) {
         ),
         matched.length ? h('p', { class: 'hint', style: 'margin:0 0 6px' }, `Matches the teacher’s ${matched.join(', ')}.`) : null,
         paper.notes ? h('p', { class: 'notice picker-note' }, paper.notes) : null,
-        h('iframe', { class: 'picker-pdf', src: `${pdfUrl(paper)}#view=FitH`, title: paper.title })
+        // Phone browsers do not show a PDF inside the page, so a phone gets
+        // the paper drawn page by page as pictures.
+        narrow()
+          ? paperAsPictures(paper)
+          : h('iframe', { class: 'picker-pdf', src: `${pdfUrl(paper)}#view=FitH`, title: paper.title })
       );
     }
 

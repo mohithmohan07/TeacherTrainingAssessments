@@ -8,6 +8,7 @@ import { renderPapers } from './views/papers.js';
 import { renderBulk } from './views/bulk.js';
 import { renderTraining } from './views/training.js';
 import { toast } from './ui.js';
+import { setUpMenu, stackTablesOnPhones } from './mobile.js';
 
 const view = document.getElementById('view');
 
@@ -68,5 +69,7 @@ window.navigate = (path) => {
   window.location.hash = `#${path}`;
 };
 
+setUpMenu();
+stackTablesOnPhones(view);
 window.addEventListener('hashchange', router);
 router(); // module scripts run after the document is parsed
