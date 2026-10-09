@@ -1,5 +1,6 @@
 import { h, mount, toast, logoFor, emptyState } from '../ui.js';
 import { dashboardApi } from '../api.js';
+import { evaluateAllButton, failedReasons } from '../unmarked.js';
 
 // The dashboard: for each school, in its newest test (or another picked on the
 // card), what is waiting to be done and how its teachers are doing. Each
@@ -37,9 +38,20 @@ export async function renderDashboard(root) {
   );
 }
 
+// While papers are being marked, the card checks back every few seconds, so
+// they move along as they finish.
 function schoolCard(summary, grades) {
   const card = h('div', { class: 'card dash-school' });
-  const draw = (data) => mount(card, ...schoolCardContent(data, grades, switchTest));
+  let shown = summary;
+  let timer = null;
+  // Whether "Why they failed" is open, kept when the card is drawn again.
+  const reasons = { open: false };
+  const draw = (data) => {
+    shown = data;
+    mount(card, ...schoolCardContent(data, grades, switchTest, refresh, reasons));
+    clearTimeout(timer);
+    if (data.waiting?.marking.length) timer = setTimeout(() => card.isConnected && refresh(), 8000);
+  };
   const switchTest = async (testId) => {
     try {
       draw(await dashboardApi.school(summary.school.id, testId));
@@ -47,11 +59,12 @@ function schoolCard(summary, grades) {
       toast(error.message, 'error');
     }
   };
+  const refresh = () => switchTest(shown.test.id);
   draw(summary);
   return card;
 }
 
-function schoolCardContent(data, grades, switchTest) {
+function schoolCardContent(data, grades, switchTest, refresh, reasons) {
   const { school, test, tests } = data;
   const board = `#/assessments?school=${school.id}&test=${test.id}`;
 
@@ -86,7 +99,7 @@ function schoolCardContent(data, grades, switchTest) {
     return [head, emptyState('No teachers yet. Add them on the school page, one by one or from Excel.', h('a', { class: 'btn btn-sm', href: `#/schools/${school.id}`, style: 'margin-top:10px' }, 'Add teachers'))];
   }
 
-  return [head, h('div', { class: 'grid-2 dash-body' }, waitingPanel(data, board), resultsPanel(data, grades))];
+  return [head, h('div', { class: 'grid-2 dash-body' }, waitingPanel(data, board, refresh, reasons), resultsPanel(data, grades))];
 }
 
 // Teacher names linking to their profiles, the first few then "and N more".
@@ -101,15 +114,28 @@ function names(teachers, moreHref, max = 6) {
   return h('div', { class: 'dash-names' }, parts);
 }
 
-function waitingPanel(data, board) {
+// The rows of papers waiting for Evaluate and of papers whose marking failed
+// each have a button that evaluates all of them at once.
+function waitingPanel(data, board, refresh, reasons) {
   const { waiting, test, school } = data;
   const rows = [
     { list: waiting.not_started, label: 'Nothing uploaded yet', tone: 'muted', href: board },
-    { list: waiting.to_evaluate, label: 'Scanned, waiting for Evaluate', tone: 'warn', href: board },
+    { list: waiting.to_evaluate, label: 'Scanned, waiting for Evaluate', tone: 'warn', href: board, which: 'waiting' },
     { list: waiting.marking, label: 'Being marked by OpenAI', tone: 'info', href: board },
-    { list: waiting.failed, label: 'Marking failed, press Evaluate again', tone: 'danger', href: board },
+    { list: waiting.failed, label: 'Marking failed, press Evaluate again', tone: 'danger', href: board, which: 'failed' },
     { list: waiting.reports_to_build, label: 'Marked, report not built or out of date', tone: 'info', href: board },
   ].filter((row) => row.list.length);
+
+  const actions = (which) => {
+    const sittings = data.unmarked?.[which] ?? [];
+    if (!sittings.length) return null;
+    return h(
+      'div',
+      { class: 'dash-wait-actions' },
+      evaluateAllButton({ schoolId: school.id, testId: test.id, which, count: sittings.length, after: refresh }),
+      which === 'failed' ? failedReasons(sittings, { open: reasons.open, onToggle: (open) => (reasons.open = open) }) : null
+    );
+  };
 
   const report = data.school_report;
   let reportLine;
@@ -131,7 +157,8 @@ function waitingPanel(data, board) {
             'div',
             { class: `dash-wait tone-${row.tone}` },
             h('div', { class: 'dash-wait-head' }, h('span', { class: 'dash-count' }, row.list.length), h('span', {}, row.label)),
-            names(row.list, row.href)
+            names(row.list, row.href),
+            row.which ? actions(row.which) : null
           )
         )
       : h('p', { class: 'hint' }, 'Nothing waiting. Every teacher in this test is marked and has a current report.'),

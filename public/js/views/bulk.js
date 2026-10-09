@@ -305,13 +305,19 @@ export async function renderBulk(root, query = new URLSearchParams()) {
     );
   }
 
-  // Evaluate, pressed once for every section just filed.
-  async function evaluateAll() {
-    const ids = state.filed.map((row) => row.assessment_id);
-    const marking = await chooseMarking({ title: `Evaluate all ${ids.length} sections just filed` });
+  // Evaluate, pressed once for every section just filed, or once more for
+  // the ones whose marking failed (`failedOnly`).
+  async function evaluateAll(failedOnly = false) {
+    const filed = state.filed.map((row) => row.assessment_id);
+    const ids = failedOnly ? filed.filter((id) => state.marks?.get(id)?.state === 'failed') : filed;
+    if (!ids.length) return;
+    const marking = await chooseMarking({
+      title: failedOnly ? `Evaluate the ${ids.length === 1 ? 'section' : `${ids.length} sections`} that failed again` : `Evaluate all ${ids.length} sections just filed`,
+    });
     if (!marking) return;
     try {
-      state.marks = new Map((await bulkApi.evaluate(ids, marking)).map((m) => [m.id, m]));
+      const started = (await bulkApi.evaluate(ids, marking)).map((m) => [m.id, m]);
+      state.marks = new Map([...(state.marks ?? []), ...started]);
     } catch (error) {
       toast(error.message, 'error');
       return;
@@ -320,7 +326,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
     const follow = async () => {
       if (!reviewBox.isConnected) return;
       try {
-        state.marks = new Map((await bulkApi.marking(ids)).map((m) => [m.id, m]));
+        state.marks = new Map((await bulkApi.marking(filed)).map((m) => [m.id, m]));
         drawReview();
       } catch {
         // tried again below
@@ -693,7 +699,7 @@ function filedCard(filed, boardLink, marks, evaluateAll) {
       'p',
       { class: 'hint' },
       marks
-        ? `Marked ${done} of ${filed.length}${failed ? `, ${failed} failed (open it to see why and Evaluate again)` : ''}.${going ? ' You can leave this page; marking carries on.' : ''}`
+        ? `Marked ${done} of ${filed.length}${failed ? `, ${failed} failed (open one to see why)` : ''}.${going ? ' You can leave this page; marking carries on.' : ''}`
         : 'Nothing has been marked yet. Evaluate all marks every section below, or open one section to Evaluate it on its own. On the Assessments board they are under Papers: Section A, B or C.'
     ),
     h(
@@ -719,7 +725,8 @@ function filedCard(filed, boardLink, marks, evaluateAll) {
     h(
       'div',
       { class: 'form-actions', style: 'margin-top:0' },
-      marks ? null : h('button', { class: 'btn btn-primary btn-sm', type: 'button', onclick: evaluateAll }, `Evaluate all ${filed.length}`),
+      marks ? null : h('button', { class: 'btn btn-primary btn-sm', type: 'button', onclick: () => evaluateAll() }, `Evaluate all ${filed.length}`),
+      marks && failed && !going ? h('button', { class: 'btn btn-primary btn-sm', type: 'button', onclick: () => evaluateAll(true) }, failed === 1 ? 'Evaluate the failed one again' : `Evaluate the ${failed} failed again`) : null,
       h('a', { class: 'btn btn-sm', href: boardLink }, 'Back to the Assessments board')
     )
   );

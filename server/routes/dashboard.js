@@ -2,6 +2,7 @@ import express from 'express';
 import db from '../db.js';
 import { GRADES, testFor } from '../results.js';
 import { findReport, isOldLayout, isOutOfDate, lacksPlainWords, schoolOverview, schoolReportIsStale } from '../reports.js';
+import { queuedForMarking, unmarkedSittings } from '../bulk.js';
 
 const router = express.Router();
 
@@ -12,9 +13,10 @@ const selectTests = db.prepare('SELECT id, name FROM tests WHERE school_id = ? O
 // What each teacher's sittings in the test that are not evaluated yet are
 // waiting on. A teacher can have more than one open at a time when sections
 // are uploaded one by one, so every open sitting counts, not only the latest.
+// A sitting waiting its turn in Evaluate all counts as being marked.
 const selectOpenSittings = db.prepare(`
   SELECT a.teacher_id,
-         MAX(a.ai_status = 'running') AS marking,
+         MAX(a.ai_status = 'running' OR a.id IN (SELECT value FROM json_each(@queued))) AS marking,
          MAX(a.ai_status = 'failed')  AS failed,
          MAX(a.ai_status NOT IN ('running', 'failed') AND EXISTS (
            SELECT 1 FROM assessment_files f WHERE f.assessment_id = a.id AND f.kind = 'response'
@@ -36,7 +38,8 @@ const POTENTIAL_LEVELS = [
 // teachers are doing section by section. Grades only, never an overall percentage.
 function schoolSummary(school, test) {
   const overview = schoolOverview(school.id, test.id);
-  const openSittings = new Map(selectOpenSittings.all({ school_id: school.id, test_id: test.id }).map((row) => [row.teacher_id, row]));
+  const queued = JSON.stringify(queuedForMarking());
+  const openSittings = new Map(selectOpenSittings.all({ school_id: school.id, test_id: test.id, queued }).map((row) => [row.teacher_id, row]));
   const person = (t) => ({ id: t.id, name: t.name });
 
   const waiting = { not_started: [], to_evaluate: [], marking: [], failed: [], reports_to_build: [] };
@@ -71,6 +74,9 @@ function schoolSummary(school, test) {
     teacher_count: overview.teachers.length,
     assessed: overview.assessed,
     waiting,
+    // The papers behind the "Marking failed" and "waiting for Evaluate" rows,
+    // which each have a button to evaluate them all at once.
+    unmarked: unmarkedSittings(school.id, test.id),
     sections: overview.section_stats.map(({ helpers, needs, ...stat }) => stat),
     potential,
     school_report: schoolReport && {

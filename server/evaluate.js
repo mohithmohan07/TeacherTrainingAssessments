@@ -129,13 +129,32 @@ export function startEvaluation(assessmentId, marking = 'standard') {
   }
 
   markRunning.run(assessment.id);
-  keepAwake(
-    evaluate(assessment, { paper, library, response }, markingOf(marking)).catch((error) => {
+  keepAwake(markWithSecondTry(assessment, { paper, library, response }, markingOf(marking)));
+  return null;
+}
+
+// A marking that fails for a reason that should pass by itself, such as OpenAI
+// or Gemini staying too busy or too slow while a school's papers are marked
+// together, is tried once more after a minute or two, as pressing Evaluate
+// again would. Any other failure, or a second one, is shown with its reason.
+const SECOND_TRY_AFTER_MS = Number(process.env.SECOND_TRY_AFTER_MS ?? 60_000);
+
+async function markWithSecondTry(assessment, files, marking) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await evaluate(assessment, files, marking);
+      return;
+    } catch (error) {
+      if (error.passing && attempt === 1) {
+        console.warn(`Marking assessment ${assessment.id} failed (${error.message}); trying once more.`);
+        await new Promise((resolve) => setTimeout(resolve, SECOND_TRY_AFTER_MS * (1 + Math.random())));
+        continue;
+      }
       console.error(`Evaluating assessment ${assessment.id} failed:`, error);
       markFailed.run(error.userMessage ?? `Marking failed: ${error.message}`, assessment.id);
-    })
-  );
-  return null;
+      return;
+    }
+  }
 }
 
 async function evaluate(assessment, { paper, library, response }, marking) {

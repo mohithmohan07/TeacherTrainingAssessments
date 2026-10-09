@@ -108,6 +108,8 @@ export const bulkApi = {
   remove: (id) => api.del(`/api/bulk/${id}`),
   evaluate: (ids, marking) => api.postJson('/api/bulk/evaluate', { ids, marking }),
   marking: (ids) => api.get(`/api/bulk/marking?ids=${ids.join(',')}`),
+  unmarked: (schoolId, testId) => api.get(`/api/bulk/unmarked?${new URLSearchParams({ school_id: schoolId, test_id: testId })}`),
+  evaluateUnmarked: (schoolId, testId, which, marking) => api.postJson('/api/bulk/evaluate-unmarked', { school_id: schoolId, test_id: testId, which, marking }),
   file: (schoolId, testId, ids) => api.postJson('/api/bulk/file', { school_id: schoolId, test_id: testId, ...(ids ? { ids } : {}) }),
 };
 

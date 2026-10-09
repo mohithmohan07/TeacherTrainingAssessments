@@ -606,6 +606,16 @@ html.lightbox-open { overflow: hidden; }
 .dash-wait.tone-danger { border-left-color: var(--danger); }
 .dash-names { margin-top: 6px; font-size: 13px; color: var(--muted); line-height: 1.6; }
 .dash-names a { color: var(--accent); }
+.dash-wait-actions { margin-top: 8px; }
+.failed-reasons { margin-top: 8px; font-size: 13px; }
+.failed-reasons summary { cursor: pointer; color: var(--accent); }
+.failed-reasons ul { margin: 6px 0 0; padding-left: 18px; }
+.failed-reasons li { margin-bottom: 6px; overflow-wrap: anywhere; }
+.failed-reasons .hint a { display: inline-block; color: var(--accent); }
+.notice-danger { border-color: #f0c8c5; background: var(--danger-soft); color: var(--danger); }
+.notice-danger .failed-reasons summary { color: var(--danger); }
+.notice-danger .failed-reasons li > div:first-child { color: var(--text); }
+.notice-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 .dash-report-line { margin-top: 12px; }
 .dash-section { margin-bottom: 14px; }
 .dash-section-head { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
