@@ -576,7 +576,8 @@ export function schoolOverview(schoolId, testId, { examples = false } = {}) {
     for (const { s } of results) counts[s.grade] += 1;
     return {
       key,
-      name: results[0]?.s.name ?? key,
+      // The section's own name: the first paper's could carry its subject.
+      name: sectionName(key),
       title: SECTION_TITLES[key] ?? '',
       sat: new Set(results.map((r) => r.teacher.id)).size,
       // More than sat when some teachers took Section B in two subjects.

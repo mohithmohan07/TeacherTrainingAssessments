@@ -26,6 +26,16 @@ const selectOpenSittings = db.prepare(`
    GROUP BY a.teacher_id
 `);
 
+// Papers uploaded but not marked yet (waiting, being marked or failed), by
+// section and teacher.
+const selectUnmarkedBySection = db.prepare(`
+  SELECT a.section, a.teacher_id, COUNT(*) AS papers
+    FROM assessments a
+   WHERE a.test_id = @test_id AND a.school_id = @school_id AND a.status != 'evaluated'
+     AND EXISTS (SELECT 1 FROM assessment_files f WHERE f.assessment_id = a.id AND f.kind = 'response')
+   GROUP BY a.section, a.teacher_id
+`);
+
 const POTENTIAL_LEVELS = [
   { level: 'mentor', headline: 'Can Guide Other Teachers' },
   { level: 'strong', headline: 'Strong in Every Section' },
@@ -60,6 +70,29 @@ function schoolSummary(school, test) {
     }
   }
 
+  // A section's figures count marked papers only. Beside them go the papers
+  // uploaded for it but not marked yet, and the teachers whose answers are in
+  // for other sections but not this one, so that together they account for
+  // every teacher whose answers are in.
+  const unmarked = selectUnmarkedBySection.all({ school_id: school.id, test_id: test.id });
+  const byId = new Map(overview.teachers.map((t) => [t.id, t]));
+  const uploaded = new Set([...overview.teachers.filter((t) => t.sections.length).map((t) => t.id), ...unmarked.map((r) => r.teacher_id)]);
+  // A full paper not marked yet may hold any section.
+  const fullPapers = unmarked.filter((r) => !r.section).map((r) => r.teacher_id);
+  const sections = overview.section_stats.map(({ helpers, needs, ...stat }) => {
+    const toMark = unmarked.filter((r) => r.section === stat.key && byId.has(r.teacher_id));
+    const answered = new Set([
+      ...overview.teachers.filter((t) => t.sections.some((s) => s.key === stat.key)).map((t) => t.id),
+      ...toMark.map((r) => r.teacher_id),
+      ...fullPapers,
+    ]);
+    return {
+      ...stat,
+      to_mark: { papers: toMark.reduce((n, r) => n + r.papers, 0), teachers: toMark.map((r) => person(byId.get(r.teacher_id))) },
+      no_answers: [...uploaded].filter((id) => !answered.has(id) && byId.has(id)).map((id) => person(byId.get(id))),
+    };
+  });
+
   const potential = POTENTIAL_LEVELS.map(({ level, headline }) => ({
     level,
     headline,
@@ -77,7 +110,7 @@ function schoolSummary(school, test) {
     // The papers behind the "Marking failed" and "waiting for Evaluate" rows,
     // which each have a button to evaluate them all at once.
     unmarked: unmarkedSittings(school.id, test.id),
-    sections: overview.section_stats.map(({ helpers, needs, ...stat }) => stat),
+    sections,
     potential,
     school_report: schoolReport && {
       status: schoolReport.status,
@@ -99,7 +132,9 @@ router.get('/', (_req, res) => {
       schools: schools.length,
       teachers: sum((s) => s.teacher_count),
       not_started: sum((s) => s.waiting.not_started.length),
-      to_evaluate: sum((s) => s.waiting.to_evaluate.length + s.waiting.failed.length),
+      to_evaluate: sum((s) => s.waiting.to_evaluate.length),
+      marking: sum((s) => s.waiting.marking.length),
+      failed: sum((s) => s.waiting.failed.length),
       reports_to_build: sum((s) => s.waiting.reports_to_build.length),
     },
     schools,

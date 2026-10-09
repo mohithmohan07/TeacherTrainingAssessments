@@ -8,13 +8,17 @@ import { evaluateAllButton, failedReasons } from '../unmarked.js';
 export async function renderDashboard(root) {
   const { totals, schools, grades } = await dashboardApi.get();
 
+  // The same groups as the Waiting rows below; papers being marked and
+  // markings that failed only when there are some.
   const stats = [
     { label: 'Schools', value: totals.schools },
     { label: 'Teachers', value: totals.teachers },
     { label: 'Nothing uploaded yet', value: totals.not_started },
     { label: 'Waiting for Evaluate', value: totals.to_evaluate },
+    totals.marking ? { label: 'Being marked', value: totals.marking } : null,
+    totals.failed ? { label: 'Marking failed', value: totals.failed } : null,
     { label: 'Reports to build', value: totals.reports_to_build },
-  ];
+  ].filter(Boolean);
 
   mount(
     root,
@@ -199,8 +203,17 @@ function resultsPanel(data, grades) {
   );
 }
 
+// Names linking to the teachers' profiles, inline.
+const nameLinks = (teachers) => teachers.flatMap((t, i) => [i ? ', ' : '', h('a', { href: `#/teachers/${t.id}` }, t.name)]);
+
+// A section's figures count the papers marked: a teacher of two subjects can
+// have two Section B papers. Under them, the papers still to mark and the
+// teachers with no answers for the section, so the counts add up to the
+// teachers whose answers are in.
 function sectionRow(section, grades) {
-  const total = section.sat || 1;
+  const total = section.papers || section.sat || 1;
+  const toMark = section.to_mark ?? { papers: 0, teachers: [] };
+  const missing = section.no_answers ?? [];
   return h(
     'div',
     { class: 'dash-section' },
@@ -208,7 +221,7 @@ function sectionRow(section, grades) {
       'div',
       { class: 'dash-section-head' },
       h('strong', {}, section.name),
-      h('span', { class: 'hint' }, `${section.sat} sat · average ${section.average}%`)
+      h('span', { class: 'hint' }, `${section.sat} marked${section.papers > section.sat ? ` (${section.papers} papers)` : ''} · average ${section.average}%`)
     ),
     section.title ? h('div', { class: 'hint dash-section-title' }, section.title) : null,
     h(
@@ -222,6 +235,10 @@ function sectionRow(section, grades) {
       'div',
       { class: 'grade-legend' },
       grades.map((g) => h('span', {}, h('i', { class: `grade-${g.grade}` }), `${g.grade} ${g.label} ${section.counts[g.grade]}`))
-    )
+    ),
+    toMark.papers
+      ? h('div', { class: 'dash-section-note' }, 'Still to mark, so not counted yet: ', nameLinks(toMark.teachers), '.')
+      : null,
+    missing.length ? h('div', { class: 'dash-section-note' }, 'No answers uploaded for this section: ', nameLinks(missing), '.') : null
   );
 }
