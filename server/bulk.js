@@ -6,7 +6,7 @@
 // memory allows. Matching a PDF:
 //   1. Its teacher comes from the file name, or else from the name written on
 //      the sheets, which OpenAI reads while it checks the language of every
-//      page.
+//      page. When the two name different teachers, you choose.
 //   2. Pages in a language other than English are read by Gemini first, in
 //      their own script, as Evaluate does.
 //   3. OpenAI compares the answers with the library papers that fit the
@@ -74,8 +74,8 @@ const parse = (text, fallback) => {
 
 /* ---------------------------------------------------- teacher from name */
 
-// Words of a name or a file name, lower case: "Archana_B.M - answers.pdf" →
-// archana, b, m, answers.
+// Words of a name or a file name, lower case: "Meena_R.K - answers.pdf" →
+// meena, r, k, answers.
 const words = (text) =>
   String(text ?? '')
     .toLowerCase()
@@ -95,29 +95,62 @@ function nearly(a, b) {
   return a.slice(i + 1) === b.slice(i + 1) || a.slice(i) === b.slice(i + 1) || a.slice(i + 1) === b.slice(i);
 }
 
+// A name's words longer than an initial, and its initials.
+const nameParts = (name) => {
+  const parts = words(name).filter((w) => !TITLES.has(w));
+  return { full: parts.filter((w) => w.length > 2), initials: parts.filter((w) => w.length <= 2) };
+};
+
 // How well a name matches some text: 2 when every word of the name longer
 // than an initial is there, with its initials too; 1 when those words are
 // there but not the initials; 0 otherwise.
 export function nameMatch(name, text) {
   const have = words(text);
-  const joined = have.join('');
-  const parts = words(name).filter((w) => !TITLES.has(w));
-  const full = parts.filter((w) => w.length > 2);
-  const initials = parts.filter((w) => w.length <= 2);
+  const { full, initials } = nameParts(name);
   if (!full.length) return 0;
   if (!full.every((w) => have.some((h) => nearly(h, w)))) return 0;
-  const initialsThere = initials.length && (initials.every((i) => have.includes(i)) || joined.includes(initials.join('')));
+  const initialsThere = initials.length && (initials.every((i) => have.includes(i)) || have.includes(initials.join('')));
   return initialsThere ? 2 : 1;
 }
 
-// The one teacher a file name names, or null when it names none or several.
-export function teacherFromFileName(fileName, teachers) {
-  const scored = teachers.map((teacher) => ({ teacher, score: nameMatch(teacher.name, fileName) })).filter((m) => m.score);
-  if (!scored.length) return null;
-  const best = Math.max(...scored.map((m) => m.score));
-  const top = scored.filter((m) => m.score === best);
-  return top.length === 1 ? top[0].teacher : null;
+// The words of a file name that a teacher's name accounts for: its words
+// longer than an initial, allowing a slip, and its initials, alone or run
+// together ("KC").
+function explained(name, have) {
+  const { full, initials } = nameParts(name);
+  return have.filter(
+    (h) => TITLES.has(h) || full.some((w) => nearly(h, w)) || initials.includes(h) || (initials.length > 1 && h === initials.join(''))
+  );
 }
+
+// The one teacher a file name names, or null when it names none or several.
+// The name that accounts for most of the file name wins, so "Asha
+// Raghavan.pdf" is Asha Raghavan's even when the school also has an Asha.
+// It must account for a word no other teacher's name does: "Asha.pdf" or
+// "Asha Ragvan.pdf" could be Asha's or Asha Raghavan's, so the name on the
+// sheets decides.
+export function teacherFromFileName(fileName, teachers) {
+  const have = words(fileName);
+  const fits = teachers
+    .map((teacher) => ({ teacher, score: nameMatch(teacher.name, fileName), words: explained(teacher.name, have) }))
+    .filter((m) => m.score);
+  if (!fits.length) return null;
+  const rank = (m) => m.words.length * 10 + m.score;
+  const best = Math.max(...fits.map(rank));
+  const top = fits.filter((m) => rank(m) === best);
+  if (top.length !== 1) return null;
+  const [chosen] = top;
+  const alike = teachers.some((t) => t.id !== chosen.teacher.id && chosen.words.every((w) => explained(t.name, [w]).length));
+  return alike ? null : chosen.teacher;
+}
+
+// Whose answers the sheets look like, for the review screen.
+const sheetSays = (written, teacher) =>
+  !written
+    ? `the sheets look like ${teacher.name}’s`
+    : written.toLowerCase() === teacher.name.toLowerCase()
+      ? `the sheets say “${written}”`
+      : `the sheets say “${written}”, which looks like ${teacher.name}`;
 
 /* ------------------------------------------------------------- adding */
 
@@ -232,7 +265,7 @@ setImmediate(pump);
 
 const LOOK_INSTRUCTIONS = `You are helping file a teacher's answers to a teacher training assessment. You are given every page of one PDF of answer sheets, scanned, usually handwritten, and the list of teachers at the school.
 
-1. Teachers usually write their name at the top of the first sheet, sometimes on every sheet. In name_written, copy the teacher's name as written, or "" if no name is written. In teacher_id, give the id of the teacher in the list it names, allowing for initials, short forms, spelling slips and other scripts. Give 0 if no name is written or you are not sure which teacher it is.
+1. Teachers usually write their name at the top of the first sheet, sometimes on every sheet. In name_written, copy the teacher's name as written, or "" if no name is written. In teacher_id, give the id of the teacher in the list it names, allowing for initials, short forms, spelling slips and other scripts. Teachers can share a first name, so go by the whole name: a surname or initial written on the sheets, even misspelt, points to the teacher whose listed name has it, and the class and subject written on the sheets help tell them apart. Give 0 if no name is written or you are not sure which teacher it is.
 
 2. For each page, say what language the teacher's writing on it is in: "english" when it is all in English, "other" when none of it is English (for example Kannada, Hindi or Sanskrit), "mixed" when it has both, even a word or a line. Judge the language, not the script: Hindi written in English letters is Hindi. Printed text, numbers and question labels such as "Q5 A" do not count. A page with no writing is "english". Name the languages in English in languages.`;
 
@@ -387,8 +420,16 @@ async function sortItem(id) {
   const fromSheet = teachers.find((t) => t.id === Number(look.teacher_id)) ?? null;
   item = selectItem.get(id);
   if (!item) return;
-  if (!item.teacher_id && fromSheet) {
-    setTeacher.run(fromSheet.id, 'sheet', id);
+  // Unless you chose the teacher, the file name and the sheets decide it
+  // afresh. When they name two different teachers, as when a file named with
+  // a misspelt surname matches a teacher who shares the first name, neither
+  // is taken, and the review screen asks whose the answers are.
+  let fromFile = null;
+  if (item.matched_by !== 'you') {
+    const byFile = teacherFromFileName(item.file_name, teachers);
+    fromFile = byFile && fromSheet && byFile.id !== fromSheet.id ? byFile : null;
+    const [teacherId, how] = fromFile ? [null, null] : byFile ? [byFile.id, 'file'] : fromSheet ? [fromSheet.id, 'sheet'] : [null, null];
+    setTeacher.run(teacherId, how, id);
     item = selectItem.get(id);
   }
   const byNumber = new Map((look.pages ?? []).map((p) => [Number(p.page), p]));
@@ -414,9 +455,11 @@ async function sortItem(id) {
   if (!teacher) {
     setStatus.run(
       'needs_teacher',
-      written
-        ? `The name written on the sheets, “${written}”, matches no teacher at this school. Choose the teacher, and the pages are matched then.`
-        : 'No name is written on the sheets and the file name matches no teacher. Choose the teacher, and the pages are matched then.',
+      fromFile
+        ? `The file name says ${fromFile.name}, but ${sheetSays(written, fromSheet)}. Choose the teacher, and the pages are matched then.`
+        : written
+          ? `The name written on the sheets, “${written}”, matches no teacher at this school. Choose the teacher, and the pages are matched then.`
+          : 'No name is written on the sheets and the file name matches no teacher. Choose the teacher, and the pages are matched then.',
       id
     );
     return;
@@ -617,10 +660,14 @@ export function presentItem(item, others = []) {
   const bPapers = sections.filter((s) => s.section === 'B' && s.pages && s.paper).map((s) => s.paper.id);
   if (new Set(bPapers).size < bPapers.length) problems.push('Two Section B groups have the same question paper. Move their pages into one, or choose the other subject’s paper.');
 
-  const notes = [];
-  if (result?.name_written && item.matched_by === 'file' && result.sheet_teacher_id && result.sheet_teacher_id !== item.teacher_id) {
-    notes.push(`The file name says ${teacher?.name}, but the sheets say “${result.name_written}”. Check the teacher.`);
+  // Matching now asks whose a PDF is when its file name and sheets disagree;
+  // a PDF matched before that is held back the same way.
+  const sheetTeacher = result?.sheet_teacher_id ? selectTeacher.get(result.sheet_teacher_id) : null;
+  if (teacher && item.matched_by === 'file' && sheetTeacher && sheetTeacher.id !== teacher.id) {
+    problems.push(`The file name says ${teacher.name}, but ${sheetSays(result.name_written, sheetTeacher)}. Choose the teacher, or press Match again.`);
   }
+
+  const notes = [];
   if (teacher && others.some((o) => o.id !== item.id && o.teacher_id === teacher.id)) {
     notes.push(`Another PDF here is also for ${teacher.name}. Both are filed under them if you keep both.`);
   }

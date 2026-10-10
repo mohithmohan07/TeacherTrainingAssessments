@@ -167,7 +167,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
       { class: 'dropzone bulk-drop' },
       h('p', { style: 'margin:0 0 10px' }, h('strong', {}, 'Drop the answer paper PDFs here'), ', or'),
       h('button', { class: 'btn btn-primary', type: 'button', onclick: () => fileInput.click() }, 'Upload files'),
-      h('p', { class: 'hint', style: 'margin:10px 0 0' }, 'One PDF for each teacher, with all their answer sheets in it. Naming each file after the teacher, such as “Keshava.pdf”, helps; without that, the name written on the sheets is used.'),
+      h('p', { class: 'hint', style: 'margin:10px 0 0' }, 'One PDF for each teacher, with all their answer sheets in it. Naming each file after the teacher as on the Teachers page, such as “Meena R K.pdf”, helps; without that, the name written on the sheets is used.'),
       fileInput
     );
     dropzone.addEventListener('dragover', (event) => {
