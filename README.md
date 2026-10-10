@@ -172,9 +172,14 @@ with 512 MB). It carries on if the page is closed. The PDFs need not say
 whose answers they are, which sections they cover or which paper was sat;
 matching works each one out:
 
-1. **The teacher** comes from the file name ("Keshava.pdf",
-   "Archana_BM.pdf"), or else from the name written on the sheets, which
-   OpenAI reads while it checks the language of each page.
+1. **The teacher** comes from the file name ("Meena.pdf",
+   "Meena_RK.pdf"), or else from the name written on the sheets, which
+   OpenAI reads while it checks the language of each page. A file name
+   counts only when it fits one teacher better than every other: with an
+   Asha and an Asha Raghavan at the school, "Asha.pdf" or a misspelt "Asha
+   Ragvan.pdf" could be either, so the sheets decide. When the file name and
+   the sheets name different teachers, the PDF waits on the review screen
+   for you to choose, and is matched once you have.
 2. **Pages not in English** are read by Gemini first, in their own script, as
    Evaluate does. A teacher can write one section in Kannada and another in
    English: each section is matched on its own.
