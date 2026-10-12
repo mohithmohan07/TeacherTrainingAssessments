@@ -56,7 +56,9 @@ function waitBefore(res, payload, attempt) {
 // Sends one request and returns the parsed JSON object. `task` finishes the
 // sentence "OpenAI took more than five minutes to …" and `retry` says what to
 // press to try again, so every failure reads as advice.
-export async function requestJson({ instructions, content, name, schema, task, retry }) {
+export async function requestJson({ instructions, content, name, schema, task, retry, maxRetries = RETRIES, timeoutMs = TIMEOUT_MS }) {
+  const retries = Math.min(RETRIES, Math.max(0, Math.floor(Number(maxRetries) || 0)));
+  const timeout = Math.min(TIMEOUT_MS, Math.max(1000, Number(timeoutMs) || TIMEOUT_MS));
   const body = {
     model: OPENAI_MODEL,
     instructions,
@@ -77,10 +79,10 @@ export async function requestJson({ instructions, content, name, schema, task, r
           'content-type': 'application/json',
         },
         body: sent,
-        signal: AbortSignal.timeout(TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeout),
       });
     } catch (error) {
-      if (error.name !== 'TimeoutError' && attempt < RETRIES) {
+      if (error.name !== 'TimeoutError' && attempt < retries) {
         await pause(waitBefore(null, null, attempt));
         continue;
       }
@@ -91,7 +93,7 @@ export async function requestJson({ instructions, content, name, schema, task, r
       );
     }
     payload = await res.json().catch(() => null);
-    if (busy(res, payload) && attempt < RETRIES) {
+    if (busy(res, payload) && attempt < retries) {
       await pause(waitBefore(res, payload, attempt));
       continue;
     }

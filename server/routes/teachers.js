@@ -85,14 +85,14 @@ function withResults(row, testId, section, library) {
   const sections = teacherResults(row.id, testId);
   const report = findReport('teacher', testId, row.id);
   const papers = row.assessment_id ? sittingPapers(row.assessment_id).map(presentPaper) : [];
-  const needsPaper = !papers.length && !row.question_paper_count && row.assessment_status !== 'evaluated';
+  const needsPaper = !papers.length && !row.question_paper_count && !['evaluated', 'finalized', 'assembling'].includes(row.assessment_status);
   return {
     ...row,
     papers,
     suggested_papers: needsPaper && library?.length
       ? suggestPapers(library, teacherProfile(row, { name: row.school_name }), section).map(presentPaper)
       : [],
-    sections: sections.map(({ key, name, percent, grade, grade_label, marking, writing }) => ({ key, name, percent, grade, grade_label, marking, writing })),
+    sections: sections.map(({ key, name, percent, grade, grade_label, marking, writing, coverage, grade_eligible, outcome, completion }) => ({ key, name, percent, grade, grade_label, marking, writing, coverage, grade_eligible, outcome, completion })),
     report_status: report ? (report.status === 'done' && isOutOfDate(report, sections) ? 'stale' : report.status) : 'none',
   };
 }

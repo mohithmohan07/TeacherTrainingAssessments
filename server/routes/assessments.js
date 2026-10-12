@@ -12,7 +12,7 @@ const router = express.Router();
 
 const selectTeacher = db.prepare('SELECT * FROM teachers WHERE id = ?');
 
-const STATUSES = new Set(['draft', 'scanned', 'evaluated']);
+const STATUSES = new Set(['draft', 'scanned', 'evaluated', 'finalized']);
 
 const selectAssessmentRow = db.prepare(`
   SELECT a.*, t.name AS teacher_name, t.grade AS teacher_grade, t.subjects AS teacher_subjects,
@@ -30,6 +30,15 @@ const selectFiles = db.prepare(
   'SELECT * FROM assessment_files WHERE assessment_id = ? ORDER BY kind, position, id'
 );
 
+// Batch-owned sources remain readable while sibling PDFs are being joined.
+// Check before upload middleware so rejected uploads never reach the disk.
+router.use('/:id', (req, res, next) => {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && selectAssessmentRow.get(req.params.id)?.status === 'assembling') {
+    return res.status(409).json({ error: 'This submission batch is still being assembled. Wait for it to finish before changing the assessment.' });
+  }
+  next();
+});
+
 function withFiles(assessment) {
   if (!assessment) return assessment;
   const files = selectFiles.all(assessment.id);
@@ -38,7 +47,7 @@ function withFiles(assessment) {
     ...assessment,
     ai_result: aiResult,
     evaluation_progress: assessment.evaluation_progress ? JSON.parse(assessment.evaluation_progress) : null,
-    sections: sectionSummary(aiResult),
+    sections: assessment.status === 'assembling' ? [] : sectionSummary(aiResult),
     unanswered_sections: aiResult ? unansweredSections(aiResult) : [],
     question_paper_files: files.filter((f) => f.kind === 'question_paper'),
     response_files: files.filter((f) => f.kind === 'response'),
@@ -50,8 +59,8 @@ function withFiles(assessment) {
 // were counted, and its Written Expression.
 function sectionSummary(aiResult) {
   return aiResult
-    ? sittingSections(aiResult).map(({ key, name, awarded, max, percent, grade, grade_label, marking, left_out, left_out_marks, writing }) => ({
-        key, name, awarded, max, percent, grade, grade_label, marking, left_out, left_out_marks, writing,
+    ? sittingSections(aiResult).map(({ key, name, awarded, max, percent, grade, grade_label, marking, left_out, left_out_marks, writing, coverage, grade_eligible, outcome, completion }) => ({
+        key, name, awarded, max, percent, grade, grade_label, marking, left_out, left_out_marks, writing, coverage, grade_eligible, outcome, completion,
       }))
     : [];
 }
@@ -105,7 +114,7 @@ router.get('/', (req, res) => {
          ORDER BY COALESCE(a.assessment_date, date(a.created_at)) DESC, a.id DESC`
     )
     .all(params)
-    .map(({ ai_result: aiResult, ...row }) => ({ ...row, sections: sectionSummary(aiResult ? JSON.parse(aiResult) : null) }));
+    .map(({ ai_result: aiResult, ...row }) => ({ ...row, sections: row.status === 'assembling' ? [] : sectionSummary(aiResult ? JSON.parse(aiResult) : null) }));
 
   res.json(rows);
 });
@@ -182,21 +191,23 @@ router.put('/:id/marks', (req, res) => {
   if (marks.length !== result.questions.length) return res.status(400).json({ error: 'The marks do not match the questions. Reload the page and try again.' });
 
   const bad = marks.findIndex((mark, i) => {
+    const q = result.questions[i];
+    if (q.assessment_state === 'unassessable' || q.assessment_state === 'not_supplied' || q.marks_awarded === null) return mark !== null;
     const n = Number(mark);
-    const status = result.questions[i].response_status;
+    const status = q.response_status;
     const unsupported = status && !['answered', 'partial'].includes(status) && n > 0;
-    return String(mark).trim() === '' || !Number.isFinite(n) || n < 0 || n > result.questions[i].max_marks || unsupported;
+    return mark === null || String(mark).trim() === '' || !Number.isFinite(n) || n < 0 || n > result.questions[i].max_marks || unsupported;
   });
   if (bad !== -1) {
     const q = result.questions[bad];
-    const absent = q.response_status && !['answered', 'partial'].includes(q.response_status);
+    const absent = q.assessment_state === 'unassessable' || q.assessment_state === 'not_supplied' || q.marks_awarded === null || (q.response_status && !['answered', 'partial'].includes(q.response_status));
     return res.status(400).json({ error: absent ? `Question ${q.question} has no readable answer to credit. Review its source evidence and evaluate again before awarding marks.` : `Question ${q.question} needs a mark from 0 to ${q.max_marks}.` });
   }
 
   const updated = normalise({
     ...result,
-    questions: result.questions.map((q, i) => ({ ...q, marks_awarded: Number(marks[i]),
-      audit: Number(marks[i]) === q.marks_awarded ? q.audit : { ...q.audit, manual_override: {
+    questions: result.questions.map((q, i) => ({ ...q, marks_awarded: marks[i] === null ? null : Number(marks[i]),
+      audit: (marks[i] === null ? null : Number(marks[i])) === q.marks_awarded ? q.audit : { ...q.audit, manual_override: {
         previous_marks: q.marks_awarded, marks_awarded: Number(marks[i]), corrected_at: new Date().toISOString(),
       } },
     })),
@@ -304,9 +315,9 @@ router.post('/:id/move', (req, res) => {
   if (assessment.ai_status === 'running') {
     return res.status(400).json({ error: 'OpenAI is marking these pages. Wait for it to finish, then move them.' });
   }
-  if (assessment.status === 'evaluated') {
+  if (['evaluated', 'finalized'].includes(assessment.status)) {
     return res.status(400).json({
-      error: `${assessment.teacher_name}’s paper has been marked from these pages, so they stay with it. If they are another teacher’s, delete this sitting on its evaluation page and scan the pages again on the right teacher’s row.`,
+      error: `${assessment.teacher_name}’s assessment is complete, so its source pages stay with it. If they are another teacher’s, delete this sitting on its evaluation page and scan the pages again on the right teacher’s row.`,
     });
   }
 

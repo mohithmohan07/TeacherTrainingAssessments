@@ -11,7 +11,7 @@
 // the teacher works on in each block of days and how UpSchool's team runs it.
 import db from './db.js';
 import { friendly, requestJson } from './openai.js';
-import { GRADES, SECTION_TITLES, fingerprint, sectionTitleOf } from './results.js';
+import { GRADES, SECTION_TITLES, fingerprint, gradeEligible, sectionTitleOf } from './results.js';
 
 const MAX_PATHS = 6;
 const MAX_DAYS = 120;
@@ -206,7 +206,9 @@ const summarise = ({ key, name, title, subject, grade, grade_label, percent }) =
 // to review progress before the exit assessment.
 export function trainingPlanFor(sections, framework) {
   if (!framework?.paths?.length) return null;
-  const graded = sections.filter((s) => s.percent !== null && s.percent !== undefined && s.grade);
+  // A complete training classification cannot be inferred from incomplete evidence.
+  if (sections.some((s) => (s.coverage || s.grade_eligible === false || s.outcome === 'no_assessment') && s.coverage?.state !== 'not_supplied' && !gradeEligible(s))) return null;
+  const graded = sections.filter((s) => gradeEligible(s) && s.grade);
   if (!graded.length) return null;
 
   const focus = graded

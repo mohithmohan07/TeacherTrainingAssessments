@@ -74,7 +74,7 @@ export function initials(name) {
 }
 
 export function statusBadge(status) {
-  const labels = { draft: 'Draft', scanned: 'Scans uploaded', evaluated: 'Evaluated' };
+  const labels = { draft: 'Draft', scanned: 'Scans uploaded', evaluated: 'Evaluated', finalized: 'Assessment complete (no marks)', assembling: 'Preparing submission' };
   return h('span', { class: `badge ${status}` }, labels[status] ?? status);
 }
 
@@ -244,20 +244,33 @@ export function emptyState(message, action) {
   return h('div', { class: 'empty' }, h('p', {}, message), action ?? null);
 }
 
-// One section's result: "Section A 72% · B". The colour follows the grade.
+// A subset percentage is evidence only, never a comparative grade.
+export const sectionGradeEligible = (section) => section.grade_eligible !== false && section.outcome !== 'no_assessment' && section.completion?.state !== 'no_assessment' && (!section.coverage || section.coverage.state === 'complete') && typeof section.percent === 'number' && Number.isFinite(section.percent);
+
+export function sectionScoreText(section) {
+  if (section.awarded === null || section.max === null) return 'Not assessed';
+  return `${section.awarded} / ${section.max}${section.coverage?.state === 'partial' ? ' on assessed questions only' : ''}`;
+}
+
+// One section's result: "Section A 72% · B". Limited evidence remains neutral.
 export function sectionChip(section, { short = false } = {}) {
   const name = short && /^Section [A-Z]( \(.+\))?$/.test(section.name) ? section.name.slice(8) : section.name;
+  const limited = section.grade_eligible === false || (section.coverage && section.coverage.state !== 'complete') || section.outcome === 'no_assessment';
+  const grade = limited ? null : section.grade;
+  const value = section.percent === null || section.percent === undefined ? (limited ? `${name}: Not assessed` : name) : `${name} ${section.percent}%${limited ? ' (assessed only; no grade)' : ''}`;
   return h(
     'span',
-    { class: `grade-chip grade-${section.grade ?? 'none'}`, title: section.grade_label ? `${section.name}: ${section.grade_label}` : section.name },
-    section.percent === null || section.percent === undefined ? name : `${name} ${section.percent}%`,
-    section.grade ? h('b', {}, section.grade) : null
+    { class: `grade-chip grade-${grade ?? 'none'}`, title: limited ? 'Incomplete assessment coverage; no grade or comparison.' : section.grade_label ? `${section.name}: ${section.grade_label}` : section.name },
+    value,
+    grade ? h('b', {}, grade) : null
   );
 }
 
 // The same, showing only the percentage, for tables with a column per section.
 export function percentChip(section) {
-  return sectionChip({ ...section, name: section.percent === null || section.percent === undefined ? '—' : `${section.percent}%`, percent: null });
+  const limited = section.grade_eligible === false || (section.coverage && section.coverage.state !== 'complete') || section.outcome === 'no_assessment';
+  const value = section.percent === null || section.percent === undefined ? (limited ? 'Not assessed' : '—') : `${section.percent}%${limited ? ' (assessed only; no grade)' : ''}`;
+  return h('span', { class: `grade-chip grade-${limited ? 'none' : section.grade ?? 'none'}` }, value, !limited && section.grade ? h('b', {}, section.grade) : null);
 }
 
 // The potential identifier from the management report. Reports written

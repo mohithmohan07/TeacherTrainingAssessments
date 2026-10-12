@@ -125,9 +125,9 @@ function waitingPanel(data, board, refresh, reasons) {
   const rows = [
     { list: waiting.not_started, label: 'Nothing uploaded yet', tone: 'muted', href: board },
     { list: waiting.to_evaluate, label: 'Scanned, waiting for Evaluate', tone: 'warn', href: board, which: 'waiting' },
-    { list: waiting.marking, label: 'Being marked by OpenAI', tone: 'info', href: board },
+    { list: waiting.marking, label: 'Assessment in progress', tone: 'info', href: board },
     { list: waiting.failed, label: 'Marking failed, press Evaluate again', tone: 'danger', href: board, which: 'failed' },
-    { list: waiting.reports_to_build, label: 'Marked, report not built or out of date', tone: 'info', href: board },
+    { list: waiting.reports_to_build, label: 'Assessment finished; report not built or out of date', tone: 'info', href: board },
   ].filter((row) => row.list.length);
 
   const actions = (which) => {
@@ -143,7 +143,7 @@ function waitingPanel(data, board, refresh, reasons) {
 
   const report = data.school_report;
   let reportLine;
-  if (!data.assessed) reportLine = null;
+  if (!data.assessed && !data.limited_assessment?.length) reportLine = null;
   else if (!report || report.status === 'none') reportLine = 'The school report has not been built for this test.';
   else if (report.status === 'running') reportLine = 'The school report is being written.';
   else if (report.status === 'failed') reportLine = 'The school report could not be written. Open it to try again.';
@@ -165,7 +165,7 @@ function waitingPanel(data, board, refresh, reasons) {
             row.which ? actions(row.which) : null
           )
         )
-      : h('p', { class: 'hint' }, 'Nothing waiting. Every teacher in this test is marked and has a current report.'),
+      : h('p', { class: 'hint' }, 'Nothing waiting. Every assessment in this test is complete and has a current report.'),
     reportLine
       ? h('p', { class: 'hint dash-report-line' }, reportLine, ' ', h('a', { href: `#/schools/${school.id}/report/${test.id}` }, 'Open the report'))
       : null
@@ -179,10 +179,11 @@ function resultsPanel(data, grades) {
     'div',
     { class: 'dash-panel' },
     h('h3', {}, 'How teachers are doing'),
-    h('p', { class: 'hint' }, `${data.assessed} of ${data.teacher_count} teachers have marked sections in ${data.test.name}.`),
+    h('p', { class: 'hint' }, `${data.assessed} of ${data.teacher_count} teachers have completed section grades in ${data.test.name}.`),
+    data.limited_assessment?.length ? h('p', { class: 'hint' }, 'Limited assessment evidence: ', nameLinks(data.limited_assessment), '. Unassessable or partial sections are excluded from grade comparisons.') : null,
     sections.length
       ? sections.map((s) => sectionRow(s, grades))
-      : h('p', { class: 'hint' }, 'No sections have been marked yet.'),
+      : h('p', { class: 'hint' }, 'No complete section grades are available yet.'),
     potential.some((p) => p.teachers.length)
       ? h(
           'div',
@@ -221,7 +222,7 @@ function sectionRow(section, grades) {
       'div',
       { class: 'dash-section-head' },
       h('strong', {}, section.name),
-      h('span', { class: 'hint' }, `${section.sat} marked${section.papers > section.sat ? ` (${section.papers} papers)` : ''} · average ${section.average}%`)
+      h('span', { class: 'hint' }, `${section.sat} graded${section.papers > section.sat ? ` (${section.papers} papers)` : ''}${section.average === null ? ' · no comparative average' : ` · average ${section.average}%`}`)
     ),
     section.title ? h('div', { class: 'hint dash-section-title' }, section.title) : null,
     h(
@@ -236,6 +237,7 @@ function sectionRow(section, grades) {
       { class: 'grade-legend' },
       grades.map((g) => h('span', {}, h('i', { class: `grade-${g.grade}` }), `${g.grade} ${g.label} ${section.counts[g.grade]}`))
     ),
+    section.limited?.length ? h('div', { class: 'dash-section-note' }, 'Limited evidence; not included in grade figures: ', nameLinks(section.limited), '.') : null,
     toMark.papers
       ? h('div', { class: 'dash-section-note' }, 'Still to mark, so not counted yet: ', nameLinks(toMark.teachers), '.')
       : null,

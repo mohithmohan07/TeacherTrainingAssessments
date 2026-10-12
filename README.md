@@ -258,7 +258,7 @@ Evaluate confirms the complete-submission scoring policy:
   section that is completely blank remains a zero with its full denominator.
 - Unreadable handwriting is distinct from a blank answer. Only readable,
   supported content earns credit; missing pages, failed extraction and uncertain
-  paper alignment stop evaluation for review rather than manufacture a score.
+  paper alignment receive a bounded focused reread. Remaining unassessable rows show no numeric mark, while supported content receives credit. Assessed-only totals carry coverage; incomplete evidence does not produce a misleading grade or comparison.
 
 New evaluations use this policy. Historical lenient results remain labelled as
 such until explicitly re-evaluated; no old scores are silently changed.
@@ -267,11 +267,11 @@ The evaluation now has separate, validated stages: source paper and printed
 marks, a provisional inferred rubric, response transcription and matching,
 criterion-level marking, then writing feedback. No approved marking scheme is
 assumed. Source pages, selected masters, inferred assumptions and credit evidence
-stay in the internal audit; teacher and management reports show the useful
+stay in the internal audit; deterministic report fallback remains available when optional narrative generation fails. Teacher and management reports show the useful
 marks, answers, guidance and feedback without the scoring-audit tables.
 
 See [Assessment grounding and regression checks](docs/assessment-grounding.md)
-for review gates, restart/resume behavior, cache invalidation and test commands.
+for evidence-bounded finalization, restart/resume behavior, cache invalidation and test commands. **Finalize assessments** is the bulk completion path: safe matched portions are assessed, unresolved sources remain retained, and no-result submissions receive a downloadable neutral status artifact rather than waiting for mandatory matching/review. No answer, match, printed maximum, or teacher identity is invented to force completion.
 
 ### Written Expression
 

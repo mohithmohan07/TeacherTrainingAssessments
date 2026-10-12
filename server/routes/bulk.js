@@ -6,8 +6,10 @@ import { discardUploads } from '../scans.js';
 import { testFor } from '../results.js';
 import {
   addItem, evaluateSittings, evaluateUnmarked, markingState, matchAll, choosePageSections, choosePapers, chooseTeacher, fileReady, itemFor, presentItem, presentItems, queueSort, removeItem,
-  unmarkedSittings,
+  unmarkedSittings, queueFinalizations, finalizationState, finalizationOutcome,
 } from '../bulk.js';
+
+import { outcomeHtml, outcomeFilename } from '../outcome-artifacts.js';
 
 const router = express.Router();
 
@@ -22,7 +24,7 @@ function schoolAndTest(source) {
 router.get('/', (req, res) => {
   const { school, test } = schoolAndTest(req.query);
   if (!school) return res.status(400).json({ error: 'Pick a school.' });
-  res.json({ school: { id: school.id, name: school.name }, test: { id: test.id, name: test.name }, items: presentItems(school.id, test.id) });
+  res.json({ school: { id: school.id, name: school.name }, test: { id: test.id, name: test.name }, items: presentItems(school.id, test.id), finalizations: finalizationState(school.id, test.id) });
 });
 
 // One PDF's pages, as pictures, with the PDF's file name. Nothing is
@@ -53,7 +55,10 @@ router.put('/:id', (req, res) => {
     const problem = choosePapers(item, req.body.papers);
     if (problem) return res.status(400).json({ error: problem });
   }
-  if (Array.isArray(req.body.pages)) choosePageSections(item, req.body.pages);
+  if (Array.isArray(req.body.pages)) {
+    const problem = choosePageSections(item, req.body.pages);
+    if (problem) return res.status(400).json({ error: problem });
+  }
   const items = db.prepare('SELECT * FROM bulk_items WHERE school_id = ? AND test_id = ?').all(item.school_id, item.test_id);
   res.json(presentItem(itemFor(item.id), items));
 });
@@ -72,6 +77,7 @@ router.post('/:id/sort', (req, res) => {
   const item = itemFor(req.params.id);
   if (!item) return res.status(404).json({ error: 'That PDF is no longer waiting to be filed.' });
   if (['waiting', 'running'].includes(item.sort_status)) return res.status(400).json({ error: 'It is being matched already.' });
+  if (item.sort_status.startsWith('finaliz')) return res.status(409).json({ error: 'This submission has a retained finalization outcome.' });
   queueSort(item.id);
   res.json(presentItem(itemFor(item.id)));
 });
@@ -79,7 +85,8 @@ router.post('/:id/sort', (req, res) => {
 router.delete('/:id', (req, res) => {
   const item = itemFor(req.params.id);
   if (!item) return res.status(404).json({ error: 'That PDF is no longer waiting to be filed.' });
-  removeItem(item.id);
+  const problem = removeItem(item.id);
+  if (problem) return res.status(409).json({ error: problem });
   res.json({ deleted: true });
 });
 
@@ -89,6 +96,26 @@ router.post('/file', (req, res) => {
   if (!school) return res.status(400).json({ error: 'Pick a school.' });
   const ids = Array.isArray(req.body.ids) ? req.body.ids.map(Number) : null;
   res.json(fileReady(school.id, test.id, ids));
+});
+
+// Finalizes supplied evidence without requiring manual matching confirmation.
+// Work and its source outcome are persisted before returning an accepted job.
+router.post('/finalize', (req, res) => {
+  const { school, test } = schoolAndTest(req.body);
+  if (!school) return res.status(400).json({ error: 'Pick a school.' });
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.map(Number) : null;
+  res.status(202).json(queueFinalizations(school.id, test.id, ids));
+});
+
+router.get('/:id/outcome', (req, res) => {
+  let outcome = finalizationOutcome(req.params.id);
+  if (!outcome) return res.status(404).json({ error: 'This submission outcome is not available yet.' });
+  const state = finalizationState(outcome.school.id, outcome.test.id).find((row) => row.item_id === outcome.item_id);
+  if (state?.state === 'failed') outcome = finalizationOutcome(req.params.id, { statusOnly: true });
+  else if (state?.state !== 'finalized') return res.status(409).json({ error: 'The assessment is still being completed.' });
+  res.set('Cache-Control', 'no-store');
+  res.set('Content-Disposition', `attachment; filename="${outcomeFilename(outcome.item_id)}"`);
+  res.type('html').send(outcomeHtml(outcome));
 });
 
 // Evaluate pressed for every sitting just filed, with one Standard or Lenient
