@@ -215,6 +215,22 @@ export function teacherProfile(teacher, school) {
   };
 }
 
+// A hard constraint shared by bulk and individual assessment entry points.
+// A high ranking/priority cannot compensate for the wrong administered level.
+export function paperCompatibilityProblem(paper, teacher, school, section) {
+  const split = (value) => String(value ?? '').split(',').map((v) => v.trim()).filter(Boolean);
+  const overlap = (a, b) => [...a].some((v) => b.has(v));
+  if (!paper || !split(paper.sections).includes(section)) return `The selected paper has no Section ${section}.`;
+  const profile = teacherProfile(teacher, school);
+  const levels = new Set(split(paper.levels));
+  if (levels.size && profile.levels.size && !overlap(levels, profile.levels)) return 'The selected paper is for a different school level. Check the teacher’s class and the administered master.';
+  if (profile.board && paper.board && profile.board.toLowerCase() !== paper.board.toLowerCase()) return 'The selected paper is for a different board.';
+  const subjects = subjectKeys(paper.subject);
+  const science = subjects.has('science') && ['physics', 'chemistry', 'biology'].some((subject) => profile.subjects.has(subject));
+  if (section === 'B' && subjects.size && profile.subjects.size && !overlap(subjects, profile.subjects) && !science) return 'The Section B paper is for a different subject.';
+  return null;
+}
+
 // How well a paper fits a teacher for one section. Higher is better; below
 // zero means it plainly does not fit. The parts are kept so the page can say
 // why a paper was suggested.

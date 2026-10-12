@@ -51,13 +51,19 @@ export async function pageInputs(group, files) {
 // The teacher's answers as read (reading.js), page by page: what was read of
 // each page, or the scanned page itself where it could not be read (its text
 // is null).
-export async function readingInputs(texts, files = []) {
+export async function readingInputs(texts, files = [], details = []) {
   const inputs = await Promise.all(
-    texts.map(async (text, i) => {
-      const label = `TEACHER'S RESPONSE, page ${i + 1} of ${texts.length}`;
-      if (text !== null && text !== undefined) return [{ type: 'input_text', text: `${label}:\n${text || '(nothing written on this page)'}` }];
-      if (!files[i]) return [{ type: 'input_text', text: `${label}:\n(this page could not be read)` }];
-      return [{ type: 'input_text', text: `${label}, the scanned page, as it could not be read:` }, await imageInput(files[i])];
+    Array.from({ length: Math.max(texts.length, files.length) }, async (_, i) => {
+      const text = typeof texts[i] === 'string' ? texts[i].trim() : '';
+      const label = `TEACHER'S RESPONSE, page ${i + 1} of ${Math.max(texts.length, files.length)}`;
+      const uncertain = details[i]?.needs_image || /\[\s*(?:illegible|unreadable|unclear)[^\]]*\]/iu.test(text);
+      if (text && !uncertain) return [{ type: 'input_text', text: `${label}, extracted reading:\n${text}` }];
+      const reading = text ? `Partial reading (verify against the image):\n${text}\n` : '';
+      const reason = details[i]?.status === 'blank_unverified'
+        ? 'Extraction reported a blank page, which has not been verified.'
+        : 'Extraction is missing, empty or uncertain; this is not evidence that the teacher left the page unanswered.';
+      if (!files[i]) return [{ type: 'input_text', text: `${label}:\n${reading}${reason} Source image unavailable. Flag for review; do not infer an unanswered page or deduct marks for extraction failure.` }];
+      return [{ type: 'input_text', text: `${label}, source scan:\n${reading}${reason} Read the image, and flag unreadable handwriting for review rather than inventing text or treating it as blank.` }, await imageInput(files[i])];
     })
   );
   return inputs.flat();

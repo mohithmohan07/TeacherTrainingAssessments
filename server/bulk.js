@@ -1,12 +1,9 @@
 // Answer papers uploaded all at once, as PDFs, one teacher's answers in each.
-// The PDFs say nothing about whose answers they are, which sections they
-// cover or which question paper was sat, so each one is matched before it is
-// filed. Uploading matches nothing: once every PDF is up, "Find the question
-// papers" matches them all at the same time, as many at once as the server's
-// memory allows. Matching a PDF:
-//   1. Its teacher comes from the file name, or else from the name written on
-//      the sheets, which OpenAI reads while it checks the language of every
-//      page.
+// The PDFs may omit or contradict identity and paper labels, so every page
+// is checked before any part of the PDF is filed. Uploading matches nothing: once every PDF is up, "Find the question
+// papers" queues them with bounded concurrency. Matching a PDF:
+//   1. Full teacher names, class/subject context and language are checked on
+//      every page. Mixed identities and filename conflicts block filing.
 //   2. Pages in a language other than English are read by Gemini first, in
 //      their own script, as Evaluate does.
 //   3. OpenAI compares the answers with the library papers that fit the
@@ -22,7 +19,9 @@ import { friendly, openaiConfigured, requestJson } from './openai.js';
 import { geminiConfigured } from './gemini.js';
 import { readAnswers } from './reading.js';
 import { OPENAI_IMAGE_TYPES, pageInputs } from './paper-inputs.js';
-import { PAPER_SECTIONS, allPapers, presentPaper, rankPapers, setSittingPapers, teacherProfile } from './papers.js';
+import { PAPER_SECTIONS, allPapers, presentPaper, rankPapers, setSittingPapers, subjectKeys, levelsFromText, teacherProfile, paperCompatibilityProblem } from './papers.js';
+import { definiteNameConflict, nameRelationship } from './identity.js';
+export { paperCompatibilityProblem } from './papers.js';
 import { attachStoredPages, removeStoredFile } from './scans.js';
 import { sittingForPaper } from './sittings.js';
 import { MARKINGS, testFor } from './results.js';
@@ -95,28 +94,136 @@ function nearly(a, b) {
   return a.slice(i + 1) === b.slice(i + 1) || a.slice(i) === b.slice(i + 1) || a.slice(i + 1) === b.slice(i);
 }
 
-// How well a name matches some text: 2 when every word of the name longer
-// than an initial is there, with its initials too; 1 when those words are
-// there but not the initials; 0 otherwise.
+// A full name (including initials) is required for automatic identity. Weak
+// spelling/initial matches can be shown for review, but never select a teacher.
 export function nameMatch(name, text) {
-  const have = words(text);
-  const joined = have.join('');
+  const have = words(text).filter((w) => !TITLES.has(w));
   const parts = words(name).filter((w) => !TITLES.has(w));
+  if (!parts.some((w) => w.length > 2)) return 0;
+  if (have.some((_, i) => parts.every((part, j) => part === have[i + j]))) return 2;
   const full = parts.filter((w) => w.length > 2);
-  const initials = parts.filter((w) => w.length <= 2);
-  if (!full.length) return 0;
-  if (!full.every((w) => have.some((h) => nearly(h, w)))) return 0;
-  const initialsThere = initials.length && (initials.every((i) => have.includes(i)) || joined.includes(initials.join('')));
-  return initialsThere ? 2 : 1;
+  return full.every((w) => have.some((h) => nearly(h, w))) ? 1 : 0;
 }
 
-// The one teacher a file name names, or null when it names none or several.
+const identityName = (name) => words(name).filter((w) => !TITLES.has(w)).join(' ');
+const overlaps = (a, b) => [...a].some((value) => b.has(value));
+
+// Use actual classes where supplied; a shared school level alone does not
+// disambiguate two namesakes teaching, for example, Classes 4 and 5.
+function classNumbers(text) {
+  const roman = { i: 1, ii: 2, iii: 3, iv: 4, v: 5, vi: 6, vii: 7, viii: 8, ix: 9, x: 10, xi: 11, xii: 12 };
+  const value = String(text ?? '').toLowerCase().replace(/\b[ivx]+\b/g, (n) => roman[n] ?? n);
+  const numbers = new Set([...value.matchAll(/\b(\d{1,2})(?:st|nd|rd|th)?\b/g)].map((m) => Number(m[1])).filter((n) => n >= 1 && n <= 12));
+  for (const match of value.matchAll(/\b(\d{1,2})\s*(?:-|–|—|to)\s*(\d{1,2})\b/g)) {
+    for (let n = Number(match[1]); n <= Math.min(12, Number(match[2])); n += 1) numbers.add(n);
+  }
+  return numbers;
+}
+
+function contextFits(teacher, grade, subjects) {
+  const classes = classNumbers(grade), taught = classNumbers(teacher.grade);
+  if (classes.size && taught.size && !overlaps(classes, taught)) return false;
+  const levels = levelsFromText(grade), teacherLevels = levelsFromText(teacher.grade);
+  if (levels.size && teacherLevels.size && !overlaps(levels, teacherLevels)) return false;
+  const namedSubjects = subjectKeys(subjects), taughtSubjects = subjectKeys(teacher.subjects);
+  return !namedSubjects.size || !taughtSubjects.size || overlaps(namedSubjects, taughtSubjects);
+}
+
+function filenameCandidates(fileName, teachers) {
+  const grade = String(fileName).match(/(?:class(?:es)?|grades?|std)\s*[-_ ]*([\divx]+(?:\s*(?:-|to)\s*[\divx]+)?)/i)?.[0] ?? '';
+  return teachers.filter((t) => nameMatch(t.name, fileName) === 2 && contextFits(t, grade, fileName));
+}
+
 export function teacherFromFileName(fileName, teachers) {
-  const scored = teachers.map((teacher) => ({ teacher, score: nameMatch(teacher.name, fileName) })).filter((m) => m.score);
-  if (!scored.length) return null;
-  const best = Math.max(...scored.map((m) => m.score));
-  const top = scored.filter((m) => m.score === best);
-  return top.length === 1 ? top[0].teacher : null;
+  const matches = filenameCandidates(fileName, teachers);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function namedTeacher(name, grade, subjects, teachers) {
+  const exact = teachers.filter((t) => identityName(t.name) === identityName(name));
+  const matches = exact.filter((t) => contextFits(t, grade, subjects));
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function completePages(observations, count) {
+  return Array.isArray(observations) && observations.length === count &&
+    new Set(observations.map((p) => Number(p.page))).size === count &&
+    observations.every((p) => Number.isInteger(Number(p.page)) && Number(p.page) >= 1 && Number(p.page) <= count);
+}
+
+// Keep page-level observations verbatim enough for an audit; model-selected
+// IDs are evidence only, never an authority over a contradictory written name.
+export function inspectIdentity(item, pages, look, teachers) {
+  const byNumber = new Map((look.pages ?? []).map((p) => [Number(p.page), p]));
+  return {
+    complete: completePages(look.pages, pages.length) && look.pages.every((p) =>
+      ['name_written', 'grade_written', 'subjects_written', 'paper_title_written'].every((key) => typeof p[key] === 'string') &&
+      ['certain', 'uncertain', 'none'].includes(p.name_confidence) && Number.isInteger(p.teacher_id)),
+    pages: pages.map((page, index) => {
+      const seen = byNumber.get(index + 1) ?? {};
+      const name = String(seen.name_written ?? '').trim();
+      const grade = String(seen.grade_written ?? '').trim();
+      const subjects = String(seen.subjects_written ?? '').trim();
+      const resolved = name && seen.name_confidence === 'certain' ? namedTeacher(name, grade, subjects, teachers) : null;
+      return {
+        page_id: page.id, source_file: item.file_name, source_page: page.position,
+        name_written: name, grade_written: grade, subjects_written: subjects,
+        name_confidence: seen.name_confidence ?? 'uncertain',
+        reported_teacher_id: Number(seen.teacher_id) || null,
+        teacher_id: resolved?.id ?? null,
+        paper_title_written: String(seen.paper_title_written ?? '').trim(),
+      };
+    }),
+  };
+}
+
+export function identityProblems(item, pages, result, teachers) {
+  if (!result?.identity?.complete || !pages.every((p) => result.identity.pages.some((e) => e.page_id === p.id))) {
+    return ['Match this PDF again to verify the teacher on every source page before filing.'];
+  }
+  const active = pages.some((p) => p.section) ? pages.filter((p) => p.section) : pages;
+  const evidence = active.map((p) => result.identity.pages.find((e) => e.page_id === p.id));
+  const problems = [];
+  const ids = new Set(evidence.map((e) => e.teacher_id).filter(Boolean));
+  if (ids.size > 1) problems.push('This PDF contains pages from different teachers. Split it into one teacher per PDF, or exclude the other teacher’s pages.');
+  const other = evidence.filter((e) => e.teacher_id && e.teacher_id !== item.teacher_id);
+  if (item.teacher_id && other.length) problems.push(`Source page${other.length === 1 ? '' : 's'} ${other.map((e) => e.source_page).join(', ')} name a different teacher. Do not file them under the selected teacher.`);
+  const selected = teachers.find((t) => t.id === item.teacher_id);
+  for (const source of evidence) {
+    if (!selected) continue;
+    if (source.name_confidence === 'certain' && definiteNameConflict(selected.name, source.name_written)) {
+      problems.push(`Source page ${source.source_page} clearly names “${source.name_written}”, not ${selected.name}. Correct the teacher or exclude that page; manual selection cannot override a conflicting name.`);
+    }
+    const explicitUnknownSubject = source.subjects_written && !subjectKeys(source.subjects_written).size && selected.subjects &&
+      !String(selected.subjects).split(/[,;/|]/).some((subject) => identityName(subject) === identityName(source.subjects_written));
+    if (!contextFits(selected, source.grade_written, source.subjects_written) || explicitUnknownSubject) {
+      problems.push(`Source page ${source.source_page} has a class or subject that conflicts with ${selected.name}’s profile. Correct the profile/teacher or exclude that page before filing.`);
+    }
+  }
+  const named = evidence.filter((e) => e.name_written);
+  const conflictingNames = named.some((a, i) => named.slice(i + 1).some((b) =>
+    a.name_confidence === 'certain' && b.name_confidence === 'certain' && definiteNameConflict(a.name_written, b.name_written)));
+  if (conflictingNames) {
+    problems.push('Different teacher names appear on these pages. Split or exclude the conflicting pages before filing.');
+  } else if (item.matched_by !== 'you' && named.some((a, i) => named.slice(i + 1).some((b) => nameRelationship(a.name_written, b.name_written) !== 'same'))) {
+    problems.push('Names vary across these pages. Verify the full name, class and subject and choose the teacher explicitly.');
+  }
+  const fileMatches = filenameCandidates(item.file_name, teachers);
+  if (item.matched_by !== 'you') {
+    if (fileMatches.length > 1) problems.push('The file name matches more than one teacher. Choose the full name, class and subject explicitly.');
+    if (fileMatches.length === 1 && item.teacher_id && fileMatches[0].id !== item.teacher_id) problems.push('The file name and sheets identify different teachers. Choose the correct teacher explicitly.');
+    if (evidence.some((e) => e.name_written && (!e.teacher_id || e.name_confidence !== 'certain'))) problems.push('A page name is uncertain or ambiguous. Verify the full name, class and subject and choose the teacher explicitly.');
+    if (!evidence.some((e) => e.teacher_id) && fileMatches.length !== 1) problems.push('No unambiguous full teacher name was found. Verify the pages and choose the teacher explicitly.');
+  }
+  return [...new Set(problems)];
+}
+
+const paperName = (value) => words(value).join(' ');
+export function namedMaster(title, papers) {
+  if (!String(title ?? '').trim()) return { paper: null, ambiguous: false };
+  const name = paperName(title);
+  const matches = papers.filter((p) => [p.title, p.original_name].some((value) => value && paperName(value) === name));
+  return { paper: matches.length === 1 ? matches[0] : null, ambiguous: matches.length !== 1 };
 }
 
 /* ------------------------------------------------------------- adding */
@@ -152,42 +259,65 @@ export function removeItem(id) {
 // The teacher chosen on the review screen. A PDF that could not be sorted
 // without knowing its teacher is sorted again once it has one.
 export function chooseTeacher(item, teacherId) {
+  if (['waiting', 'running'].includes(item.sort_status)) return 'Wait for matching to finish before changing the teacher.';
   const teacher = teacherId ? selectTeacher.get(teacherId) : null;
   if (teacherId && (!teacher || teacher.school_id !== item.school_id)) return 'Pick a teacher from this school.';
   setTeacher.run(teacher?.id ?? null, teacher ? 'you' : null, item.id);
-  if (teacher && item.sort_status === 'needs_teacher') queueSort(item.id);
+  if (teacher && item.sort_status === 'needs_teacher') {
+    const current = selectItem.get(item.id);
+    const result = parse(current.result, {});
+    const pages = selectPages.all(item.id);
+    if (!pages.some((p) => p.section) && (!result.identity?.complete || !identityProblems(current, pages, result, selectSchoolTeachers.all(item.school_id)).length)) queueSort(item.id);
+  }
   return null;
 }
 
 export function choosePapers(item, papers) {
+  if (['waiting', 'running'].includes(item.sort_status)) return 'Wait for matching to finish before choosing papers.';
   const chosen = parse(item.papers, {});
+  const result = parse(item.result, {});
+  const teacher = item.teacher_id ? selectTeacher.get(item.teacher_id) : null;
+  const school = selectSchool.get(item.school_id);
+  const confirmations = { ...(result.paper_confirmations ?? {}) };
+  const reviewRequired = { ...(result.paper_review_required ?? {}) };
   for (const key of GROUPS) {
     if (!(key in (papers ?? {}))) continue;
     const id = Number(papers[key]) || null;
-    const section = sectionOf(key);
     if (id) {
       const paper = selectPaper.get(id);
-      if (!paper || !String(paper.sections).split(',').includes(section)) return `That paper has no Section ${section}. Choose a Section ${section} paper.`;
+      const problem = teacher ? paperCompatibilityProblem(paper, teacher, school, sectionOf(key)) : 'Choose the teacher before the administered paper.';
+      if (problem) return problem;
     }
     chosen[key] = id;
+    confirmations[key] = id;
+    delete reviewRequired[key];
   }
   setPapers.run(JSON.stringify(chosen), item.id);
+  setResult.run(JSON.stringify({ ...result, paper_confirmations: confirmations, paper_review_required: reviewRequired }), item.id);
   return null;
 }
 
 // Moves pages between sections (or Section B papers), or out of use (null).
 export function choosePageSections(item, pages) {
+  const result = parse(selectItem.get(item.id)?.result, {});
+  result.page_confirmations ??= {};
   for (const { id, section } of pages ?? []) {
-    setPageSection.run(GROUPS.includes(section) ? section : null, Number(id), item.id);
+    const value = GROUPS.includes(section) ? section : null;
+    const changed = setPageSection.run(value, Number(id), item.id);
+    if (changed.changes) result.page_confirmations[Number(id)] = value;
   }
+  setResult.run(JSON.stringify(result), item.id);
 }
 
 /* -------------------------------------------------------------- sorting */
 
-// As many PDFs are matched at once as the server's memory allows (each holds
-// the teacher's pages and up to a dozen question papers while they go to
-// OpenAI, under 100 MB), in the order they were uploaded.
-export const MATCHING_AT_ONCE = jobsAtOnce(150);
+// Matching is bounded by both memory and an explicit provider concurrency
+// limit. Large school batches stay queued rather than flooding model APIs.
+export function boundedConcurrency(configured, memoryLimit) {
+  const value = Number(configured);
+  return Math.max(1, Math.min(memoryLimit, Number.isInteger(value) && value > 0 ? value : 3));
+}
+export const MATCHING_AT_ONCE = boundedConcurrency(process.env.BULK_MATCHING_CONCURRENCY, jobsAtOnce(150));
 const waiting = [];
 let running = 0;
 
@@ -232,7 +362,9 @@ setImmediate(pump);
 
 const LOOK_INSTRUCTIONS = `You are helping file a teacher's answers to a teacher training assessment. You are given every page of one PDF of answer sheets, scanned, usually handwritten, and the list of teachers at the school.
 
-1. Teachers usually write their name at the top of the first sheet, sometimes on every sheet. In name_written, copy the teacher's name as written, or "" if no name is written. In teacher_id, give the id of the teacher in the list it names, allowing for initials, short forms, spelling slips and other scripts. Give 0 if no name is written or you are not sure which teacher it is.
+1. Inspect EVERY page independently for teacher identity. One PDF may mistakenly contain two teachers. Never carry a teacher name onto an unnamed page. For each page, copy name_written, grade_written, subjects_written and paper_title_written exactly from explicit identity/header fields, or "" if absent. Do not use names in questions or answers as teacher names. paper_title_written is only an explicitly printed/written question-paper title or filename, never your inferred subject. Give teacher_id only when the full name, initials and any written class/subject identify exactly one listed teacher; otherwise 0. Use name_confidence "certain", "uncertain" or "none". Never resolve namesakes by guessing. The top-level name_written/teacher_id summarize only when the named pages agree; otherwise use "" and 0. A filename is a clue, not authority over page evidence.
+
+Return exactly one entry for each input page, numbered 1 through the total page count, in original order.
 
 2. For each page, say what language the teacher's writing on it is in: "english" when it is all in English, "other" when none of it is English (for example Kannada, Hindi or Sanskrit), "mixed" when it has both, even a word or a line. Judge the language, not the script: Hindi written in English letters is Hindi. Printed text, numbers and question labels such as "Q5 A" do not count. A page with no writing is "english". Name the languages in English in languages.`;
 
@@ -248,9 +380,15 @@ const LOOK_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['page', 'language', 'languages'],
+        required: ['page', 'language', 'languages', 'name_written', 'teacher_id', 'grade_written', 'subjects_written', 'name_confidence', 'paper_title_written'],
         properties: {
           page: { type: 'integer' },
+          name_written: { type: 'string' },
+          teacher_id: { type: 'integer' },
+          grade_written: { type: 'string' },
+          subjects_written: { type: 'string' },
+          name_confidence: { type: 'string', enum: ['certain', 'uncertain', 'none'] },
+          paper_title_written: { type: 'string' },
           language: { type: 'string', enum: ['english', 'other', 'mixed'] },
           languages: { type: 'array', items: { type: 'string' } },
         },
@@ -265,7 +403,7 @@ const SORT_INSTRUCTIONS = `You are helping file a teacher's answers to a teacher
 - Section C: computer knowledge and digital teaching skills.
 A teacher may have sat one, two or all three sections. A teacher who teaches more than one subject may also have sat more than one Section B paper, one for each subject (for example Mathematics and Science, or Kannada and Hindi), and their answers to each are on separate pages. Questions are usually numbered across the sections (often Section A Q1 to Q4, Section B Q5 to Q8, Section C Q9 to Q11), but some papers start again at Q1, so the numbers alone are not enough.
 
-You are given candidate QUESTION PAPERS from the school's paper library, each with its id, then a CATALOGUE of every other paper in the library, then every page of ONE TEACHER'S ANSWER SHEETS from one PDF, in order. The answer sheets do not say which section or which question paper they answer. Pages a teacher wrote in a language other than English come with a reading of the handwriting in that language; the reading may have mistakes, so check it against the picture.
+You are given candidate QUESTION PAPERS from the school's paper library, each with its id, then every page of ONE TEACHER'S ANSWER SHEETS from one PDF, in order. The answer sheets do not say which section or which question paper they answer. Pages a teacher wrote in a language other than English come with a reading of the handwriting in that language; the reading may have mistakes, so check it against the picture.
 
 Work out, by matching the answers against the questions:
 - For every page, the section it answers ("A", "B" or "C"), the id of the question paper it answers, and the question labels answered on it, as printed on the paper ("5A", "5B", "9"). Use section "none" and paper_id 0 only for a page with no answers at all, such as a blank page or a cover sheet.
@@ -276,7 +414,8 @@ How to match:
 - Handwriting can be hard to read. When a word cannot be read, use the words and lines around it, and the question the previous answer was for, to work out which question comes next. Answers usually follow the order of the questions, and a page that carries on the previous page's answer is in the same section.
 - A teacher may write one section in English and another in Kannada, Hindi or another language. Match each section on its own, and choose the paper in the language its answers are in.
 - Before deciding that a teacher sat two Section B papers, check the answers really belong to two different papers: they answer different subjects' questions (the situations, topics and terms differ), and the question numbers repeat (two answers to Q5, for example). Answers that continue one paper's questions are one paper, even when they run over many pages.
-- Prefer a candidate paper. Choose another paper from the catalogue only when no candidate fits and the catalogue clearly names the right one.
+- Only match question papers supplied in full. A named administered master or confirmed paper is authoritative; never substitute another level, section, subject, or version because it ranks better. When evidence conflicts, return an unresolved/low-confidence match and explain it. Do not force a match to the nearest-looking paper. Return exactly one entry per input page. has_answers is false only for a blank page or cover sheet; use true even for unreadable answers. Unresolved answer pages may use section none and paper_id 0, but are not blank.
+- In matched_question_labels list the concrete question labels supported by answer-to-prompt matches. In alternatives list other equally plausible paper IDs, or [] only when there is no ambiguity. A vague subject resemblance is low confidence.
 - Set confidence to "high" when the answers plainly match the paper's questions, "medium" when most do, and "low" when you are guessing. In reason, say briefly in plain English what matched, for example "Answers mention the phishing email and file folders in Q9 and Q10."`;
 
 const SORT_SCHEMA = {
@@ -289,10 +428,11 @@ const SORT_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['page', 'section', 'paper_id', 'questions'],
+        required: ['page', 'section', 'paper_id', 'questions', 'has_answers'],
         properties: {
           page: { type: 'integer' },
           section: { type: 'string', enum: ['A', 'B', 'C', 'none'] },
+          has_answers: { type: 'boolean' },
           paper_id: { type: 'integer' },
           questions: { type: 'array', items: { type: 'string' } },
         },
@@ -303,12 +443,14 @@ const SORT_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['section', 'paper_id', 'confidence', 'reason'],
+        required: ['section', 'paper_id', 'confidence', 'reason', 'matched_question_labels', 'alternatives'],
         properties: {
           section: { type: 'string', enum: ['A', 'B', 'C'] },
           paper_id: { type: 'integer' },
           confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
           reason: { type: 'string' },
+          matched_question_labels: { type: 'array', items: { type: 'string' } },
+          alternatives: { type: 'array', items: { type: 'integer' } },
         },
       },
     },
@@ -320,19 +462,24 @@ const SORT_SCHEMA = {
 // through the catalogue.
 const CANDIDATES_PER_SECTION = 4;
 
-export function candidatePapers(teacher, school, papers) {
+export function candidatePapers(teacher, school, papers, authoritativeIds = []) {
   const profile = teacherProfile(teacher, school);
   const chosen = new Map();
   for (const key of PAPER_SECTIONS) {
-    const { ranked } = rankPapers(papers, profile, key);
-    const fitting = ranked.filter((r) => r.score > 0);
-    for (const { paper } of (fitting.length ? fitting : ranked).slice(0, CANDIDATES_PER_SECTION)) chosen.set(paper.id, paper);
+    const eligible = papers.filter((p) => !paperCompatibilityProblem(p, teacher, school, key));
+    const { ranked } = rankPapers(eligible, profile, key);
+    for (const { paper } of ranked.filter((r) => r.score > 0).slice(0, CANDIDATES_PER_SECTION)) chosen.set(paper.id, paper);
   }
-  // A teacher of two subjects may have sat Section B for each, so the best
-  // Section B papers for every subject they teach are candidates too.
   for (const subject of profile.subjects) {
-    const { ranked } = rankPapers(papers, { ...profile, subjects: new Set([subject]) }, 'B');
+    const eligible = papers.filter((p) => !paperCompatibilityProblem(p, teacher, school, 'B'));
+    const { ranked } = rankPapers(eligible, { ...profile, subjects: new Set([subject]) }, 'B');
     for (const { paper } of ranked.filter((r) => r.reasons.includes('subject')).slice(0, 2)) chosen.set(paper.id, paper);
+  }
+  // Explicit masters remain reachable even when a newer/priority paper would
+  // otherwise push them below the candidate cap. They still must be compatible.
+  for (const id of authoritativeIds) {
+    const paper = papers.find((p) => p.id === Number(id));
+    if (paper && PAPER_SECTIONS.some((section) => !paperCompatibilityProblem(paper, teacher, school, section))) chosen.set(paper.id, paper);
   }
   return [...chosen.values()];
 }
@@ -384,9 +531,12 @@ async function sortItem(id) {
   });
 
   const written = String(look.name_written ?? '').trim();
-  const fromSheet = teachers.find((t) => t.id === Number(look.teacher_id)) ?? null;
   item = selectItem.get(id);
   if (!item) return;
+  const previous = parse(item.result, {});
+  const identity = inspectIdentity(item, pages, look, teachers);
+  const identities = [...new Set(identity.pages.map((p) => p.teacher_id).filter(Boolean))];
+  const fromSheet = identities.length === 1 ? teachers.find((t) => t.id === identities[0]) : null;
   if (!item.teacher_id && fromSheet) {
     setTeacher.run(fromSheet.id, 'sheet', id);
     item = selectItem.get(id);
@@ -395,7 +545,7 @@ async function sortItem(id) {
   const languages = new Set();
   pages.forEach((page, i) => {
     const seen = byNumber.get(i + 1);
-    const language = ['english', 'other', 'mixed'].includes(seen?.language) ? seen.language : 'english';
+    const language = ['english', 'other', 'mixed'].includes(seen?.language) ? seen.language : 'mixed';
     for (const name of seen?.languages ?? []) if (String(name).trim()) languages.add(String(name).trim());
     files[i].language = language;
     setPageLanguage.run(language, page.id);
@@ -403,6 +553,8 @@ async function sortItem(id) {
   const result = {
     name_written: written,
     sheet_teacher_id: fromSheet?.id ?? null,
+    identity,
+    paper_confirmations: previous.paper_confirmations ?? {},
     languages: [...languages],
     read_by_gemini: 0,
     notes: [],
@@ -411,14 +563,9 @@ async function sortItem(id) {
   setResult.run(JSON.stringify(result), id);
 
   const teacher = item.teacher_id ? selectTeacher.get(item.teacher_id) : null;
-  if (!teacher) {
-    setStatus.run(
-      'needs_teacher',
-      written
-        ? `The name written on the sheets, “${written}”, matches no teacher at this school. Choose the teacher, and the pages are matched then.`
-        : 'No name is written on the sheets and the file name matches no teacher. Choose the teacher, and the pages are matched then.',
-      id
-    );
+  const identityIssues = identityProblems(item, pages.map((p) => ({ ...p, section: null })), result, teachers);
+  if (!teacher || identityIssues.length) {
+    setStatus.run('needs_teacher', identityIssues.join(' ') || 'Choose the teacher by full name, class and subject.', id);
     return;
   }
 
@@ -447,10 +594,10 @@ async function sortItem(id) {
 
   // 3. Which section each page answers, and which paper each section was sat on.
   const library = allPapers();
-  const candidates = candidatePapers(teacher, school, library);
-  if (!candidates.length) throw friendly('The paper library has no papers yet. Import the paper pack on the Paper library page, then press Match again.');
-  const candidateIds = new Set(candidates.map((p) => p.id));
-  const catalogue = library.filter((p) => !candidateIds.has(p.id));
+  const authoritativeIds = [...Object.values(result.paper_confirmations), ...identity.pages.map((p) => namedMaster(p.paper_title_written, library).paper?.id)].filter(Boolean);
+  const candidates = candidatePapers(teacher, school, library, authoritativeIds);
+  if (!candidates.length) throw friendly(library.length ? 'No library paper is compatible with this teacher’s class, subject and board. Confirm the profile and import the administered master; no paper was substituted.' : 'The paper library has no papers yet. Import the paper pack on the Paper library page, then press Match again.');
+  result.candidate_paper_ids = candidates.map((p) => p.id);
 
   const paperInputs = await Promise.all(
     candidates.map(async (paper) => {
@@ -479,7 +626,7 @@ async function sortItem(id) {
       { type: 'input_text', text: `THE TEACHER: ${teacher.name}${teacher.grade ? `, teaches ${teacher.grade}` : ''}${teacher.subjects ? `, subjects ${teacher.subjects}` : ''}. School: ${school.name}.` },
       { type: 'input_text', text: `CANDIDATE QUESTION PAPERS (${candidates.length}):` },
       ...paperInputs.flat(),
-      { type: 'input_text', text: `CATALOGUE of the other papers in the library:\n${catalogue.map(describe).join('\n') || '(none)'}` },
+      { type: 'input_text', text: `CONFIRMED PAPERS (group to paper ID): ${JSON.stringify(result.paper_confirmations)}. SOURCE-WRITTEN TITLES: ${JSON.stringify(identity.pages.filter((p) => p.paper_title_written).map((p) => ({ page: p.source_page, title: p.paper_title_written })))}` },
       { type: 'input_text', text: `ONE TEACHER'S ANSWER SHEETS (${pagesOf(files.length)}):` },
       ...pageContent.flat(),
     ],
@@ -493,72 +640,116 @@ async function sortItem(id) {
   saveSort(id, teacher, school, library, pages, sorted, result);
 }
 
-// What the sorting found, checked. Pages go to their section; Section B
-// pages go to a group per paper ('B', 'B2', 'B3', in the order the papers
-// first appear), so a teacher's two Section B papers are filed and marked
-// apart. Every group with pages gets a paper that holds its section, falling
-// back to the library's best fit for the teacher when the one named does not.
-const saveSort = db.transaction((id, teacher, school, library, pages, sorted, result) => {
-  const holds = (paper, section) => paper && String(paper.sections).split(',').includes(section);
+// Validate before assigning. No guessed paper is inherited from a preceding
+// page, profile rank, or catalogue entry whose questions were never inspected.
+export function buildSortPlan(teacher, school, library, pages, sorted, result) {
+  const complete = completePages(sorted.pages, pages.length);
   const byNumber = new Map((sorted.pages ?? []).map((p) => [Number(p.page), p]));
-  const named = new Map((sorted.papers ?? []).map((p) => [Number(p.paper_id), p]));
-  const bGroups = new Map(); // Section B paper id → group
+  const bGroups = new Map();
+  const sourcePages = [];
+  const assignments = [];
   const papers = {};
-  let lastB = null;
-  pages.forEach((page, i) => {
-    const found = byNumber.get(i + 1);
-    const section = PAPER_SECTIONS.includes(found?.section) ? found.section : null;
+  const sections = {};
+  for (const [index, page] of pages.entries()) {
+    const found = byNumber.get(index + 1) ?? {};
+    const section = PAPER_SECTIONS.includes(found.section) ? found.section : null;
+    const paperId = Number(found.paper_id) || null;
     let group = section;
+    const issues = [];
+    if (!complete) issues.push('The model did not return each source page exactly once. Match again or review every page.');
     if (section === 'B') {
-      const paper = library.find((p) => p.id === Number(found.paper_id));
-      if (holds(paper, 'B') && !bGroups.has(paper.id) && bGroups.size < 3) {
-        bGroups.set(paper.id, bGroups.size ? `B${bGroups.size + 1}` : 'B');
-        papers[bGroups.get(paper.id)] = paper.id;
+      const key = paperId ?? 'unresolved';
+      if (!bGroups.has(key)) bGroups.set(key, bGroups.size < 3 ? (bGroups.size ? `B${bGroups.size + 1}` : 'B') : null);
+      group = bGroups.get(key);
+      if (!group) issues.push('More than three distinct Section B papers were reported. Split and review this PDF.');
+    }
+    const said = (sorted.papers ?? []).filter((p) => p.section === section && Number(p.paper_id) === paperId);
+    const summary = said.length === 1 ? said[0] : null;
+    if (section) {
+      if (found.has_answers !== true) issues.push('A section was assigned without confirmed answer content. Review this page.');
+      const paper = library.find((p) => p.id === paperId);
+      const problem = paperCompatibilityProblem(paper, teacher, school, section);
+      if (problem) issues.push(problem);
+      if (!(result.candidate_paper_ids ?? []).includes(paperId)) issues.push('The selected paper was not supplied in full for comparison.');
+      const labels = (summary?.matched_question_labels ?? []).map((q) => String(q).trim().toLowerCase());
+      if (!summary || summary.confidence !== 'high' || !String(summary.reason ?? '').trim() || !labels.length ||
+          !Array.isArray(summary.alternatives) || summary.alternatives.length ||
+          !(found.questions ?? []).some((q) => labels.includes(String(q).trim().toLowerCase()))) {
+        issues.push('The paper match is weak or ambiguous. Choose the administered master explicitly.');
       }
-      // A page whose paper is not clear stays with the Section B paper before it.
-      group = (holds(paper, 'B') && bGroups.get(paper.id)) || lastB || 'B';
-      lastB = group;
-    } else if (section) {
-      const paper = library.find((p) => p.id === Number(found.paper_id));
-      if (!papers[section] && holds(paper, section)) papers[section] = paper.id;
+      const confirmed = result.paper_confirmations?.[group];
+      if (confirmed && confirmed !== paperId) issues.push('The match disagrees with the confirmed administered master. The confirmed paper has been retained for review.');
+    } else if (found.has_answers !== false || paperId || (found.questions ?? []).length) {
+      issues.push('This source page is unresolved, not a verified blank. Assign its section or explicitly exclude it.');
     }
-    page.group = group;
-    setPageSort.run({
-      id: page.id,
-      section: group,
-      questions: (found?.questions ?? []).map((q) => String(q).trim()).filter(Boolean).join(', '),
-    });
-  });
-
-  const profile = teacherProfile(teacher, school);
+    const identity = result.identity?.pages.find((p) => p.page_id === page.id);
+    if (identity?.paper_title_written) {
+      const master = namedMaster(identity.paper_title_written, library);
+      if (master.ambiguous) issues.push('The paper title written on this page does not identify one library master. Import or identify that exact master.');
+      else if (section && master.paper.id !== paperId) issues.push('The match disagrees with the paper title written on this source page. Choose that exact master.');
+    }
+    const questions = (found.questions ?? []).map((q) => String(q).trim()).filter(Boolean);
+    sourcePages.push({ page_id: page.id, source_page: page.position, section, group, paper_id: paperId,
+      has_answers: found.has_answers !== false, questions, confidence: summary?.confidence ?? null,
+      reason: String(summary?.reason ?? ''), issues });
+    assignments.push({ id: page.id, section: group, questions: questions.join(', ') });
+  }
   for (const group of GROUPS) {
-    const section = sectionOf(group);
-    if (!pages.some((page) => page.group === group)) {
-      delete papers[group];
-      continue;
-    }
-    // The paper named for the section, when the pages named none.
-    if (!papers[group]) {
-      const said = (sorted.papers ?? []).find((p) => p.section === section && holds(library.find((x) => x.id === Number(p.paper_id)), section));
-      if (said) papers[group] = Number(said.paper_id);
-    }
-    const fits = Boolean(papers[group]);
-    const fallback = fits ? null : rankPapers(library, profile, section).suggested;
-    if (!fits) papers[group] = fallback?.id ?? null;
-    const said = fits ? named.get(papers[group]) : null;
-    result.sections[group] = {
-      confidence: fits ? (['high', 'medium', 'low'].includes(said?.confidence) ? said.confidence : 'medium') : 'low',
-      reason: fits
-        ? String(said?.reason ?? '').trim()
-        : fallback
-          ? 'The answers did not clearly match a paper, so this is the library’s best fit for the teacher. Check it.'
-          : 'The answers did not clearly match a paper. Choose it.',
+    const mine = sourcePages.filter((p) => p.group === group);
+    if (!mine.length) continue;
+    const ids = new Set(mine.map((p) => p.paper_id));
+    const confirmed = result.paper_confirmations?.[group];
+    const unanimous = ids.size === 1 && !mine.some((p) => p.issues.length);
+    papers[group] = confirmed || (unanimous ? mine[0].paper_id : null);
+    sections[group] = {
+      confidence: unanimous ? 'high' : 'low',
+      reason: unanimous ? mine[0].reason : [...new Set(mine.flatMap((p) => p.issues)), ...(ids.size > 1 ? ['Pages in this section name different papers. Confirm the administered master.'] : [])].join(' '),
     };
   }
-  setPapers.run(JSON.stringify(papers), id);
+  return { papers, sections, assignments, sourcePages, complete };
+}
+
+export const saveSort = db.transaction((id, teacher, school, library, pages, sorted, result) => {
+  const plan = buildSortPlan(teacher, school, library, pages, sorted, result);
+  for (const row of plan.assignments) setPageSort.run(row);
+  result.source_pages = plan.sourcePages;
+  result.paper_sort_complete = plan.complete;
+  result.sections = plan.sections;
+  result.paper_review_required = {};
+  for (const [group, confirmed] of Object.entries(result.paper_confirmations ?? {})) {
+    if (confirmed && plan.sourcePages.some((p) => p.group === group && p.paper_id !== confirmed)) result.paper_review_required[group] = true;
+  }
+  setPapers.run(JSON.stringify(plan.papers), id);
   setResult.run(JSON.stringify(result), id);
   setStatus.run('done', null, id);
 });
+
+function paperReviewProblems(item, pages, result, teacher, school, library) {
+  const chosen = parse(item.papers, {});
+  const problems = [];
+  for (const page of pages) {
+    const source = result?.source_pages?.find((p) => p.page_id === page.id);
+    const manualPage = Object.hasOwn(result?.page_confirmations ?? {}, page.id);
+    if (result?.paper_sort_complete !== true && !manualPage) problems.push(`Source page ${page.position}: matching returned an incomplete page map. Review this page’s section explicitly.`);
+    if (!page.section) {
+      if ((!source || source.has_answers || source.issues.length) && !manualPage) problems.push(`Source page ${page.position} is unresolved. Assign a section or explicitly exclude it.`);
+      continue;
+    }
+    const paper = library.find((p) => p.id === Number(chosen[page.section]));
+    const compatibility = teacher ? paperCompatibilityProblem(paper, teacher, school, sectionOf(page.section)) : null;
+    if (compatibility) problems.push(`Source page ${page.position}: ${compatibility}`);
+    const manualPaper = paper && result?.paper_confirmations?.[page.section] === paper.id;
+    if (result?.paper_review_required?.[page.section]) problems.push(`Source page ${page.position}: rematching disagreed with the confirmed master. Review these pages and confirm the retained master again.`);
+    if ((!source || source.issues.length || result.paper_sort_complete !== true) && !manualPaper) problems.push(`Source page ${page.position}: confirm the administered master before filing.`);
+    if (source && source.group !== page.section && !manualPage) problems.push(`Source page ${page.position} changed sections without review.`);
+    const title = result?.identity?.pages.find((p) => p.page_id === page.id)?.paper_title_written;
+    if (title) {
+      const master = namedMaster(title, library);
+      if (master.ambiguous || !paper || master.paper.id !== paper.id) problems.push(`Source page ${page.position} names “${title}”. File it only against that exact, uniquely identified master.`);
+    }
+  }
+  return [...new Set(problems)];
+}
 
 /* ------------------------------------------------------------ presenting */
 
@@ -588,6 +779,7 @@ export function presentItem(item, others = []) {
       pages: count,
       paper: paper ? presentPaper(paper) : null,
       confidence: result?.sections?.[key]?.confidence ?? null,
+      requires_confirmation: Boolean(result?.paper_review_required?.[key]),
       reason: result?.sections?.[key]?.reason ?? '',
       // What filing does to the teacher's sitting for this section.
       existing: sitting
@@ -609,6 +801,10 @@ export function presentItem(item, others = []) {
   if (sorting) problems.push('Still being matched.');
   if (unmatched) problems.push('Not matched yet.');
   if (!teacher) problems.push('Choose the teacher.');
+  if (!sorting && !unmatched) {
+    problems.push(...identityProblems(item, pages, result, selectSchoolTeachers.all(item.school_id)));
+    problems.push(...paperReviewProblems(item, pages, result, teacher, selectSchool.get(item.school_id), allPapers()));
+  }
   if (!pages.some((p) => p.section)) problems.push(sorting || unmatched ? '' : 'Put at least one page in Section A, B or C.');
   for (const s of sections) {
     if (s.pages && !s.paper) problems.push(`Choose the ${s.label} question paper.`);
@@ -619,7 +815,7 @@ export function presentItem(item, others = []) {
 
   const notes = [];
   if (result?.name_written && item.matched_by === 'file' && result.sheet_teacher_id && result.sheet_teacher_id !== item.teacher_id) {
-    notes.push(`The file name says ${teacher?.name}, but the sheets say “${result.name_written}”. Check the teacher.`);
+    problems.push(`The file name says ${teacher?.name}, but the sheets say “${result.name_written}”. Resolve the identity conflict before filing.`);
   }
   if (teacher && others.some((o) => o.id !== item.id && o.teacher_id === teacher.id)) {
     notes.push(`Another PDF here is also for ${teacher.name}. Both are filed under them if you keep both.`);
@@ -640,7 +836,7 @@ export function presentItem(item, others = []) {
     read_by_gemini: result?.read_by_gemini ?? 0,
     sort_status: item.sort_status,
     sort_error: item.sort_error,
-    pages: pages.map((p) => ({ id: p.id, src: `/uploads/${p.stored_name}`, position: p.position, section: p.section, questions: p.questions, language: p.language })),
+    pages: pages.map((p) => ({ id: p.id, src: `/uploads/${p.stored_name}`, position: p.position, section: p.section, questions: p.questions, language: p.language, source_file: item.file_name, source_page: p.position, identity: result?.identity?.pages.find((e) => e.page_id === p.id) ?? null, match: result?.source_pages?.find((e) => e.page_id === p.id) ?? null })),
     sections,
     problems: problems.filter(Boolean),
     notes,
@@ -683,6 +879,7 @@ const fileItem = (item, test) => {
   const teacher = selectTeacher.get(item.teacher_id);
   const pages = selectPages.all(item.id);
   const chosen = parse(item.papers, {});
+  const result = parse(item.result, {});
   const unused = pages.filter((p) => !p.section);
   const sittings = db.transaction(() => {
     const done = [];
@@ -694,13 +891,26 @@ const fileItem = (item, test) => {
       attachStoredPages(
         sitting.id,
         'response',
-        mine.map((page, i) => ({
+        mine.map((page) => ({
           stored_name: page.stored_name,
-          original_name: `${teacher.name} - answer paper - Section ${section} - p${i + 1}.jpg`,
+          original_name: `${item.file_name} - source page ${page.position}${path.extname(page.stored_name) || '.jpg'}`,
           mime_type: page.mime_type,
           size_bytes: page.size_bytes,
         }))
       );
+      for (const page of mine) {
+        const source = {
+          source_file: item.file_name, source_page: page.position, source_page_count: pages.length,
+          teacher_id: teacher.id, teacher_name: teacher.name, teacher_grade: teacher.grade, teacher_subjects: teacher.subjects,
+          identity: result.identity?.pages.find((p) => p.page_id === page.id) ?? null,
+          original_match: result.source_pages?.find((p) => p.page_id === page.id) ?? null,
+          filed_section: section, filed_group: key, administered_paper_id: chosen[key],
+          identity_confirmed: item.matched_by === 'you',
+          paper_confirmed: result.paper_confirmations?.[key] === chosen[key],
+          page_confirmed: Object.hasOwn(result.page_confirmations ?? {}, page.id),
+        };
+        db.prepare("UPDATE assessment_files SET source_metadata = ? WHERE assessment_id = ? AND stored_name = ? AND kind = 'response'").run(JSON.stringify(source), sitting.id, page.stored_name);
+      }
       setSittingPapers(sitting.id, [chosen[key]]);
       const subject = section === 'B' ? selectPaper.get(chosen[key])?.subject ?? '' : '';
       done.push({ teacher: { id: teacher.id, name: teacher.name }, section, subject, pages: mine.length, assessment_id: sitting.id });
@@ -718,46 +928,108 @@ const fileItem = (item, test) => {
 // Evaluate pressed once for every sitting just filed. It is still Evaluate:
 // nothing is marked without it. Each sitting is marked as if its own Evaluate
 // had been pressed, as many at once as the server's memory allows.
-export const MARKING_AT_ONCE = jobsAtOnce(100);
-const toMark = [];
-let marking = 0;
-const selectMarkState = db.prepare('SELECT ai_status FROM assessments WHERE id = ?');
+export const MARKING_AT_ONCE = boundedConcurrency(process.env.BULK_EVALUATION_CONCURRENCY, jobsAtOnce(100));
+
+// The database owns queue intent. The in-memory queue limits throughput only.
+// Injectable start/wait functions let restart, deduplication and 150-teacher
+// batches be tested without contacting a model provider.
+export function createEvaluationQueue({ database = db, start = startEvaluation, concurrency = MARKING_AT_ONCE,
+  wait = () => new Promise((resolve) => setTimeout(resolve, 1000)), retain = keepAwake } = {}) {
+  const select = database.prepare('SELECT id, ai_status, ai_error, evaluation_queue FROM assessments WHERE id = ?');
+  const persist = database.prepare('UPDATE assessments SET evaluation_queue = ? WHERE id = ?');
+  const fail = database.prepare("UPDATE assessments SET ai_status = 'failed', ai_error = ?, updated_at = datetime('now') WHERE id = ?");
+  const pending = [];
+  const active = new Set();
+  const promises = new Set();
+  const limit = boundedConcurrency(concurrency, Number.MAX_SAFE_INTEGER);
+  const queued = () => pending.map((job) => job.id);
+  const known = (id) => active.has(id) || pending.some((job) => job.id === id);
+  const enqueue = (ids, marking) => {
+    let added = 0;
+    database.transaction(() => {
+      for (const id of new Set(ids.map(Number))) {
+        const row = select.get(id);
+        if (!row || known(id) || row.ai_status === 'running' || row.evaluation_queue) continue;
+        const job = { id, marking, state: 'queued', requested_at: new Date().toISOString() };
+        persist.run(JSON.stringify(job), id);
+        pending.push(job);
+        added += 1;
+      }
+    })();
+    return added;
+  };
+  const restore = () => {
+    for (const row of database.prepare('SELECT id, ai_status, ai_error, evaluation_queue FROM assessments WHERE evaluation_queue IS NOT NULL ORDER BY id').all()) {
+      if (known(row.id)) continue;
+      const job = parse(row.evaluation_queue, null);
+      if (!job || !['queued', 'running'].includes(job.state) || !MARKINGS.some((m) => m.key === job.marking)) {
+        fail.run('The saved evaluation request is invalid. Choose Evaluate again.', row.id);
+        persist.run(null, row.id);
+        continue;
+      }
+      // Completion may have been committed immediately before shutdown. A
+      // restart-interrupted job is distinct from an already terminal failure.
+      if (job.state === 'running' && (row.ai_status === 'done' || (row.ai_status === 'failed' && !/server restarted/i.test(row.ai_error ?? '')))) {
+        persist.run(null, row.id);
+        continue;
+      }
+      const resumed = { ...job, id: row.id, state: 'queued' };
+      persist.run(JSON.stringify(resumed), row.id);
+      pending.push(resumed);
+    }
+    return pending.length;
+  };
+  const run = async (job) => {
+    try {
+      const row = select.get(job.id);
+      if (!row) return;
+      persist.run(JSON.stringify({ ...job, state: 'running' }), job.id);
+      const problem = start(job.id, job.marking);
+      if (problem) fail.run(problem, job.id);
+      while (select.get(job.id)?.ai_status === 'running') await wait(job.id);
+      const terminal = select.get(job.id);
+      if (terminal && !['done', 'failed'].includes(terminal.ai_status)) {
+        fail.run('Evaluation did not reach a completed result. Choose Evaluate to retry.', job.id);
+      }
+    } catch (error) {
+      fail.run(error.userMessage ?? `Evaluation failed: ${error.message}`, job.id);
+    } finally {
+      // Clear only after success/failure is recorded (or the row was removed).
+      const row = select.get(job.id);
+      if (!row || ['done', 'failed'].includes(row.ai_status)) persist.run(null, job.id);
+    }
+  };
+  const pump = () => {
+    while (active.size < limit && pending.length) {
+      const job = pending.shift();
+      active.add(job.id);
+      const promise = run(job).finally(() => {
+        active.delete(job.id);
+        promises.delete(promise);
+        pump();
+      });
+      promises.add(promise);
+      retain(promise);
+    }
+  };
+  const idle = async () => { while (promises.size) await Promise.all([...promises]); };
+  return { enqueue, restore, pump, queued, active: () => [...active], idle };
+}
+
+const markingQueue = createEvaluationQueue();
+markingQueue.restore();
+setImmediate(() => markingQueue.pump());
 
 export function evaluateSittings(ids, markingChoice) {
-  if (!MARKINGS.some((m) => m.key === markingChoice)) return 'Choose Standard or Lenient marking.';
+  if (!MARKINGS.some((m) => m.key === markingChoice)) return 'Choose Standard marking.';
   if (!openaiConfigured()) return 'OpenAI is not set up on the server: the OPENAI_API_KEY secret is missing.';
-  for (const id of ids) if (!toMark.some((job) => job.id === id)) toMark.push({ id, marking: markingChoice });
-  markNext();
+  markingQueue.enqueue(ids, markingChoice);
+  markingQueue.pump();
   return null;
 }
 
-function markNext() {
-  while (marking < MARKING_AT_ONCE && toMark.length) {
-    const job = toMark.shift();
-    marking += 1;
-    keepAwake(
-      markOne(job).finally(() => {
-        marking -= 1;
-        markNext();
-      })
-    );
-  }
-}
-
-async function markOne({ id, marking: choice }) {
-  const problem = startEvaluation(id, choice);
-  if (problem) {
-    db.prepare(`UPDATE assessments SET ai_status = 'failed', ai_error = ?, updated_at = datetime('now') WHERE id = ?`).run(problem, id);
-    return;
-  }
-  // Waits for the marking to finish before the next one starts.
-  while (selectMarkState.get(id)?.ai_status === 'running') {
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-  }
-}
-
-// The sittings Evaluate all has yet to start, which count as being marked.
-export const queuedForMarking = () => toMark.map((job) => job.id);
+// Queued work is not offered again as an unmarked sitting.
+export const queuedForMarking = () => markingQueue.queued();
 
 // The sittings of a test with no marks that are not being marked: those whose
 // marking failed, with the reason, and those waiting for Evaluate (answer
@@ -768,7 +1040,7 @@ const selectUnmarked = db.prepare(`
          EXISTS (SELECT 1 FROM assessment_files f WHERE f.assessment_id = a.id AND f.kind = 'response') AS has_answers
     FROM assessments a
     JOIN teachers t ON t.id = a.teacher_id
-   WHERE a.school_id = ? AND a.test_id = ? AND a.status != 'evaluated' AND a.ai_status != 'running'
+   WHERE a.school_id = ? AND a.test_id = ? AND (a.status != 'evaluated' OR a.ai_status = 'failed') AND a.ai_status != 'running'
    ORDER BY t.name COLLATE NOCASE, a.section, a.id
 `);
 
@@ -802,8 +1074,8 @@ export function evaluateUnmarked(schoolId, testId, which, markingChoice) {
 
 export function markingState(ids) {
   return ids.map((id) => {
-    const row = db.prepare('SELECT id, ai_status, ai_error, status FROM assessments WHERE id = ?').get(id);
-    const queued = toMark.some((job) => job.id === id);
-    return row ? { id, state: queued ? 'queued' : row.ai_status, error: row.ai_error } : { id, state: 'gone' };
+    const row = db.prepare('SELECT id, ai_status, ai_error, status, evaluation_progress FROM assessments WHERE id = ?').get(id);
+    const queued = markingQueue.queued().includes(id);
+    return row ? { id, state: queued ? 'queued' : row.ai_status, error: row.ai_error, progress: parse(row.evaluation_progress, null) } : { id, state: 'gone' };
   });
 }

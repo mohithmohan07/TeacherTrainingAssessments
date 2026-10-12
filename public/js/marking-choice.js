@@ -1,20 +1,12 @@
-// How Evaluate counts the marks: Standard, where every question counts, or
-// Lenient, where the questions the teacher did not attempt are left out of
-// both the marks and the total. OpenAI marks the answers the same way either
-// way. The dialog asks each time Evaluate is pressed and starts on the last
-// choice made on this computer.
+// Evaluation counts every question in a supplied complete section.
+// Entire sections not supplied remain excluded. Old lenient results are readable.
 import { h } from './ui.js';
 
 export const MARKINGS = [
   {
     key: 'standard',
     label: 'Standard',
-    meaning: 'Every question counts. A question left blank gets 0 and stays in the total.',
-  },
-  {
-    key: 'lenient',
-    label: 'Lenient',
-    meaning: 'Only the questions answered count. Questions left blank are not in the marks or the total, so the score covers only what the teacher answered.',
+    meaning: 'Unanswered questions in a supplied complete section score zero. Entire sections not supplied are excluded.',
   },
 ];
 
@@ -38,7 +30,7 @@ function remember(choice) {
 
 // Opens the dialog. `current` is how the sitting was last marked, if it was;
 // `title` replaces the heading; `again` warns that the new marks replace the current ones. Resolves with
-// 'standard' or 'lenient', or null if cancelled.
+// 'standard', or null if cancelled.
 export function chooseMarking({ teacherName = '', title = '', current = null, again = false } = {}) {
   return new Promise((resolve) => {
     let choice = [current, lastChoice()].find((key) => MARKINGS.some((m) => m.key === key)) ?? 'standard';
@@ -82,7 +74,7 @@ export function chooseMarking({ teacherName = '', title = '', current = null, ag
             'div',
             {},
             h('h2', {}, title || (teacherName ? `Evaluate ${teacherName}’s paper` : 'Evaluate this paper')),
-            h('p', { class: 'hint' }, 'OpenAI marks every answer the same way. Choose how the marks are counted.')
+            h('p', { class: 'hint' }, 'Review the scoring policy before evaluation.')
           ),
           h('button', { class: 'modal-close', type: 'button', title: 'Close', onclick: () => close(null) }, '×')
         ),

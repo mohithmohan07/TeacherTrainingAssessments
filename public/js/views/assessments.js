@@ -1401,11 +1401,11 @@ function markingCard(assessment, runEvaluation, onSaved) {
   );
 }
 
-const notAttempted = (q) => !String(q.teacher_answer ?? '').trim() && !(Number(q.marks_awarded) > 0);
+const notAttempted = (q) => q.response_status ? q.response_status === 'unanswered' : !String(q.teacher_answer ?? '').trim() && !(Number(q.marks_awarded) > 0);
 
 // How the marks were counted, chosen when Evaluate was pressed.
 function markingNote(result, sections) {
-  if (result.marking !== 'lenient') return h('p', { class: 'hint' }, 'Standard marking: every question counts, including any not attempted.');
+  if (result.marking !== 'lenient') return h('p', { class: 'hint' }, 'Unanswered questions in supplied complete sections score zero; entire sections not supplied are excluded.');
   const count = sections.reduce((n, s) => n + (s.left_out || 0), 0);
   const worth = Math.round(sections.reduce((n, s) => n + (s.left_out_marks || 0), 0) * 100) / 100;
   return h(
@@ -1425,7 +1425,7 @@ function markingResult(assessment, result, onSaved) {
     items.length ? h('div', {}, h('h3', {}, title), h('ul', {}, items.map((item) => h('li', {}, item)))) : null;
 
   const markInputs = result.questions.map((q) =>
-    h('input', { type: 'number', class: 'mark-input', min: 0, max: q.max_marks, step: 0.5, value: q.marks_awarded, 'aria-label': `Marks for ${q.question}` })
+    h('input', { type: 'number', class: 'mark-input', min: 0, max: q.max_marks, step: 0.5, value: q.marks_awarded, disabled: Boolean(q.response_status && !['answered', 'partial'].includes(q.response_status)), 'aria-label': `Marks for ${q.question}` })
   );
   const saveButton = h('button', { class: 'btn btn-sm btn-primary', type: 'button', style: 'display:none' }, 'Save corrected marks');
   const changed = () => markInputs.some((el, i) => Number(el.value) !== result.questions[i].marks_awarded);
@@ -1461,7 +1461,7 @@ function markingResult(assessment, result, onSaved) {
           'p',
           { class: 'notice' },
           assessment.sections.length
-            ? `Nothing was written for ${assessment.unanswered_sections.join(' or ')} in this response, so it is treated as not sat and left out of the results. When the teacher sits it, scan it on their row and press Evaluate; it is added to this test.`
+            ? `Response sections not supplied: ${assessment.unanswered_sections.join(', ')}. They are excluded from the results. Upload those sections when available and evaluate them separately.`
             : 'OpenAI found nothing written in any section of this response, so nothing is graded. Check that the response pages are the teacher’s answer sheets, then press Evaluate again.'
         )
       : null,
@@ -1487,7 +1487,7 @@ function markingResult(assessment, result, onSaved) {
                 { style: 'white-space:nowrap' },
                 markInputs[i],
                 ` / ${q.max_marks}`,
-                notAttempted(q) ? h('span', { class: 'q-blank' }, lenient ? 'not counted' : 'not attempted') : null
+                q.response_status === 'section_not_supplied' ? h('span', { class: 'q-blank' }, 'section not supplied · excluded') : q.response_status === 'unreadable' ? h('span', { class: 'q-blank' }, 'handwriting unclear') : notAttempted(q) ? h('span', { class: 'q-blank' }, lenient ? 'not counted' : 'unanswered') : null
               ),
               h(
                 'td',

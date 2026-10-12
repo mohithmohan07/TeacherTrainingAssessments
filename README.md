@@ -196,7 +196,7 @@ coloured by section and the question paper chosen for each section, all of
 which can be changed; **Preview** shows a section's question paper beside the
 teacher's answers to it. **File** puts each section's pages under the
 teacher's sitting for that section, with its question paper. Filing marks
-nothing: **Evaluate all** (with one Standard or Lenient choice) marks the
+nothing: **Evaluate all** (with the complete-submission scoring policy) marks the
 sections just filed, as many at once as the memory allows, or each can be
 evaluated on its own. When many requests go together, OpenAI and Gemini may
 ask the app to slow down; it waits as long as they ask and sends the request
@@ -250,21 +250,28 @@ marks says which it was, names the languages and lists any pages OpenAI read
 from the scans. A sitting marked before this check keeps its marks until you
 press **Evaluate again**.
 
-Evaluate first asks how the marks are counted. OpenAI marks every answer the
-same way in both:
+Evaluate confirms the complete-submission scoring policy:
 
-- **Standard**: every question counts. A question the teacher did not attempt
-  scores 0 and stays in the total, so 20 marks out of a 35-mark section is 57%.
-- **Lenient**: questions the teacher did not attempt (nothing written, no
-  marks) are left out of both the marks and the total. If 10 of those 35 marks
-  were not attempted, 20 out of the remaining 25 is 80%.
+- Every question in a supplied complete section counts. An unanswered question
+  scores zero; 20 marks out of a 35-mark section is 57.14%.
+- An entire section not supplied is excluded, not graded zero. A supplied
+  section that is completely blank remains a zero with its full denominator.
+- Unreadable handwriting is distinct from a blank answer. Only readable,
+  supported content earns credit; missing pages, failed extraction and uncertain
+  paper alignment stop evaluation for review rather than manufacture a score.
 
-The dialog starts on the last choice made on that computer, or on how the
-sitting was marked when you press Evaluate again. Lenient sittings say so on
-the board, the assessment page, the teacher's profile and every report, with
-how many questions and marks were left out. Changing a question's mark from 0
-counts it again. To switch an evaluated sitting between the two, press
-Evaluate again and choose the other.
+New evaluations use this policy. Historical lenient results remain labelled as
+such until explicitly re-evaluated; no old scores are silently changed.
+
+The evaluation now has separate, validated stages: source paper and printed
+marks, a provisional inferred rubric, response transcription and matching,
+criterion-level marking, then writing feedback. No approved marking scheme is
+assumed. Source pages, selected masters, inferred assumptions and credit evidence
+stay in the internal audit; teacher and management reports show the useful
+marks, answers, guidance and feedback without the scoring-audit tables.
+
+See [Assessment grounding and regression checks](docs/assessment-grounding.md)
+for review gates, restart/resume behavior, cache invalidation and test commands.
 
 ### Written Expression
 
@@ -272,7 +279,7 @@ Once the answers are marked, Evaluate also has OpenAI check how well they are
 written, apart from whether they are right: **Written Expression**. Each
 section the teacher wrote in gets four scores out of 5 (Sentence Formation,
 Grammar, Spelling and Punctuation, Word Choice) and a score out of 10 from
-them: Excellent 8.5 and above, Good 7 to 8, Fair 5 to 6.5, Needs Practice
+them: Excellent 8.5 and above, Good 7 to below 8.5, Fair 5 to below 7, Needs Practice
 below 5. Only answers written in words count; option letters, one-word
 answers and drawings are left out, and a section with too little writing says
 so instead of a score. Answers are judged in the language they are written in,

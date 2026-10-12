@@ -485,7 +485,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
     const options = library.papers.filter((p) => p.sections.includes(section.section));
     const paperSelect = h(
       'select',
-      { 'aria-label': `${label} question paper`, disabled: !pages.length },
+      { 'aria-label': `${label} question paper`, disabled: sorting || !pages.length },
       h('option', { value: '' }, pages.length ? 'Choose the question paper' : 'Not sat'),
       options.map((p) => h('option', { value: String(p.id) }, p.title))
     );
@@ -510,6 +510,14 @@ export async function renderBulk(root, query = new URLSearchParams()) {
           : item.sort_status === 'new' ? 'Not matched yet' : sorting ? 'Matching…' : 'No pages: not sat'
       ),
       paperSelect,
+      section.requires_confirmation && section.paper && pages.length
+        ? h('button', { class: 'btn btn-sm', type: 'button', disabled: sorting, onclick: async (event) => {
+            const button = event.currentTarget;
+            button.disabled = true;
+            try { await change(item, { papers: { [key]: section.paper.id } }); }
+            finally { if (button.isConnected) button.disabled = false; }
+          } }, 'Confirm this paper')
+        : null,
       section.paper && pages.length ? h('small', { class: 'hint' }, paperFacts(section.paper)) : null,
       section.reason && pages.length ? h('small', { class: 'bulk-reason' }, section.reason) : null,
       pages.length && section.paper
@@ -688,6 +696,8 @@ function filedCard(filed, boardLink, marks, evaluateAll) {
   }
   const stateOf = (id) => marks?.get(id);
   const label = { queued: 'waiting', running: 'marking…', done: 'marked', failed: 'failed' };
+  const stageLabel = { language: 'checking languages', source_catalogue: 'checking source pages', paper_rubric: 'reading the question paper', reading: 'reading answers', response_matching: 'matching answers', marking_validation: 'validating marks', writing: 'checking writing', retry_wait: 'waiting to retry' };
+  const progressLabel = (mark) => mark?.state === 'running' && stageLabel[mark.progress?.stage] ? stageLabel[mark.progress.stage] : label[mark?.state];
   const done = filed.filter((row) => stateOf(row.assessment_id)?.state === 'done').length;
   const failed = filed.filter((row) => stateOf(row.assessment_id)?.state === 'failed').length;
   const going = marks && done + failed < filed.length;
@@ -716,7 +726,7 @@ function filedCard(filed, boardLink, marks, evaluateAll) {
             return [
               i ? ', ' : '',
               h('a', { href: `#/assessments/${row.assessment_id}` }, `Section ${row.section}${row.subject && row.section === 'B' ? ` (${row.subject})` : ''}`),
-              ` (${pageCount(row.pages)}${mark && label[mark.state] ? `, ${label[mark.state]}` : ''})`,
+              ` (${pageCount(row.pages)}${progressLabel(mark) ? `, ${progressLabel(mark)}` : ''})`,
             ];
           })
         )

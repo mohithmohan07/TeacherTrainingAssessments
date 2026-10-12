@@ -226,6 +226,15 @@ addColumn('assessments', 'ai_error', 'TEXT');
 addColumn('assessments', 'ai_model', 'TEXT');
 addColumn('assessments', 'ai_evaluated_at', 'TEXT');
 
+// Original source PDF/page and matching evidence survive bulk filing.
+addColumn('assessment_files', 'source_metadata', 'TEXT');
+
+// Completed evaluation stages are reusable only for their exact source and
+// prompt/model/rubric fingerprint. Failed work remains visible and resumable.
+addColumn('assessments', 'evaluation_progress', 'TEXT');
+addColumn('assessments', 'evaluation_queue', 'TEXT');
+addColumn('assessments', 'evaluation_checkpoint', 'TEXT');
+
 // Which test a sitting belongs to.
 addColumn('assessments', 'test_id', 'INTEGER REFERENCES tests(id) ON DELETE CASCADE');
 

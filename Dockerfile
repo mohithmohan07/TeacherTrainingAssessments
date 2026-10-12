@@ -28,7 +28,9 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends fonts-liberation \
   && rm -rf /var/lib/apt/lists/*
 
-ENV NODE_ENV=production \
+ARG APP_REVISION=unknown
+ENV APP_REVISION=${APP_REVISION} \
+    NODE_ENV=production \
     PORT=8080 \
     DATA_DIR=/data
 

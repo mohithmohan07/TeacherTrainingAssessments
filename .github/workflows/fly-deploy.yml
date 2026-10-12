@@ -56,7 +56,7 @@ jobs:
           FLY_APP: ${{ vars.FLY_APP }}
         run: |
           if [ -n "$FLY_APP" ]; then
-            flyctl deploy --remote-only --app "$FLY_APP"
+            flyctl deploy --remote-only --build-arg "APP_REVISION=$GITHUB_SHA" --app "$FLY_APP"
           else
-            flyctl deploy --remote-only
+            flyctl deploy --remote-only --build-arg "APP_REVISION=$GITHUB_SHA"
           fi
