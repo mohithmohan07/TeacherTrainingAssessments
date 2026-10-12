@@ -5,7 +5,7 @@ import { SCAN_KINDS, attachScans, discardUploads, movePages, removeStoredFile, s
 import { normalise, startEvaluation } from '../evaluate.js';
 import { MARKINGS, sittingSections, testFor, unansweredSections } from '../results.js';
 import { checkSittingWriting } from '../writing.js';
-import { PAPER_SECTIONS, presentPaper, setSittingPapers, sittingPapers } from '../papers.js';
+import { PAPER_SECTIONS, paperCompatibilityProblem, presentPaper, setSittingPapers, sittingPapers } from '../papers.js';
 import { currentAssessmentFor } from '../sittings.js';
 
 const router = express.Router();
@@ -37,6 +37,7 @@ function withFiles(assessment) {
   return {
     ...assessment,
     ai_result: aiResult,
+    evaluation_progress: assessment.evaluation_progress ? JSON.parse(assessment.evaluation_progress) : null,
     sections: sectionSummary(aiResult),
     unanswered_sections: aiResult ? unansweredSections(aiResult) : [],
     question_paper_files: files.filter((f) => f.kind === 'question_paper'),
@@ -154,12 +155,12 @@ router.put('/:id', (req, res) => {
 
 // Mark the scanned response with OpenAI. Starts the marking and returns at
 // once; the page polls GET /:id until ai_status is 'done' or 'failed'.
-// { marking: 'standard' | 'lenient' } says how the marks are counted.
+// Supplied complete sections count every question; absent sections are excluded.
 router.post('/:id/evaluate', (req, res) => {
   const assessment = selectAssessmentRow.get(req.params.id);
   if (!assessment) return res.status(404).json({ error: 'Assessment not found.' });
   const marking = req.body?.marking ?? 'standard';
-  if (!MARKINGS.some((m) => m.key === marking)) return res.status(400).json({ error: 'Choose Standard or Lenient marking.' });
+  if (!MARKINGS.some((m) => m.key === marking)) return res.status(400).json({ error: 'Choose Standard marking.' });
 
   const problem = startEvaluation(assessment.id, marking);
   if (problem) return res.status(400).json({ error: problem });
@@ -182,16 +183,23 @@ router.put('/:id/marks', (req, res) => {
 
   const bad = marks.findIndex((mark, i) => {
     const n = Number(mark);
-    return String(mark).trim() === '' || !Number.isFinite(n) || n < 0 || n > result.questions[i].max_marks;
+    const status = result.questions[i].response_status;
+    const unsupported = status && !['answered', 'partial'].includes(status) && n > 0;
+    return String(mark).trim() === '' || !Number.isFinite(n) || n < 0 || n > result.questions[i].max_marks || unsupported;
   });
   if (bad !== -1) {
     const q = result.questions[bad];
-    return res.status(400).json({ error: `Question ${q.question} needs a mark from 0 to ${q.max_marks}.` });
+    const absent = q.response_status && !['answered', 'partial'].includes(q.response_status);
+    return res.status(400).json({ error: absent ? `Question ${q.question} has no readable answer to credit. Review its source evidence and evaluate again before awarding marks.` : `Question ${q.question} needs a mark from 0 to ${q.max_marks}.` });
   }
 
   const updated = normalise({
     ...result,
-    questions: result.questions.map((q, i) => ({ ...q, marks_awarded: Number(marks[i]) })),
+    questions: result.questions.map((q, i) => ({ ...q, marks_awarded: Number(marks[i]),
+      audit: Number(marks[i]) === q.marks_awarded ? q.audit : { ...q.audit, manual_override: {
+        previous_marks: q.marks_awarded, marks_awarded: Number(marks[i]), corrected_at: new Date().toISOString(),
+      } },
+    })),
   });
   db.prepare(
     `UPDATE assessments SET ai_result = ?, score = ?, max_score = ?, updated_at = datetime('now') WHERE id = ?`
@@ -255,6 +263,15 @@ router.put('/:id/papers', (req, res) => {
   const known = ids.filter((id) => db.prepare('SELECT 1 FROM papers WHERE id = ?').get(id));
   if (known.length !== ids.length) return res.status(400).json({ error: 'That paper is no longer in the library. Reload the page and choose again.' });
 
+  const teacher = selectTeacher.get(assessment.teacher_id);
+  const school = db.prepare('SELECT * FROM schools WHERE id = ?').get(assessment.school_id);
+  for (const id of known) {
+    const paper = db.prepare('SELECT * FROM papers WHERE id = ?').get(id);
+    for (const section of assessment.section ? [assessment.section] : String(paper.sections).split(',').filter(Boolean)) {
+      const problem = paperCompatibilityProblem(paper, teacher, school, section);
+      if (problem) return res.status(400).json({ error: problem });
+    }
+  }
   setSittingPapers(assessment.id, known);
   db.prepare("UPDATE assessments SET updated_at = datetime('now') WHERE id = ?").run(assessment.id);
   res.json(withFiles(selectAssessmentRow.get(assessment.id)));

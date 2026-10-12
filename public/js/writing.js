@@ -119,7 +119,7 @@ export function writingKey() {
     'p',
     { class: 'report-note' },
     h('strong', {}, `${WRITING_NAME}: `),
-    'how well the answers are written, judged in the language they are written in, apart from the marks. Scored out of 10 from Sentence Formation, Grammar, Spelling and Punctuation, and Word Choice, each out of 5. Excellent 8.5 and above · Good 7–8 · Fair 5–6.5 · Needs Practice below 5.'
+    'how well the answers are written, judged in the language they are written in, apart from the marks. Scored out of 10 from Sentence Formation, Grammar, Spelling and Punctuation, and Word Choice, each out of 5. Excellent 8.5 and above · Good 7 to below 8.5 · Fair 5 to below 7 · Needs Practice below 5.'
   );
 }
 

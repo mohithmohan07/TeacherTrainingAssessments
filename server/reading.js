@@ -7,10 +7,11 @@
 // page Gemini will not read goes to OpenAI as its scan instead.
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { UPLOADS_DIR } from './db.js';
 import { friendly, requestJson } from './openai.js';
 import { GeminiError, geminiConfigured, generateJson } from './gemini.js';
-import { pageInputs } from './paper-inputs.js';
+import { OPENAI_IMAGE_TYPES, pageInputs } from './paper-inputs.js';
 
 const LANGUAGE_INSTRUCTIONS = `You are checking a teacher's answers to a teacher training assessment before they are marked. You are given the TEACHER'S RESPONSE: scanned pages of the answers the teacher wrote, usually by hand.
 
@@ -47,7 +48,8 @@ const READING_PROMPT = `These are scanned pages of a teacher's answers to a teac
 - Keep question numbers and labels such as "1A" or "Q2 (b)" where they are written, and start a new line where the teacher did.
 - Write [illegible] for a word you cannot read. Leave out words the teacher crossed out.
 - For a drawing, diagram, table or chart, describe it briefly in English in square brackets and copy its labels as written, for example [diagram: the water cycle, labelled Evaporation, Condensation, Rain].
-- Give every page in order, with its number as page. A page with no writing has an empty text.`;
+- Give every page in order, using exactly the supplied page number as page. Never renumber pages within a batch.
+- Set status to "read" for a complete reading, "uncertain" for partial or doubtful handwriting, "blank" only when the image clearly contains no teacher writing, or "unreadable" when extraction failed. Give a short reason for uncertainty or failure. An empty text alone is not evidence that a page is blank.`;
 
 const READING_SCHEMA = {
   type: 'object',
@@ -59,13 +61,20 @@ const READING_SCHEMA = {
         properties: {
           page: { type: 'integer' },
           text: { type: 'string' },
+          status: { type: 'string', enum: ['read', 'uncertain', 'blank', 'unreadable'] },
+          reason: { type: 'string' },
         },
-        required: ['page', 'text'],
+        required: ['page', 'text', 'status', 'reason'],
       },
     },
   },
   required: ['pages'],
 };
+
+// Included in evaluation checkpoints so a prompt/schema or grounding-policy
+// update cannot silently reuse an extraction produced by an older reader.
+export const READING_VERSION = crypto.createHash('sha256')
+  .update(JSON.stringify(['source-grounding-v3-mixed-image-fallback', LANGUAGE_INSTRUCTIONS, SWAP_RULE, LANGUAGE_SCHEMA, READING_PROMPT, READING_SCHEMA])).digest('hex');
 
 // Types Gemini accepts as image input. Of the types OpenAI reads, GIF is the
 // one it does not.
@@ -116,14 +125,15 @@ export async function answerLanguage({ paper, response }) {
 // time, so the pages of such a batch are then sent one at a time: one page it
 // will not read no longer keeps it from reading the others. The pages it
 // still will not read are left for OpenAI to read from the scans.
-export async function readAnswers(files, languages) {
+export async function readAnswers(files, languages, { includeDetails = false } = {}) {
   const why = languages.length ? `The answers are in ${listed(languages)}, so` : 'The answers are not all in English, so';
-  if (!geminiConfigured()) {
+  const needsGemini = files.some((file) => GEMINI_IMAGE_TYPES.has(file.mime_type));
+  if (needsGemini && !geminiConfigured()) {
     throw friendly(`${why} Gemini reads them before OpenAI marks them, but the GEMINI_API_KEY secret is missing on the server. Add it on Fly, then press Evaluate again.`);
   }
-  const unreadable = files.filter((file) => !GEMINI_IMAGE_TYPES.has(file.mime_type));
+  const unreadable = files.filter((file) => !GEMINI_IMAGE_TYPES.has(file.mime_type) && !OPENAI_IMAGE_TYPES.has(file.mime_type));
   if (unreadable.length) {
-    throw friendly(`${why} Gemini reads them, and Gemini cannot read GIF pages. Re-upload these as JPG or PNG, then press Evaluate again: ${unreadable
+    throw friendly(`These answer pages use an unsupported image format. Re-upload them as JPG or PNG, then press Evaluate again: ${unreadable
       .map((file) => file.original_name)
       .join(', ')}.`);
   }
@@ -134,29 +144,38 @@ export async function readAnswers(files, languages) {
       return { number: i + 1, file, where, bytes: (await fs.stat(where)).size };
     })
   );
-  const tooBig = pages.find((page) => page.bytes > BATCH_BYTES);
+  // Unsupported Gemini inputs such as GIF remain in their original positions
+  // and are supplied to OpenAI as images. They must not block other pages.
+  const geminiPages = pages.filter((page) => GEMINI_IMAGE_TYPES.has(page.file.mime_type));
+  const tooBig = geminiPages.find((page) => page.bytes > BATCH_BYTES);
   if (tooBig) {
     throw friendly(`Page ${tooBig.number} of the answer paper (${tooBig.file.original_name}) is too large for Gemini to read. Scan it again at a lower resolution, or upload a smaller copy, then press Evaluate again.`);
   }
   const batches = [];
-  for (const page of pages) {
+  for (const page of geminiPages) {
     const batch = batches.at(-1);
     const bytes = batch?.reduce((total, p) => total + p.bytes, 0) ?? 0;
     if (batch && batch.length < BATCH_PAGES && bytes + page.bytes <= BATCH_BYTES) batch.push(page);
     else batches.push([page]);
   }
 
-  const texts = [];
+  const details = [];
+  for (const page of pages.filter((page) => !GEMINI_IMAGE_TYPES.has(page.file.mime_type))) {
+    details[page.number - 1] = {
+      ...readingPages(null, [page])[0],
+      reason: `Gemini does not support ${page.file.mime_type}; inspect the original source image with OpenAI.`,
+    };
+  }
   for (const batch of batches) {
     try {
-      readInto(texts, batch, await readBatch(batch, pages.length));
+      readInto(details, batch, await readBatch(batch, pages.length));
     } catch (error) {
       if (!error.unusable) throw failed(error);
       if (batch.length === 1) continue;
       await Promise.all(
         batch.map(async (page) => {
           try {
-            readInto(texts, [page], await readBatch([page], pages.length));
+            readInto(details, [page], await readBatch([page], pages.length));
           } catch (pageError) {
             if (!pageError.unusable) throw failed(pageError);
           }
@@ -164,22 +183,21 @@ export async function readAnswers(files, languages) {
       );
     }
   }
-  const unread = pages.filter((page) => texts[page.number - 1] === undefined);
-  unread.forEach((page) => (texts[page.number - 1] = null));
+  for (const page of pages) {
+    details[page.number - 1] ??= readingPages(null, [page])[0];
+  }
+  const texts = details.map((page) => page.text);
+  const unread = pages.filter((page) => texts[page.number - 1] === null);
   if (unread.length) {
     console.warn(`Gemini would not read ${unread.length === pages.length ? 'any' : `${unread.length}`} of ${pagesOf(pages.length)} (${unread.map((page) => page.number).join(', ')}), so OpenAI reads ${unread.length === 1 ? 'it' : 'them'} from the scans.`);
   }
-  if (texts.every((text) => text === '')) {
-    throw friendly('Gemini found no writing on the answer pages. Check they are the teacher’s answers and the right way up, then press Evaluate again.');
-  }
-  return texts;
+  return includeDetails ? { texts, pages: details } : texts;
 }
 
 async function readBatch(batch, total) {
   const first = batch[0].number;
-  const last = batch.at(-1).number;
   return generateJson({
-    prompt: `${READING_PROMPT}\n\n${first === last ? `This is page ${first}` : `These are pages ${first} to ${last}`} of ${pagesOf(total)}.`,
+    prompt: `${READING_PROMPT}\n\n${batch.length === 1 ? `This is page ${first}` : `These are pages ${batch.map((page) => page.number).join(', ')}`} of ${pagesOf(total)}. Keep these exact page numbers, including any gaps.`,
     parts: await pageParts(batch),
     schema: READING_SCHEMA,
     timeoutMs: 5 * 60 * 1000,
@@ -188,15 +206,40 @@ async function readBatch(batch, total) {
   });
 }
 
-// Pages are matched by number, or in order if Gemini numbered them some other
-// way.
-function readInto(texts, batch, raw) {
+// Pure normalization: never attach one page's words to another by position,
+// and never turn missing output into evidence of an unanswered question.
+export function readingPages(raw, batch) {
   const read = Array.isArray(raw?.pages) ? raw.pages : [];
-  const byNumber = new Map(read.map((page) => [Number(page?.page), page]));
-  const numbered = batch.some((page) => byNumber.has(page.number));
-  batch.forEach((page, i) => {
-    texts[page.number - 1] = String((numbered ? byNumber.get(page.number) : read[i])?.text ?? '').trim();
+  return batch.map((page) => {
+    const matches = read.filter((entry) => Number.isInteger(entry?.page) && entry.page === page.number);
+    const entry = matches.length === 1 ? matches[0] : null;
+    const text = typeof entry?.text === 'string' ? entry.text.trim() : '';
+    let status = 'unreadable';
+    let reason = matches.length > 1 ? 'Duplicate extraction page number.' : 'No usable extraction for this source page.';
+    if (text) {
+      status = entry.status === 'read' || !entry.status ? 'read' : 'uncertain';
+      if (/\[\s*(?:illegible|unreadable|unclear)[^\]]*\]/iu.test(text)) status = 'uncertain';
+      reason = status === 'uncertain' ? 'Some handwriting needs verification against the source image.' : '';
+    } else if (entry?.status === 'blank') {
+      status = 'blank_unverified';
+      reason = 'Extractor reported a blank page; verify the source image before deciding it is unanswered.';
+    } else if (entry) {
+      reason = 'Extraction was empty or invalid; this does not establish that the page is blank.';
+    }
+    return {
+      page: page.number,
+      source_file_id: page.file?.id ?? null,
+      source_name: page.file?.original_name ?? '',
+      status,
+      text: text || null,
+      reason: [reason, typeof entry?.reason === 'string' ? entry.reason.trim().slice(0, 400) : ''].filter(Boolean).join(' '),
+      needs_image: status !== 'read',
+    };
   });
+}
+
+function readInto(details, batch, raw) {
+  for (const page of readingPages(raw, batch)) details[page.page - 1] = page;
 }
 
 function failed(error) {

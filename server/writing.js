@@ -11,6 +11,7 @@
 // of any pages Gemini would not read. Sittings marked before the check get it
 // when their reports are built, judged from what the marking wrote down of
 // each answer.
+import crypto from 'node:crypto';
 import db from './db.js';
 import { OPENAI_MODEL, openaiConfigured, requestJson } from './openai.js';
 import { pageInputs, readingInputs } from './paper-inputs.js';
@@ -59,7 +60,7 @@ In errors, list each error you find, the most serious first, at most 15 for each
 - wrote: the teacher's words with the error, exactly as written, in their language and script: just the phrase or sentence, under 20 words.
 - problem: what is wrong, in plain English, in under 15 words.
 - correction: the same words corrected, in the same language and script.
-When the same mistake comes up again and again, list it once and say "repeated" in the problem. List only real errors you are sure of, not matters of style.`;
+When the same mistake comes up again and again, list it once and say "repeated" in the problem. List only real errors you are sure of, not matters of style. Each error quote must also appear verbatim in the marked teacher_answer for that exact section and question; do not use quotes beyond a truncated answer. Never treat an uncertain transcription or [illegible] as a spelling error. Ratings and summary must agree with the verified evidence.`;
 
 const SOURCE_NOTES = {
   scans: `You are given the TEACHER'S RESPONSE as scanned pages of what the teacher wrote, usually by hand, then the list of sections and questions as marked, with what each question asks and the start of what the teacher wrote, to tell you which answer is which. Judge the writing on the pages.`,
@@ -81,7 +82,7 @@ const SCHEMA = {
         properties: {
           section: { type: 'string' },
           judged: { type: 'boolean' },
-          ...Object.fromEntries(WRITING_CRITERIA.map((c) => [c.key, { type: 'integer', description: 'From 1 to 5.' }])),
+          ...Object.fromEntries(WRITING_CRITERIA.map((c) => [c.key, { type: 'integer', minimum: 1, maximum: 5, description: 'From 1 to 5.' }])),
           summary: { type: 'string' },
         },
       },
@@ -105,24 +106,37 @@ const SCHEMA = {
   },
 };
 
+export const WRITING_VERSION = crypto.createHash('sha256')
+  .update(JSON.stringify(['quote-grounding-v3-readable-sufficiency', INSTRUCTIONS, SOURCE_NOTES, SCHEMA])).digest('hex');
+
 const clip = (value, max) => {
   const text = String(value ?? '').replace(/\s+/g, ' ').trim();
   return text.length > max ? `${text.slice(0, max)}…` : text;
 };
 
-const written = (q) => String(q.teacher_answer ?? '').trim() !== '';
+const wordSegments = new Intl.Segmenter(undefined, { granularity: 'word' });
 
-// The sections and questions as marked, so OpenAI can say which answer each
-// error is in. From the scans or a reading, only the start of each answer is
-// needed to tell them apart; from transcripts, the whole of what was copied.
-function questionList(questions, full) {
+// Only language that was actually read can support a writing rating. Exclude
+// extraction placeholders and annotations, numbers, and one-word responses.
+export function writingWordCount(q) {
+  if (q.response_status && !['answered', 'partial'].includes(q.response_status)) return 0;
+  const text = String(q.teacher_answer ?? '').replace(/\[[^\]]*\]/gu, ' ');
+  const words = [...wordSegments.segment(text)].filter((part) => part.isWordLike && /\p{L}/u.test(part.segment));
+  return words.length > 1 ? words.length : 0;
+}
+
+const written = (q) => writingWordCount(q) > 0;
+
+// Include every stored answer excerpt even when scans are supplied, so each
+// quoted error can be checked against the same question's known evidence.
+function questionList(questions) {
   const keys = [...new Set(questions.map((q) => sectionKey(q.section)))];
   const lines = [];
   for (const key of keys) {
     lines.push(`== ${sectionName(key)}`);
     for (const q of questions.filter((x) => sectionKey(x.section) === key)) {
       const asked = q.question_text ? ` Asks: ${clip(q.question_text, 200)}` : '';
-      const wrote = written(q) ? `The teacher wrote: ${full ? String(q.teacher_answer).trim() : clip(q.teacher_answer, 80)}` : 'Left blank.';
+      const wrote = written(q) ? `The teacher wrote: ${String(q.teacher_answer).trim()}` : 'No transcribed writing is available for this answer; verify the source before deciding it was left blank.';
       lines.push(`${q.question}.${asked} ${wrote}`);
     }
   }
@@ -144,10 +158,10 @@ export async function checkWriting(questions, source = {}) {
     content.push({ type: 'input_text', text: `TEACHER'S RESPONSE (${source.pages.length} page${source.pages.length === 1 ? '' : 's'}):` });
     content.push(...(await pageInputs("TEACHER'S RESPONSE", source.pages)));
   } else if (from === 'reading') {
-    content.push(...(await readingInputs(source.reading, source.pages)));
-    if (source.reading.some((text) => text === null)) note += ' Pages that could not be read come as the scanned pages instead: judge the writing on those from the scans.';
+    content.push(...(await readingInputs(source.reading, source.pages, source.readingDetails)));
+    note += ' Missing, empty and uncertain extractions come with source scans where available. Verify those scans. Extraction errors and unclear handwriting are not language errors; never invent a correction for uncertain words.';
   }
-  content.push({ type: 'input_text', text: questionList(questions, from === 'transcripts') });
+  content.push({ type: 'input_text', text: questionList(questions) });
 
   const raw = await requestJson({
     instructions: `${INSTRUCTIONS}\n\n${note}`,
@@ -157,10 +171,23 @@ export async function checkWriting(questions, source = {}) {
     task: 'check the written expression',
     retry: 'Rebuild the report to try again.',
   });
-  return writingOf({ ...raw, from, model: OPENAI_MODEL, checked_at: new Date().toISOString() }, questions);
+  return writingOf({ ...raw, from, version: WRITING_VERSION, basis: writingBasis(questions), evidence_version: 1, model: OPENAI_MODEL, checked_at: new Date().toISOString() }, questions);
 }
 
-const score = (value) => Math.min(5, Math.max(1, Math.round(Number(value) || 1)));
+const quoteText = (value) => String(value ?? '').normalize('NFC').replace(/\s+/gu, ' ').trim();
+const questionKey = (value) => quoteText(value).toUpperCase().replace(/^Q(?:UESTION)?\.?\s*/u, '').replace(/[\s().\-]/gu, '');
+const validScore = (value) => Number.isInteger(value) && value >= 1 && value <= 5;
+
+// Marks and feedback can change without changing the teacher's writing.
+// Changed answer content or question attribution requires a fresh check.
+export function writingBasis(questions) {
+  const content = questions.map((q) => ({
+    section: sectionKey(q.section), question: questionKey(q.question),
+    question_text: quoteText(q.question_text), teacher_answer: quoteText(q.teacher_answer),
+    response_status: q.response_status ?? '',
+  })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return crypto.createHash('sha256').update(JSON.stringify(content)).digest('hex');
+}
 
 // The check as kept with the marking: sections named and scored the same way
 // as the marks, and errors only for questions that were marked. Also used to
@@ -168,6 +195,12 @@ const score = (value) => Math.min(5, Math.max(1, Math.round(Number(value) || 1))
 export function writingOf(raw, questions) {
   if (!raw || typeof raw !== 'object') return null;
   if (raw.problem) return { problem: clip(raw.problem, 600), sections: [], errors: [] };
+  if (raw.evidence_version !== 1 || raw.version !== WRITING_VERSION || !raw.basis) {
+    return { problem: 'Written Expression needs an evidence-checked reassessment before its scores can be used.', sections: [], errors: [] };
+  }
+  if (raw.basis && raw.basis !== writingBasis(questions)) {
+    return { problem: 'The answers or question attribution changed. Recheck Written Expression before using its scores.', sections: [], errors: [] };
+  }
   const keys = new Set(questions.map((q) => sectionKey(q.section)));
   const seen = new Set();
   const sections = [];
@@ -175,25 +208,44 @@ export function writingOf(raw, questions) {
     const key = sectionKey(s?.section);
     if (!keys.has(key) || seen.has(key)) continue;
     seen.add(key);
-    const judged = s.judged !== false;
-    const criteria = Object.fromEntries(WRITING_CRITERIA.map((c) => [c.key, judged ? score(s[c.key]) : null]));
+    const wordCount = questions.filter((q) => sectionKey(q.section) === key).reduce((sum, q) => sum + writingWordCount(q), 0);
+    const judged = s.judged === true && wordCount >= 30 && WRITING_CRITERIA.every((c) => validScore(s[c.key]));
+    const criteria = Object.fromEntries(WRITING_CRITERIA.map((c) => [c.key, judged ? s[c.key] : null]));
     const total = judged ? WRITING_CRITERIA.reduce((sum, c) => sum + criteria[c.key], 0) / 2 : null;
     sections.push({ section: sectionName(key), judged, ...criteria, score: total, summary: judged ? clip(s.summary, 400) : '' });
   }
-  const errors = (Array.isArray(raw.errors) ? raw.errors : [])
-    .map((e) => ({
-      section: sectionName(sectionKey(e?.section)),
-      question: clip(e?.question, 20),
-      type: ERROR_TYPES.includes(e?.type) ? e.type : 'Grammar',
-      wrote: clip(e?.wrote, 300),
-      problem: clip(e?.problem, 200),
-      correction: clip(e?.correction, 300),
-    }))
-    .filter((e) => e.wrote && keys.has(sectionKey(e.section)));
+  const errors = [];
+  const seenErrors = new Set();
+  let rejected = 0;
+  for (const e of Array.isArray(raw.errors) ? raw.errors : []) {
+    const key = sectionKey(e?.section);
+    const matches = questions.filter((q) => sectionKey(q.section) === key && questionKey(q.question) === questionKey(e?.question));
+    const wrote = typeof e?.wrote === 'string' ? quoteText(e.wrote) : '';
+    const correction = typeof e?.correction === 'string' ? quoteText(e.correction) : '';
+    const grounded = matches.length === 1 && written(matches[0]) && wrote && quoteText(matches[0].teacher_answer).includes(wrote)
+      && !/\[\s*(?:illegible|unreadable|unclear)[^\]]*\]/iu.test(wrote);
+    if (!grounded || !ERROR_TYPES.includes(e?.type) || !correction || correction === wrote
+      || !sections.some((s) => sectionKey(s.section) === key && s.judged)) {
+      rejected += 1;
+      continue;
+    }
+    const error = {
+      section: sectionName(key), question: String(matches[0].question), type: e.type,
+      wrote, problem: clip(e.problem, 200), correction,
+    };
+    const identity = JSON.stringify([key, error.question, error.type, wrote, correction]);
+    if (seenErrors.has(identity) || errors.filter((x) => sectionKey(x.section) === key).length >= 15) continue;
+    seenErrors.add(identity);
+    errors.push(error);
+  }
   return {
     from: ['scans', 'reading', 'transcripts'].includes(raw.from) ? raw.from : 'transcripts',
     model: String(raw.model ?? ''),
     checked_at: raw.checked_at ?? null,
+    ...(raw.basis ? { basis: raw.basis } : {}),
+    evidence_version: raw.evidence_version === 1 ? 1 : 0,
+    version: WRITING_VERSION,
+    rejected_errors: (Number(raw.rejected_errors) || 0) + rejected,
     sections,
     errors,
   };
@@ -227,7 +279,7 @@ const average = (list) => (list.length ? list.reduce((a, b) => a + b, 0) / list.
 // A teacher's Written Expression over the sections judged: the average score
 // out of 10 and its level. Null when no section was judged.
 export function teacherWriting(sections) {
-  const judged = sections.filter((s) => s.writing?.judged);
+  const judged = sections.filter((s) => s.writing?.judged && Number.isFinite(s.writing.score));
   if (!judged.length) return null;
   const score = oneDecimal(average(judged.map((s) => s.writing.score)));
   return { score, level: levelFor(score) };
@@ -242,6 +294,7 @@ export function schoolWriting(teachers) {
     .map((t) => ({ t, sections: t.sections.filter((s) => s.writing?.judged), overall: teacherWriting(t.sections) }))
     .filter((x) => x.overall);
   if (!judged.length) return null;
+  const schoolAverage = oneDecimal(average(judged.map((x) => x.overall.score)));
   const sections = judged.flatMap((x) => x.sections);
   const types = ERROR_TYPES.map((type) => {
     const per = judged.map((x) => x.sections.reduce((n, s) => n + s.writing.errors.filter((e) => e.type === type).length, 0));
@@ -251,8 +304,8 @@ export function schoolWriting(teachers) {
     .sort((a, b) => b.teachers - a.teachers || b.errors - a.errors);
   return {
     teachers: judged.length,
-    average: oneDecimal(average(judged.map((x) => x.overall.score))),
-    level: levelFor(average(judged.map((x) => x.overall.score))),
+    average: schoolAverage,
+    level: levelFor(schoolAverage),
     levels: WRITING_LEVELS.map((band) => ({ label: band.label, teachers: judged.filter((x) => x.overall.level === band.label).length })),
     criteria: WRITING_CRITERIA.map((c) => ({
       label: c.label,
@@ -282,7 +335,10 @@ const saveWriting = db.prepare(
   `UPDATE assessments SET ai_result = ? WHERE id = ? AND ai_evaluated_at IS ? AND ai_status IS NOT 'running'`
 );
 
-export const lacksWriting = (result) => Boolean(result?.questions?.length) && (!result.writing || Boolean(result.writing.problem));
+export const lacksWriting = (result) => Boolean(result?.questions?.some(written)) && (
+  !result.writing || Boolean(result.writing.problem) || result.writing.evidence_version !== 1 || result.writing.version !== WRITING_VERSION
+  || result.writing.basis !== writingBasis(result.questions)
+);
 
 // Checks the writing of one marked sitting that has no check yet, from what
 // the marking wrote down. Returns why it could not, or null.
@@ -297,6 +353,7 @@ async function fillWriting(assessmentId) {
   const fresh = selectAssessment.get(assessment.id);
   if (!fresh?.ai_result || fresh.ai_evaluated_at !== assessment.ai_evaluated_at) return null;
   const current = JSON.parse(fresh.ai_result);
+  if (writingBasis(current.questions ?? []) !== writingBasis(result.questions)) return null;
   current.writing = writing;
   saveWriting.run(JSON.stringify(current), assessment.id, assessment.ai_evaluated_at);
   return null;

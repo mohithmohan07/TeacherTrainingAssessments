@@ -1,163 +1,70 @@
-// Marking an assessment with the OpenAI API. Evaluate first has OpenAI check
-// what language the teacher's answers are in (reading.js). Answers all in
-// English go to the model as the scanned pages, with the question paper
-// (scanned pages, or PDFs confirmed from the paper library), and it reads both
-// and marks every question. Answers in another language, or mixed with one,
-// are read by Gemini first, and the model marks Gemini's reading of them
-// instead of the scans; a page Gemini will not read goes to the model as its
-// scan. It runs in the background: the request that starts it returns
-// straight away and the page polls the assessment until the marking is done
-// or has failed. Once it is done, the teacher's reports for the test are
-// rebuilt (reports.js). Evaluate also says how the marks are counted:
-// standard, or lenient, which leaves the questions the teacher did not
-// attempt out of the marks and the total (results.js). For every question the
-// marking also says what was asked and what a full-marks answer contains,
-// which the teacher's reports show beside what the teacher wrote. Once the
-// answers are marked, their Written Expression is checked from what was
-// marked (writing.js); that changes no mark.
-import db from './db.js';
+// Grounded, resumable evaluation: extract the administered paper and its
+// provisional rubric, independently transcribe/match responses, then mark and
+// validate. Only validated rows can reach saved results and report aggregates.
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
+import db, { UPLOADS_DIR } from './db.js';
 import { OPENAI_MODEL, friendly, openaiConfigured, requestJson } from './openai.js';
 import { GEMINI_MODEL } from './gemini.js';
-import { answerLanguage, listed, readAnswers } from './reading.js';
+import { answerLanguage, readAnswers, READING_VERSION } from './reading.js';
 import { queueTeacherReports } from './reports.js';
 import { swapScanKinds } from './scans.js';
-import { sittingPapers } from './papers.js';
+import { sittingPapers, paperCompatibilityProblem } from './papers.js';
 import { counts, markingOf, sectionKey } from './results.js';
 import { OPENAI_IMAGE_TYPES, pageInputs, questionPaperInputs, readingInputs } from './paper-inputs.js';
-import { EXPECTED_ANSWER_RULE, QUESTION_TEXT_RULE } from './answers.js';
-import { checkWriting, writingOf } from './writing.js';
+import { checkWriting, writingOf, WRITING_VERSION } from './writing.js';
 import { keepAwake } from './idle.js';
-
-const EXAMINER = 'You are an experienced examiner marking a teacher training assessment.';
-
-const SCANNED_RESPONSE = `You are given two groups: first the QUESTION PAPER (scanned pages, or the paper itself as a PDF), then the TEACHER'S RESPONSE (scanned pages of the answers the teacher wrote on separate sheets, usually by hand). Each page or file is labelled with its group just before it.
-
-Pages are sometimes filed under the wrong group. If every page labelled QUESTION PAPER is plainly the teacher's own handwritten answers, and the pages labelled TEACHER'S RESPONSE are plainly the printed question paper, the two groups were swapped: mark them the right way round and set pages_swapped to true. In every other case, including when you are unsure or the teacher wrote on the question paper itself, use the groups as labelled and set pages_swapped to false.`;
-
-// For answers Gemini read first because they are not all in English.
-const READ_RESPONSE = `You are given two groups: first the QUESTION PAPER (scanned pages, or the paper itself as a PDF), then the TEACHER'S RESPONSE. The teacher's answers are not all in English, so they were read from the scanned pages for you, and the TEACHER'S RESPONSE is that reading, page by page: what the teacher wrote, in the language and script they wrote it in, with [illegible] for a word that could not be read and drawings described in square brackets. Mark it as you would mark the scanned pages, and take teacher_answer from it. The two groups have already been checked and are the right way round, so set pages_swapped to false.`;
-
-const MARKING_RULES = `The paper and the answers may be in English or any Indian language, in any script: for example Hindi, Marathi, Sanskrit, Kannada, Tamil, Telugu, Malayalam, Bengali, Assamese, Urdu or Kashmiri (Urdu and Kashmiri are written right to left). Read everything in the language it is written in, and never take marks off for the language an answer is written in.
-
-Mark the response against the question paper:
-- Work through every question on the question paper in order, including questions the teacher did not answer (award 0 for those). The teacher may have sat only some sections of the paper on this date: still list every question of every section, with an empty teacher_answer where nothing was written.
-- Questions usually have lettered parts (A, B, C, D) with the marks for each part printed beside it in brackets, for example "(3)". Mark every part as its own row, numbered like "1A", "1B", with those printed marks as max_marks. A question without lettered parts is one row, numbered like "4", out of the marks printed for it (for example "[Total Marks: 10]"). If no marks are printed at all, use 1 and say so in the feedback.
-- Give each row the section it is in, written in English as "Section A", "Section B" and so on, even when the paper names it in another language (for example खंड 'ख' is Section B). If the paper has no sections, use an empty string.
-- ${QUESTION_TEXT_RULE}
-- In teacher_answer, write down what the teacher wrote for that row, in the language and script they wrote it in, copied faithfully including mistakes. If it is long, give the first 500 characters or so and end with "…". Write [illegible] for words you cannot read, and use an empty string if the teacher did not answer.
-- ${EXPECTED_ANSWER_RULE} Mark the teacher's answer against it.
-- For multiple-choice or one-word questions, award full marks for the correct answer and 0 otherwise.
-- For written answers, award marks for each correct and relevant point, the way a fair examiner following a marking scheme would. Partial marks are allowed in steps of 0.5. Never award more than max_marks.
-- If handwriting is illegible, mark only what you can read and say what you could not read in the feedback.
-- Keep feedback short and specific: what was right, what was missing.
-- Write the feedback, summary, strengths and areas to improve in English, for the teacher's trainer.`;
-
-// Added when Gemini would not read some of the pages, or any of them: those
-// go to the model as the scanned pages (numbered from 1).
-function scannedPagesNote(unread, total) {
-  if (!unread.length) return '';
-  const which = unread.length === total
-    ? 'None of the pages could be read for you, so they come as the scanned pages themselves instead of a reading.'
-    : `Page${unread.length === 1 ? '' : 's'} ${listed(unread.map(String))} could not be read for you, so ${unread.length === 1 ? 'it comes' : 'they come'} as the scanned page${unread.length === 1 ? '' : 's'} instead of a reading.`;
-  return `${which} Read the teacher's writing on ${unread.length === 1 ? 'that page' : 'those pages'} yourself, in the language and script it is written in, and mark it the same way.`;
-}
-
-const instructionsFor = (read, note = '') => [EXAMINER, read ? READ_RESPONSE : SCANNED_RESPONSE, note, MARKING_RULES].filter(Boolean).join('\n\n');
-
-const RESULT_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['pages_swapped', 'questions', 'summary', 'strengths', 'areas_to_improve'],
-  properties: {
-    pages_swapped: { type: 'boolean', description: 'True only when the question paper and the response were plainly filed the wrong way round.' },
-    questions: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['section', 'question', 'question_text', 'teacher_answer', 'expected_answer', 'max_marks', 'marks_awarded', 'feedback'],
-        properties: {
-          section: { type: 'string', description: 'Section in English, e.g. "Section A", or "".' },
-          question: { type: 'string', description: 'Question and part as printed, e.g. "1A", "2B", "4".' },
-          question_text: { type: 'string', description: 'What the row asks, briefly, in English.' },
-          teacher_answer: { type: 'string', description: 'What the teacher wrote, in their own language, or "".' },
-          expected_answer: { type: 'string', description: 'What a full-marks answer contains.' },
-          max_marks: { type: 'number' },
-          marks_awarded: { type: 'number' },
-          feedback: { type: 'string' },
-        },
-      },
-    },
-    summary: { type: 'string' },
-    strengths: { type: 'array', items: { type: 'string' } },
-    areas_to_improve: { type: 'array', items: { type: 'string' } },
-  },
-};
+import { currentSourceBasis, digest } from './provenance.js';
+import { PIPELINE_VERSION, RUBRIC_POLICY, PAPER_SCHEMA, RESPONSE_SCHEMA, MARK_SCHEMA,
+  PAPER_INSTRUCTIONS, RESPONSE_INSTRUCTIONS, MARK_INSTRUCTIONS,
+  validatePaper, validateResponse, validateMarks } from './grounding.js';
 
 const selectAssessment = db.prepare('SELECT * FROM assessments WHERE id = ?');
-const selectFiles = db.prepare(
-  'SELECT * FROM assessment_files WHERE assessment_id = ? AND kind = ? ORDER BY position, id'
-);
+const selectFiles = db.prepare('SELECT * FROM assessment_files WHERE assessment_id = ? AND kind = ? ORDER BY position, id');
+const markFailed = db.prepare("UPDATE assessments SET ai_status = 'failed', ai_error = ?, updated_at = datetime('now') WHERE id = ?");
+const saveResult = db.prepare(`UPDATE assessments SET ai_status = 'done', ai_error = NULL,
+  ai_result = @result, ai_model = @model, ai_evaluated_at = datetime('now'),
+  score = @score, max_score = @max_score, status = 'evaluated', updated_at = datetime('now') WHERE id = @id`);
+const saveCheckpoint = db.prepare('UPDATE assessments SET evaluation_checkpoint = ?, evaluation_progress = ? WHERE id = ?');
+const parse = (text) => { try { return JSON.parse(text); } catch { return null; } };
 
-const markRunning = db.prepare(
-  `UPDATE assessments SET ai_status = 'running', ai_error = NULL, updated_at = datetime('now') WHERE id = ?`
-);
-const markFailed = db.prepare(
-  `UPDATE assessments SET ai_status = 'failed', ai_error = ?, updated_at = datetime('now') WHERE id = ?`
-);
-const saveResult = db.prepare(
-  `UPDATE assessments
-      SET ai_status = 'done', ai_error = NULL, ai_result = @result, ai_model = @model,
-          ai_evaluated_at = datetime('now'), score = @score, max_score = @max_score,
-          status = 'evaluated', updated_at = datetime('now')
-    WHERE id = @id`
-);
-
-// Checks an assessment can be marked and starts marking it, counting the
-// marks the way `marking` says ('standard' or 'lenient'). Returns an error
-// message for the person if it cannot start, or null once it is running.
 export function startEvaluation(assessmentId, marking = 'standard') {
   const assessment = selectAssessment.get(assessmentId);
   if (!assessment) return 'Assessment not found.';
-  if (!openaiConfigured()) {
-    return 'OpenAI is not set up on the server: the OPENAI_API_KEY secret is missing.';
-  }
-  if (assessment.ai_status === 'running') return null; // already on it
-
+  if (!openaiConfigured()) return 'OpenAI is not set up on the server: the OPENAI_API_KEY secret is missing.';
+  if (assessment.ai_status === 'running') return null;
+  if (marking !== 'standard') return 'Use Standard marking: unanswered questions in a supplied complete section score zero. Entire sections not supplied are excluded.';
   const paper = selectFiles.all(assessment.id, 'question_paper');
   const library = sittingPapers(assessment.id);
   const response = selectFiles.all(assessment.id, 'response');
-  const hasPaper = paper.length || library.length;
-  if (!hasPaper && !response.length) return 'Choose the question paper from the library or scan it, and scan the teacher’s answer paper, first.';
-  if (!hasPaper) return 'Choose the question paper from the library, or scan or upload it, first.';
-  if (!response.length) return 'Scan or upload the teacher’s answer paper first.';
-
-  const unsupported = [...paper, ...response].filter((file) => !OPENAI_IMAGE_TYPES.has(file.mime_type));
-  if (unsupported.length) {
-    return `OpenAI can only read JPG, PNG, WEBP or GIF pages. Remove and re-upload these in one of those formats: ${unsupported
-      .map((file) => file.original_name)
-      .join(', ')}.`;
+  if (!paper.length && !library.length) return 'Choose the administered question paper from the library, or upload it, first.';
+  if (!response.length) return 'Upload the teacher’s answer paper first.';
+  if ([...paper, ...response].some((file) => !OPENAI_IMAGE_TYPES.has(file.mime_type))) return 'Re-upload scanned pages as JPG, PNG, WEBP or GIF.';
+  const teacher = db.prepare('SELECT * FROM teachers WHERE id = ?').get(assessment.teacher_id);
+  const school = db.prepare('SELECT * FROM schools WHERE id = ?').get(assessment.school_id);
+  for (const p of library) {
+    const sections = assessment.section ? [assessment.section] : String(p.sections).split(',').filter(Boolean);
+    for (const section of sections) {
+      const problem = paperCompatibilityProblem(p, teacher, school, section);
+      if (problem) return problem;
+    }
   }
-
-  markRunning.run(assessment.id);
-  keepAwake(markWithSecondTry(assessment, { paper, library, response }, markingOf(marking)));
+  // An explicit re-evaluation of a completed result starts fresh. Checkpoints
+  // resume interrupted/failed work only, never freeze a requested re-mark.
+  if (assessment.ai_status === 'done') db.prepare('UPDATE assessments SET evaluation_checkpoint = NULL WHERE id = ?').run(assessment.id);
+  db.prepare("UPDATE assessments SET ai_status = 'running', ai_error = NULL, updated_at = datetime('now') WHERE id = ?").run(assessment.id);
+  keepAwake(markWithSecondTry(assessment, { paper, library, response }, digest(currentSourceBasis(assessment.id))));
   return null;
 }
 
-// A marking that fails for a reason that should pass by itself, such as OpenAI
-// or Gemini staying too busy or too slow while a school's papers are marked
-// together, is tried once more after a minute or two, as pressing Evaluate
-// again would. Any other failure, or a second one, is shown with its reason.
 const SECOND_TRY_AFTER_MS = Number(process.env.SECOND_TRY_AFTER_MS ?? 60_000);
-
-async function markWithSecondTry(assessment, files, marking) {
+async function markWithSecondTry(assessment, files, originalSourceDigest) {
   for (let attempt = 1; ; attempt += 1) {
-    try {
-      await evaluate(assessment, files, marking);
-      return;
-    } catch (error) {
+    try { await evaluate(assessment, files, attempt, originalSourceDigest); return; }
+    catch (error) {
       if (error.passing && attempt === 1) {
-        console.warn(`Marking assessment ${assessment.id} failed (${error.message}); trying once more.`);
+        db.prepare('UPDATE assessments SET evaluation_progress = ? WHERE id = ?').run(JSON.stringify({ stage: 'retry_wait', attempt, error: error.userMessage ?? error.message }), assessment.id);
         await new Promise((resolve) => setTimeout(resolve, SECOND_TRY_AFTER_MS * (1 + Math.random())));
         continue;
       }
@@ -168,123 +75,118 @@ async function markWithSecondTry(assessment, files, marking) {
   }
 }
 
-async function evaluate(assessment, { paper, library, response }, marking) {
-  const assessmentId = assessment.id;
-  // Only scanned pages can have been filed the wrong way round.
-  const canSwap = paper.length > 0 && !library.length;
-  const language = await answerLanguage({ paper: canSwap ? paper : [], response });
+export const evaluationConfig = () => ({
+  pipeline: PIPELINE_VERSION, rubric: RUBRIC_POLICY, model: OPENAI_MODEL, reading_model: GEMINI_MODEL,
+  reading_version: READING_VERSION, writing_version: WRITING_VERSION,
+  prompts: digest([PAPER_INSTRUCTIONS, RESPONSE_INSTRUCTIONS, MARK_INSTRUCTIONS, PAPER_SCHEMA, RESPONSE_SCHEMA, MARK_SCHEMA]),
+});
 
-  let marks;
-  let pagesSwapped;
-  let reading;
-  let writingSource;
-  if (language.language === 'english') {
-    marks = await markAnswers(assessment, false, [
-      ...(await questionPaperInputs({ paper, library })),
-      { type: 'input_text', text: `TEACHER'S RESPONSE (${response.length} page${response.length === 1 ? '' : 's'}):` },
-      ...(await pageInputs("TEACHER'S RESPONSE", response)),
-    ]);
-    pagesSwapped = canSwap && marks.pages_swapped === true;
-    reading = { ...language, read_by: 'openai', model: OPENAI_MODEL };
-    writingSource = { pages: pagesSwapped ? paper : response };
-  } else {
-    // Gemini reads the pages the answers are on, which are the other group
-    // when the two were filed the wrong way round. Pages Gemini would not
-    // read go to the model as their scans.
-    const [questionPages, answerPages] = language.pages_swapped ? [response, paper] : [paper, response];
-    const texts = await readAnswers(answerPages, language.languages);
-    const unread = texts.flatMap((text, i) => (text === null ? [i + 1] : []));
-    const none = unread.length === texts.length;
-    marks = await markAnswers(
-      assessment,
-      true,
-      [
-        ...(await questionPaperInputs({ paper: questionPages, library })),
-        { type: 'input_text', text: `TEACHER'S RESPONSE (${texts.length} page${texts.length === 1 ? '' : 's'}), ${none ? 'as the scanned pages' : 'as read from the scans'}:` },
-        ...(await readingInputs(texts, answerPages)),
-      ],
-      scannedPagesNote(unread, texts.length)
-    );
-    pagesSwapped = language.pages_swapped;
-    reading = { ...language, read_by: none ? 'openai' : 'gemini', model: none ? OPENAI_MODEL : GEMINI_MODEL, unread_pages: unread };
-    writingSource = none ? { pages: answerPages } : { reading: texts, pages: answerPages };
-  }
-  const questions = scopeToSection(marks.questions ?? [], assessment.section);
-  if (!questions.length) {
-    throw friendly('OpenAI found no questions to mark. Check the question paper pages are readable and the right way up, then press Evaluate again.');
-  }
-  // A check that fails leaves the marks as they are; it is tried again when
-  // the teacher's reports are built.
-  let writing = null;
+async function evaluate(assessment, files, attempt, originalSourceDigest) {
+  const source = currentSourceBasis(assessment.id);
+  if (digest(source) !== originalSourceDigest) throw friendly('The assessment sources or teacher details changed while evaluation was pending. Evaluate again using the current inputs.');
+  if ([...source.files, ...source.papers].some((f) => f.sha256 === 'missing')) throw friendly('A source file is missing. Restore it before evaluating.');
+  const config = evaluationConfig();
+  const basis = digest({ source, config });
+  const prior = parse(selectAssessment.get(assessment.id)?.evaluation_checkpoint);
+  const checkpoint = prior?.basis === basis ? prior : { basis, stages: {} };
+  const assertUnchanged = () => {
+    if (digest(currentSourceBasis(assessment.id)) !== digest(source)) throw friendly('The teacher, source pages or question paper changed during evaluation. Evaluate again using the current sources.');
+  };
+  const stage = async (name, work) => {
+    assertUnchanged();
+    saveCheckpoint.run(JSON.stringify(checkpoint), JSON.stringify({ stage: name, attempt, resumed: name in checkpoint.stages }), assessment.id);
+    if (!(name in checkpoint.stages)) {
+      checkpoint.stages[name] = await work();
+      assertUnchanged();
+      saveCheckpoint.run(JSON.stringify(checkpoint), JSON.stringify({ stage: name, attempt, complete: true }), assessment.id);
+    }
+    return checkpoint.stages[name];
+  };
+  const language = await stage('language', () => answerLanguage({ paper: files.library.length ? [] : files.paper, response: files.response }));
+  const pagesSwapped = !files.library.length && files.paper.length > 0 && language.pages_swapped === true;
+  const paper = pagesSwapped ? files.response : files.paper;
+  const response = pagesSwapped ? files.paper : files.response;
+  const sources = await stage('source_catalogue', async () => [
+    ...await Promise.all(files.library.map(async (p) => {
+      const loading = getDocument({ data: new Uint8Array(await fs.readFile(path.join(UPLOADS_DIR, p.stored_name))), isEvalSupported: false });
+      try {
+        const pdf = await loading.promise;
+        return { source_id: `library:${p.id}`, title: p.title, kind: 'pdf', pages: pdf.numPages, sections: p.sections, subject: p.subject, levels: p.levels };
+      } finally { await loading.destroy(); }
+    })),
+    ...paper.map((p, i) => ({ source_id: `scan:${p.id}`, title: `QUESTION PAPER scanned page ${i + 1}`, kind: 'image', pages: 1 })),
+  ]);
+  const expectedTeacher = db.prepare('SELECT id, name, grade, subjects FROM teachers WHERE id = ?').get(assessment.teacher_id);
+  const scope = assessment.section ? `This sitting is Section ${assessment.section} only.` : 'This sitting can contain any of the selected paper sections.';
+  const ledger = await stage('paper_rubric', async () => validatePaper(await requestJson({
+    instructions: `${PAPER_INSTRUCTIONS}\n${scope}`,
+    content: [{ type: 'input_text', text: `EXPECTED TEACHER PROFILE: ${JSON.stringify(expectedTeacher)}\nReject a printed subject/level inconsistent with this profile; report the conflict in issues. SOURCE CATALOGUE (in input order): ${JSON.stringify(sources)}` }, ...(await questionPaperInputs({ paper, library: files.library }))],
+    name: 'grounded_question_ledger', schema: PAPER_SCHEMA, task: 'read the question paper and provisional rubric', retry: 'Check the sources and press Evaluate again.',
+  }), sources, assessment.section));
+
+  const extraction = await stage('reading', async () => {
+    if (language.language === 'english') return { texts: null, pages: [], read_by: 'openai', model: OPENAI_MODEL };
+    const detail = await readAnswers(response, language.languages, { includeDetails: true });
+    const allFallback = detail.texts.every((text) => !String(text ?? '').trim());
+    return { ...detail, read_by: allFallback ? 'openai' : 'gemini', model: allFallback ? OPENAI_MODEL : GEMINI_MODEL, extractor_model: GEMINI_MODEL };
+  });
+  const teacher = expectedTeacher;
+  const matched = await stage('response_matching', async () => validateResponse(await requestJson({
+    instructions: `${RESPONSE_INSTRUCTIONS}\n${scope}`,
+    content: [
+      { type: 'input_text', text: `EXPECTED TEACHER: ${JSON.stringify(teacher)}\nIMMUTABLE QUESTION LEDGER: ${JSON.stringify(ledger)}\nSOURCE IDENTITY REVIEW: ${JSON.stringify(response.map((p, i) => ({ page: i + 1, source_metadata: p.source_metadata })))}. Confirmed identity review can resolve an uncertain spelling or cross-script name, never a definite different person.` },
+      ...(extraction.texts ? await readingInputs(extraction.texts, response, extraction.pages) : await pageInputs("TEACHER'S RESPONSE", response)),
+    ],
+    name: 'grounded_response_extraction', schema: RESPONSE_SCHEMA, task: 'read and match the response evidence', retry: 'Review the source pages and try again.',
+  }), ledger, response.length, assessment.section, { teacher, pages: response }));
+
+  const marked = await stage('marking_validation', async () => validateMarks(await requestJson({
+    instructions: MARK_INSTRUCTIONS,
+    content: [{ type: 'input_text', text: JSON.stringify({ ledger, response: matched }) }],
+    name: 'grounded_criterion_marks', schema: MARK_SCHEMA, task: 'mark the grounded responses', retry: 'Press Evaluate again after reviewing the source evidence.',
+  }), ledger, matched));
+  let writing;
   try {
-    writing = await checkWriting(questions, writingSource);
+    writing = await stage('writing', () => checkWriting(marked.questions, extraction.texts
+      ? { reading: extraction.texts, readingDetails: extraction.pages, pages: response } : { pages: response }));
   } catch (error) {
-    console.error(`Checking the writing for assessment ${assessmentId} failed:`, error);
     writing = { problem: error.userMessage ?? `The writing could not be checked: ${error.message}` };
   }
-  const result = normalise({ ...marks, marking, reading, writing, questions, pages_swapped: pagesSwapped });
-  saveMarking(assessmentId, result);
-
-  // The teacher's reports for this test are rewritten to take in the new
-  // sections. Pressing Evaluate is what asked for this, so it is not a
-  // marking that started on its own.
-  const saved = selectAssessment.get(assessmentId);
+  assertUnchanged();
+  const result = normalise({ ...marked, marking: 'standard', reading: { ...language, ...extraction }, writing, pages_swapped: pagesSwapped,
+    audit: { ...marked.audit, source, source_digest: digest(source), config, basis } });
+  saveMarking(assessment.id, result);
+  db.prepare('UPDATE assessments SET evaluation_progress = ? WHERE id = ?').run(JSON.stringify({ stage: 'complete', attempt, basis }), assessment.id);
+  const saved = selectAssessment.get(assessment.id);
   if (saved.test_id) queueTeacherReports(saved.teacher_id, saved.test_id);
 }
 
-// `read` says the response is Gemini's reading of the answers rather than the
-// scanned pages, and `note` says which pages of it are scans all the same.
-function markAnswers(assessment, read, content, note = '') {
-  return requestJson({
-    instructions: instructionsFor(read, note) + sectionInstructions(assessment.section),
-    content,
-    name: 'assessment_marks',
-    schema: RESULT_SCHEMA,
-    task: 'mark this',
-    retry: 'Press Evaluate to try again.',
-  });
-}
-
-// A sitting of one section is marked on that section alone, even when the
-// question paper has others.
-function sectionInstructions(section) {
-  if (!section) return '';
-  return `
-
-This sitting is for Section ${section} only: the teacher sat just that section on this date. Mark only the Section ${section} questions, give every row the section "Section ${section}", and leave out the other sections even if the question paper has them.`;
-}
-
-// Rows from other sections are dropped, and every row is filed under the
-// sitting's section, including on papers that name no sections at all.
+// Kept for callers and regression coverage; a mismatch is never relabelled.
 export function scopeToSection(questions, section) {
   if (!section) return questions;
   const inSection = questions.filter((q) => sectionKey(q.section) === section);
-  return (inSection.length ? inSection : questions).map((q) => ({ ...q, section: `Section ${section}` }));
+  if (!inSection.length) throw friendly(`No questions identify Section ${section}; check the selected paper.`);
+  return inSection;
 }
-
-// When the marking found the question paper and the response filed the wrong
-// way round, it marked them the right way round, and the stored pages are
-// swapped back to match, so the evaluation screen shows them correctly.
 const saveMarking = db.transaction((assessmentId, result) => {
-  saveResult.run({
-    id: assessmentId,
-    result: JSON.stringify(result),
-    model: OPENAI_MODEL,
-    score: result.total_score,
-    max_score: result.max_score,
-  });
-  if (result.pages_swapped) swapScanKinds(assessmentId);
+  if (result.pages_swapped) {
+    swapScanKinds(assessmentId);
+    // The persisted provenance follows the verified physical swap.
+    result.audit.initial_basis = result.audit.basis;
+    result.audit.source = currentSourceBasis(assessmentId);
+    result.audit.source_digest = digest(result.audit.source);
+    result.audit.basis = digest({ source: result.audit.source, config: result.audit.config });
+  }
+  saveResult.run({ id: assessmentId, result: JSON.stringify(result), model: OPENAI_MODEL, score: result.total_score, max_score: result.max_score });
 });
 
-// Totals are added up here rather than taken from the model, and marks are
-// kept within each question's maximum. Lenient marking leaves the questions
-// the teacher did not attempt out of both totals.
 export function normalise(raw) {
   const marking = markingOf(raw.marking);
   const questions = (raw.questions ?? []).map((q) => {
     const max = Math.max(0, Number(q.max_marks) || 0);
     const awarded = Math.min(max, Math.max(0, Number(q.marks_awarded) || 0));
     return {
+      ...q,
       section: String(q.section ?? '').trim(),
       question: String(q.question ?? '').trim(),
       question_text: String(q.question_text ?? '').trim(),
@@ -299,6 +201,8 @@ export function normalise(raw) {
   const sum = (key) => Math.round(counted.reduce((total, q) => total + q[key], 0) * 100) / 100;
   return {
     marking,
+    submission: raw.submission ?? null,
+    audit: raw.audit ?? null,
     reading: readingOf(raw.reading),
     writing: writingOf(raw.writing, questions),
     pages_swapped: raw.pages_swapped === true,
@@ -319,10 +223,12 @@ function readingOf(reading) {
   if (!reading || typeof reading !== 'object') return null;
   const unread = (Array.isArray(reading.unread_pages) ? reading.unread_pages : []).map(Number).filter(Number.isInteger);
   return {
+    pages: Array.isArray(reading.pages) ? reading.pages : [],
     language: String(reading.language ?? ''),
     languages: (reading.languages ?? []).map(String),
     read_by: reading.read_by === 'gemini' ? 'gemini' : 'openai',
     model: String(reading.model ?? ''),
+    extractor_model: String(reading.extractor_model ?? ''),
     ...(unread.length ? { unread_pages: unread } : {}),
   };
 }

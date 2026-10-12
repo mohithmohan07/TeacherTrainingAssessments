@@ -17,6 +17,7 @@
 // writing.js, is kept with the results; sittings marked before Evaluate
 // checked it are checked first.
 import db from './db.js';
+import { currentSourceBasis } from './provenance.js';
 import { OPENAI_MODEL, friendly, openaiConfigured, requestJson } from './openai.js';
 import { addMissingAnswers } from './answers.js';
 import { WRITING_NAME, addMissingWriting, schoolWriting, teacherWriting, writingExamples } from './writing.js';
@@ -51,7 +52,8 @@ import { keepAwake } from './idle.js';
 
 // The layout reports are written in. A report written in an earlier one is
 // not shown: it counts as out of date and the page asks for a rebuild.
-export const LAYOUT = 2;
+export const LAYOUT = 3;
+export const REPORT_CONTRACT_VERSION = 'grounded-reports-v1';
 
 const selectTeacher = db.prepare(
   `SELECT t.*, s.name AS school_name FROM teachers t JOIN schools s ON s.id = t.school_id WHERE t.id = ?`
@@ -140,6 +142,8 @@ function reportRowFor(kind, schoolId, testId, teacherId) {
 // that anyone can understand every line on its own, without the question
 // paper or the teacher's answers to hand.
 const PLAIN_WORDS = `Use plain, everyday English that anyone can understand: a parent, a new teacher or a school manager, without the question paper or the teacher's answers to hand. Every point must make sense on its own.
+- Write only the assessment findings and practical guidance. Never describe report-generation steps, assistants, model providers, prompts, automated processing or how this report was produced. Academic discussion of AI or OpenAI in a question or answer is legitimate subject content and must be preserved.
+- Do not add Credit/Criterion/Evidence tables, scoring-reason tables or a "How to Read These Results" section; the report layout already supplies the question marks, answers and guidance.
 - Never refer to question numbers (such as "Q1A" or "question 3") and never put marks in brackets; the tables beside your text show them. Say instead what the teacher was asked to do and what they did or missed.
 - Avoid teaching jargon and technical terms, such as pedagogy, formative assessment, scaffolding, differentiation, task-focused or phishing. When a term cannot be avoided, explain it in a few words, such as "phishing emails (fake emails that try to steal passwords)".
 - Titles name the skill or the gap in everyday words, such as "Giving clear instructions" or "Keeping children safe online", not labels such as "Task-focused teaching".
@@ -301,7 +305,59 @@ function describeResults(teacher, test, sections) {
   return lines.filter((line) => line !== null).join('\n');
 }
 
-const text = (value, max = 1200) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+// Keep quoted academic statements together, including multiple sentences in
+// one quotation. Apostrophes inside words are not quotation boundaries.
+function narrativeSentences(value) {
+  const valueText = String(value ?? '').replace(/\s+/gu, ' ').trim();
+  const quotes = [];
+  const sentences = [];
+  let start = 0;
+  for (let i = 0; i < valueText.length; i += 1) {
+    const char = valueText[i];
+    const before = valueText[i - 1] ?? '';
+    const after = valueText[i + 1] ?? '';
+    const betweenLetters = /[\p{L}\p{N}]/u.test(before) && /[\p{L}\p{N}]/u.test(after);
+    let closedQuote = false;
+    if (char === '“' || char === '‘') quotes.push(char);
+    else if ((char === '”' && quotes.at(-1) === '“') || (char === '’' && quotes.at(-1) === '‘' && !betweenLetters)) {
+      quotes.pop(); closedQuote = true;
+    } else if (char === '"' || (char === "'" && !betweenLetters)) {
+      if (quotes.at(-1) === char) { quotes.pop(); closedQuote = true; }
+      else if (char === '"' || !/[\p{L}\p{N}]/u.test(before)) quotes.push(char);
+    }
+    let endMark = char;
+    if (closedQuote) {
+      let n = i - 1;
+      while (n >= 0 && /["'”’]/u.test(valueText[n])) n -= 1;
+      endMark = valueText[n] ?? '';
+    }
+    if (!quotes.length && /[.!?]/u.test(endMark) && (!after || /\s/u.test(after))) {
+      sentences.push(valueText.slice(start, i + 1).trim());
+      start = i + 1;
+    }
+  }
+  if (start < valueText.length) sentences.push(valueText.slice(start).trim());
+  return sentences;
+}
+
+// Suppress only an explicit producer statement at the start of unquoted
+// narrative. Embedded quotations and third-person academic descriptions are
+// legitimate evidence, even when they mention an assistant or OpenAI. Never
+// apply this filter to the source question, answer, expected answer or scan.
+export function reportNarrative(value) {
+  return narrativeSentences(value).filter((sentence) => !(
+    /^(?:this|your) report (?:was|is|has been) (?:generated|produced|created|written|prepared) by (?:an? )?(?:AI(?: assistant| model)?|OpenAI|ChatGPT|assistant|language model)\b/iu.test(sentence) ||
+    /^(?:OpenAI|ChatGPT|(?:an? |the )?(?:AI assistant|AI model|language model)) (?:generated|produced|created|wrote|prepared) (?:this|your) report\b/iu.test(sentence) ||
+    /^as an? (?:AI(?: assistant| model)?|assistant|language model),? (?:I|we|my|our)\b/iu.test(sentence) ||
+    /^I (?:used|asked|prompted) (?:OpenAI|ChatGPT|an? (?:AI(?: assistant| model)?|assistant|language model)) to (?:generate|produce|create|write|prepare) (?:this|your) report\b/iu.test(sentence)
+  )).join(' ');
+}
+
+const cleanNarrative = (value) => typeof value === 'string' ? reportNarrative(value)
+  : Array.isArray(value) ? value.map(cleanNarrative)
+    : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cleanNarrative(item)])) : value;
+
+const text = (value, max = 1200) => reportNarrative(value).slice(0, max);
 const strings = (list, most = 8) => (Array.isArray(list) ? list.map((item) => text(item, 600)).filter(Boolean).slice(0, most) : []);
 const points = (list, most = 6) =>
   (Array.isArray(list) ? list : [])
@@ -321,7 +377,7 @@ export function questionsOf(section) {
     marks_awarded: Number(q.marks_awarded) || 0,
     blank: isBlank(q),
     counted: counts(q, section.marking),
-    feedback: String(q.feedback ?? '').trim(),
+    feedback: reportNarrative(q.feedback),
     teacher_answer: clip(q.teacher_answer, 400),
     expected_answer: clip(q.expected_answer, 700),
   }));
@@ -331,8 +387,8 @@ export function questionsOf(section) {
 // A teacher's own reports keep the questions too, so a printed report always
 // shows the marks it was written from.
 function snapshot(sections, { questions = false } = {}) {
-  return sections.map(({ key, name, title, subject, awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at, marking, left_out, left_out_marks, writing, ...rest }) => ({
-    key, name, title, ...(subject ? { subject } : {}), awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at, marking, left_out, left_out_marks,
+  return sections.map(({ key, name, title, subject, awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at, marking, left_out, left_out_marks, writing, evaluation_stale, ...rest }) => ({
+    key, name, title, ...(subject ? { subject } : {}), awarded, max, percent, grade, grade_label, date, assessment_id, evaluated_at, marking, left_out, left_out_marks, evaluation_stale: Boolean(evaluation_stale),
     ...(questions ? { questions: questionsOf({ ...rest, marking }), writing: writing ?? null } : {}),
   }));
 }
@@ -341,7 +397,9 @@ async function writeTeacherReports(teacherId, testId, reportId) {
   const teacher = selectTeacher.get(teacherId);
   const test = selectTest.get(testId);
   if (!teacher || !test) throw friendly('This teacher or test no longer exists.');
-  if (!teacherResults(teacherId, testId).length) throw friendly('There are no marked sections for this teacher in this test yet. Press Evaluate first.');
+  const initial = teacherResults(teacherId, testId);
+  if (!initial.length) throw friendly('There are no marked sections for this teacher in this test yet. Press Evaluate first.');
+  if (initial.some((s) => s.evaluation_stale)) throw friendly('The source papers have changed. Re-evaluate them before building a report.');
 
   // Papers marked before the marking said what should have been answered get
   // it now; the results are then read again to take it in.
@@ -349,10 +407,14 @@ async function writeTeacherReports(teacherId, testId, reportId) {
   const writingProblems = await addMissingWriting(teacherResults(teacherId, testId));
   const sections = teacherResults(teacherId, testId);
   if (!sections.length) throw friendly('There are no marked sections for this teacher in this test yet. Press Evaluate first.');
+  if (sections.some((s) => s.evaluation_stale)) throw friendly('The source papers have changed. Re-evaluate them before building a report.');
 
   const framework = getFramework();
   const plan = trainingPlanFor(sections, framework);
-  const raw = await requestJson({
+  // Capture before the request: changed sources during writing must leave
+  // this report stale, rather than blessing old text with a newer basis.
+  const basis = teacherReportBasis(sections, { teacherId, testId, framework });
+  const response = await requestJson({
     instructions: TEACHER_INSTRUCTIONS + (plan?.path ? TEACHER_PLAN_INSTRUCTIONS : ''),
     content: [{ type: 'input_text', text: describeResults(teacher, test, sections) + describeTeacherPlan(plan, framework) }],
     name: 'teacher_reports',
@@ -360,6 +422,7 @@ async function writeTeacherReports(teacherId, testId, reportId) {
     task: 'write this report',
     retry: 'Press Build report to try again.',
   });
+  const raw = cleanNarrative(response);
 
   const t = raw.teacher_report ?? {};
   const m = raw.management_report ?? {};
@@ -412,7 +475,7 @@ async function writeTeacherReports(teacherId, testId, reportId) {
   saveReport.run({
     id: reportId,
     content: JSON.stringify(content),
-    basis: fingerprint(resultsBasis(sections)),
+    basis,
     model: OPENAI_MODEL,
   });
 }
@@ -422,9 +485,11 @@ async function writeTeacherReports(teacherId, testId, reportId) {
 export function queueTeacherReports(teacherId, testId) {
   const teacher = selectTeacher.get(teacherId);
   const test = selectTest.get(testId);
-  if (!teacher || !test) return 'Teacher or test not found.';
+  if (!teacher || !test || teacher.school_id !== test.school_id) return 'Teacher or test not found.';
+  const sections = teacherResults(teacherId, testId);
+  if (!sections.length) return 'There are no marked sections for this teacher in this test yet. Press Evaluate first.';
+  if (sections.some((s) => s.evaluation_stale)) return 'The source papers have changed. Re-evaluate them before building a report.';
   if (!openaiConfigured()) return 'OpenAI is not set up on the server: the OPENAI_API_KEY secret is missing.';
-  if (!teacherResults(teacherId, testId).length) return 'There are no marked sections for this teacher in this test yet. Press Evaluate first.';
 
   const row = reportRowFor('teacher', teacher.school_id, testId, teacherId);
   queue(`teacher:${teacherId}:${testId}`, row, () => writeTeacherReports(teacherId, testId, row.id));
@@ -435,9 +500,23 @@ export function queueTeacherReports(teacherId, testId) {
 // be shown.
 export const isOldLayout = (report) => Boolean(report?.content) && report.content.layout !== LAYOUT;
 
-// Whether the marks have changed since the report was written.
+// Every input that can change the content or interpretation belongs in the
+// cache key, including current file bytes, not just the saved marking.
+export function teacherReportBasis(sections, { teacherId, testId, framework = getFramework() } = {}) {
+  const teacher = teacherId ? selectTeacher.get(teacherId) : null;
+  const test = testId ? selectTest.get(testId) : null;
+  return fingerprint({
+    contract: reportContract('teacher'),
+    results: resultsBasis(sections),
+    sources: [...new Set(sections.map((s) => s.assessment_id).filter(Boolean))].sort((a, b) => a - b).map((id) => [id, currentSourceBasis(id)]),
+    teacher: teacher && [teacher.name, teacher.grade, teacher.subjects, teacher.school_name],
+    test: test && [test.id, test.name],
+    framework,
+  });
+}
+
 export function isStale(report, sections) {
-  return Boolean(report?.basis) && report.basis !== fingerprint(resultsBasis(sections));
+  return Boolean(report?.content) && (sections.some((s) => s.evaluation_stale) || !report.basis || report.basis !== teacherReportBasis(sections, { teacherId: report.teacher_id, testId: report.test_id }));
 }
 
 // Whether a teacher's report was written before reports showed what the
@@ -503,10 +582,12 @@ export function isOutOfDate(report, sections, framework = getFramework()) {
 export function queueTestReports(schoolId, testId) {
   const test = selectTest.get(testId);
   if (!test || test.school_id !== schoolId) return { error: 'Test not found for this school.' };
+  const teachers = selectTeachersOfSchool.all(schoolId);
+  if (teachers.some((teacher) => teacherResults(teacher.id, testId).some((s) => s.evaluation_stale))) return { error: 'Some source papers have changed. Re-evaluate those sittings before building reports.' };
   if (!openaiConfigured()) return { error: 'OpenAI is not set up on the server: the OPENAI_API_KEY secret is missing.' };
   const framework = getFramework();
   let started = 0;
-  for (const teacher of selectTeachersOfSchool.all(schoolId)) {
+  for (const teacher of teachers) {
     const sections = teacherResults(teacher.id, testId);
     if (!sections.length) continue;
     const report = findReport('teacher', testId, teacher.id);
@@ -529,7 +610,7 @@ function groupFigures(members, keys) {
     // A teacher with Section B papers in two subjects counts once, and each
     // paper's percentage goes into the average.
     sat[key] = members.filter((t) => t.sections.some((s) => s.key === key && s.percent !== null)).length;
-    averages[key] = percents.length ? Math.round(percents.reduce((a, b) => a + b, 0) / percents.length) : null;
+    averages[key] = percents.length ? marks(percents.reduce((a, b) => a + b, 0) / percents.length) : null;
   }
   const needs = Object.fromEntries(NEEDS.map((n) => [n.key, members.filter((t) => t.need === n.key).length]));
   return { teachers: members.length, averages, sat, needs };
@@ -566,6 +647,13 @@ export function schoolOverview(schoolId, testId, { examples = false } = {}) {
     potential: potentialFor(sections),
     need: needOf(sections),
     writing: teacherWriting(sections),
+    // The school narrative depends on answers and writing detail even when
+    // marks and rounded percentages happen to stay the same.
+    input_basis: teacherReportBasis(sections, { teacherId: teacher.id, testId }),
+    report_findings: (() => {
+      const report = findReport('teacher', testId, teacher.id);
+      return report?.status === 'done' && !isOutOfDate(report, sections) ? findingsOf(report) : [];
+    })(),
   }));
   const writingResults = results.filter((r) => r.sections.length).map(({ teacher, sections }) => ({ name: teacher.name, sections }));
 
@@ -582,7 +670,7 @@ export function schoolOverview(schoolId, testId, { examples = false } = {}) {
       sat: new Set(results.map((r) => r.teacher.id)).size,
       // More than sat when some teachers took Section B in two subjects.
       papers: results.length,
-      average: results.length ? Math.round(results.reduce((sum, r) => sum + r.s.percent, 0) / results.length) : null,
+      average: results.length ? marks(results.reduce((sum, r) => sum + r.s.percent, 0) / results.length) : null,
       counts,
       // Colleagues strong in a section alongside those who need support in it.
       helpers: [...new Set(results.filter((r) => r.s.grade === 'A' || r.s.grade === 'B').map((r) => r.teacher.name))],
@@ -592,6 +680,11 @@ export function schoolOverview(schoolId, testId, { examples = false } = {}) {
 
   const assessed = teachers.filter((t) => t.sections.length);
   return {
+    context: {
+      school_name: db.prepare('SELECT name FROM schools WHERE id = ?').get(schoolId)?.name ?? '',
+      test_name: selectTest.get(testId)?.name ?? '',
+      framework: getFramework(),
+    },
     teachers,
     section_stats: sectionStats,
     stage_stats: stageStats(assessed, keys),
@@ -674,9 +767,23 @@ const SCHOOL_SCHEMA = {
   },
 };
 
-// What the school report is written from: each teacher's stage and results.
-function schoolBasis(overview) {
-  return fingerprint(overview.teachers.map((t) => [t.id, t.stage, t.sections.map((s) => [s.key, s.assessment_id, s.percent]), t.writing?.score ?? null]));
+// Fingerprint instructions and schema themselves so a prompt/model/layout
+// change cannot accidentally reuse a previous report.
+export function reportContract(kind) {
+  return fingerprint({
+    version: REPORT_CONTRACT_VERSION,
+    layout: LAYOUT,
+    model: OPENAI_MODEL,
+    instructions: kind === 'school' ? [SCHOOL_INSTRUCTIONS, SCHOOL_PLAN_INSTRUCTIONS, SCHOOL_WRITING_INSTRUCTIONS] : [TEACHER_INSTRUCTIONS, TEACHER_PLAN_INSTRUCTIONS],
+    schema: kind === 'school' ? [SCHOOL_SCHEMA, SCHOOL_WRITING_SCHEMA] : [TEACHER_SCHEMA, TEACHER_PLAN_SCHEMA],
+  });
+}
+
+export function schoolBasis(overview) {
+  // Exclude optional examples: they are derived from the writing details
+  // already covered by each teacher's input_basis.
+  const { writing_examples, ...inputs } = overview;
+  return fingerprint({ contract: reportContract('school'), inputs });
 }
 
 // The main findings of a teacher's own report, for the school report.
@@ -692,7 +799,9 @@ async function writeSchoolReport(schoolId, testId, reportId) {
   const test = selectTest.get(testId);
   // The examples of errors go to the writer only, not into the report.
   const { writing_examples: examples, ...overview } = schoolOverview(schoolId, testId, { examples: true });
+  const basis = schoolBasis(overview);
   if (!overview.assessed) throw friendly('No teacher in this test has marked sections yet.');
+  if (overview.teachers.some((t) => t.sections.some((s) => s.evaluation_stale))) throw friendly('Some source papers have changed. Re-evaluate them before building the school report.');
 
   const keys = overview.section_stats.map((s) => s.key);
   const teachers = (n) => `${n} teacher${n === 1 ? '' : 's'}`;
@@ -720,7 +829,7 @@ async function writeSchoolReport(schoolId, testId, reportId) {
     'Teachers:',
   ];
   for (const teacher of overview.teachers.filter((t) => t.sections.length)) {
-    const found = findingsOf(findReport('teacher', testId, teacher.id));
+    const found = teacher.report_findings;
     const about = [stageName(teacher.stage), teacher.grade, teacher.subjects].filter(Boolean).join(', ');
     lines.push(
       `- ${teacher.name}${about ? ` (${about})` : ''}: ` +
@@ -733,7 +842,7 @@ async function writeSchoolReport(schoolId, testId, reportId) {
 
   const training = schoolTraining(overview.teachers, getFramework());
   const planning = Boolean(training?.paths.length);
-  const raw = await requestJson({
+  const response = await requestJson({
     instructions: SCHOOL_INSTRUCTIONS + (planning ? SCHOOL_PLAN_INSTRUCTIONS : '') + (overview.writing ? SCHOOL_WRITING_INSTRUCTIONS : ''),
     content: [{ type: 'input_text', text: lines.join('\n') + describeSchoolTraining(training, stageName) + describeSchoolWriting(overview.writing, examples) }],
     name: 'school_report',
@@ -743,6 +852,7 @@ async function writeSchoolReport(schoolId, testId, reportId) {
     task: 'write this report',
     retry: 'Press Build report to try again.',
   });
+  const raw = cleanNarrative(response);
 
   const content = {
     layout: LAYOUT,
@@ -761,14 +871,16 @@ async function writeSchoolReport(schoolId, testId, reportId) {
       ? { summary: text(raw.written_expression.summary, 600), gaps: strings(raw.written_expression.gaps, 3), actions: strings(raw.written_expression.actions, 3) }
       : null,
   };
-  saveReport.run({ id: reportId, content: JSON.stringify(content), basis: schoolBasis(overview), model: OPENAI_MODEL });
+  saveReport.run({ id: reportId, content: JSON.stringify(content), basis, model: OPENAI_MODEL });
 }
 
 export function queueSchoolReport(schoolId, testId) {
   const test = selectTest.get(testId);
   if (!test || test.school_id !== schoolId) return 'Test not found for this school.';
+  const overview = schoolOverview(schoolId, testId);
+  if (!overview.assessed) return 'No teacher in this test has marked sections yet.';
+  if (overview.teachers.some((t) => t.sections.some((s) => s.evaluation_stale))) return 'Some source papers have changed. Re-evaluate them before building the school report.';
   if (!openaiConfigured()) return 'OpenAI is not set up on the server: the OPENAI_API_KEY secret is missing.';
-  if (!schoolOverview(schoolId, testId).assessed) return 'No teacher in this test has marked sections yet.';
 
   const row = reportRowFor('school', schoolId, testId, null);
   queue(`school:${testId}`, row, () => writeSchoolReport(schoolId, testId, row.id));
@@ -776,8 +888,8 @@ export function queueSchoolReport(schoolId, testId) {
 }
 
 export function schoolReportIsStale(report, overview) {
-  return Boolean(report?.basis) && report.basis !== schoolBasis(overview);
+  return Boolean(report?.content) && (!report.basis || report.basis !== schoolBasis(overview));
 }
 
 // Whether the school report needs rebuilding, for the zip.
-export const schoolReportIsOutOfDate = (report, overview) => lacksPlainWords(report) || schoolReportIsStale(report, overview);
+export const schoolReportIsOutOfDate = (report, overview) => isOldLayout(report) || lacksPlainWords(report) || schoolReportIsStale(report, overview);

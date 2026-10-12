@@ -12,17 +12,17 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import db from './db.js';
+import db, { DATA_DIR } from './db.js';
 import { serverSession } from './auth.js';
 import { LAYOUT, findReport, isOutOfDate, schoolOverview, schoolReportIsOutOfDate } from './reports.js';
-import { teacherResults } from './results.js';
+import { fingerprint, teacherResults } from './results.js';
 import { friendly } from './openai.js';
 import { getFramework } from './training.js';
 import { ZipFile } from './zip.js';
 import { keepAwake } from './idle.js';
 
 const PORT = Number(process.env.PORT ?? 3000);
-const ZIP_DIR = path.join(os.tmpdir(), 'teacher-report-zips');
+const ZIP_DIR = path.join(os.tmpdir(), 'teacher-report-zips', fingerprint(DATA_DIR));
 const KEEP_MS = 60 * 60 * 1000;
 // The longest a report may take to open and print. Long answer papers take
 // the most, as every page is made smaller before printing.
@@ -37,7 +37,7 @@ fs.rmSync(ZIP_DIR, { recursive: true, force: true });
 
 const selectSchool = db.prepare('SELECT id, name FROM schools WHERE id = ?');
 const selectTest = db.prepare('SELECT * FROM tests WHERE id = ?');
-const selectTeachers = db.prepare('SELECT id, name FROM teachers WHERE school_id = ? ORDER BY name COLLATE NOCASE');
+const selectTeachers = db.prepare('SELECT id, name FROM teachers WHERE school_id = ? ORDER BY name COLLATE NOCASE, id');
 
 // Chromium, wherever it is: CHROMIUM_PATH if set, else Chromium's headless
 // shell as the Docker image installs it (it needs about a third less memory
@@ -61,14 +61,15 @@ function chromiumPath() {
 }
 
 // A name Windows accepts for a file or folder.
-function fileName(name) {
+export function fileName(name) {
   const clean = String(name ?? '')
     .replace(/[\\/:*?"<>|\u0000-\u001f]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
+    .slice(0, 120)
     .replace(/[. ]+$/, '');
   if (!clean) return 'Unnamed';
-  return /^(con|prn|aux|nul|com\d|lpt\d)$/i.test(clean) ? `${clean}_` : clean;
+  return /^(con|prn|aux|nul|com\d|lpt\d)(?:\.|$)/i.test(clean) ? `_${clean}` : clean;
 }
 
 // File names in one folder, numbered when two teachers share a name.
@@ -83,16 +84,30 @@ function namer() {
   };
 }
 
+// Allocate both audiences' names up front, independent of print failures or
+// query order. Duplicate names are resolved by the stable teacher ID.
+export function reportArtifactNames(teachers) {
+  const next = namer();
+  return new Map([...teachers].sort((a, b) => {
+    const left = fileName(a.name).toLowerCase();
+    const right = fileName(b.name).toLowerCase();
+    return (left < right ? -1 : left > right ? 1 : 0) || Number(a.id) - Number(b.id);
+  }).map((teacher) => [teacher.id, `${next(teacher.name)}.pdf`]));
+}
+
 // What goes in the zip: every teacher with a written report, and the school
-// report if it is written. Reports out of date still go in, and are listed.
-// Reports in an earlier layout stay out, as the app no longer shows them.
+// report if it is written. Out-of-date reports must be rebuilt before
+// export, so narratives, tables and the source scans describe the same input.
 function planFor(school, test) {
   const framework = getFramework();
-  const plan = { teachers: [], left_out: [], old_layout: [], out_of_date: [], writing: 0, school: 'missing' };
+  const plan = { teachers: [], left_out: [], old_layout: [], out_of_date: [], writing: 0, school: 'missing', requires_evaluation: [] };
+  const reports = [];
   for (const teacher of selectTeachers.all(school.id)) {
     const sections = teacherResults(teacher.id, test.id);
     if (!sections.length) continue;
+    if (sections.some((s) => s.evaluation_stale)) plan.requires_evaluation.push(teacher.name);
     const report = findReport('teacher', test.id, teacher.id);
+    reports.push([teacher.id, teacher.name, report?.id, report?.basis, report?.content]);
     if (report?.status === 'running') {
       plan.writing += 1;
     } else if (report?.content?.layout === LAYOUT) {
@@ -105,16 +120,19 @@ function planFor(school, test) {
     }
   }
   const report = findReport('school', test.id, null);
+  reports.push(['school', school.name, report?.id, report?.basis, report?.content]);
   if (report?.status === 'running') plan.writing += 1;
   else if (report?.content?.layout === LAYOUT) {
     plan.school = report.status === 'failed' || schoolReportIsOutOfDate(report, schoolOverview(school.id, test.id)) ? 'out_of_date' : 'included';
   } else if (report?.content) {
     plan.school = 'old_layout';
   }
+  plan.basis = fingerprint([school.id, school.name, test.id, test.name, reports]);
   return plan;
 }
 
-const printsSchool = (plan) => plan.school === 'included' || plan.school === 'out_of_date';
+const printsSchool = (plan) => plan.school === 'included';
+const needsRebuild = (plan) => plan.requires_evaluation.length || plan.out_of_date.length || plan.old_layout.length || ['out_of_date', 'old_layout'].includes(plan.school);
 
 /* ----------------------------------------------------------------- jobs */
 
@@ -132,7 +150,7 @@ function forget(job) {
 
 // What the page is told about a job.
 export function zipState(schoolId, testId) {
-  const job = jobs.get(keyOf(schoolId, testId));
+  const job = currentJob(schoolId, testId);
   if (!job) return null;
   return {
     status: job.status,
@@ -154,8 +172,23 @@ export function zipState(schoolId, testId) {
 
 // The finished zip's file and download name, or null.
 export function zipFile(schoolId, testId) {
-  const job = jobs.get(keyOf(schoolId, testId));
+  const job = currentJob(schoolId, testId);
   return job?.status === 'done' ? { file: job.file, name: job.name } : null;
+}
+
+// A ready zip is reusable only while its reports and all source inputs are
+// unchanged. A one-hour TTL alone could otherwise serve corrected-away marks.
+function currentJob(schoolId, testId) {
+  const job = jobs.get(keyOf(schoolId, testId));
+  if (job?.status !== 'done') return job;
+  const school = selectSchool.get(schoolId);
+  const test = selectTest.get(testId);
+  const plan = school && test ? planFor(school, test) : null;
+  if (!plan || plan.writing || needsRebuild(plan) || plan.basis !== job.basis) {
+    forget(job);
+    return null;
+  }
+  return job;
 }
 
 // A time zone and language for the printed dates, from the browser that asked,
@@ -187,6 +220,8 @@ export function startZip(schoolId, testId, viewer) {
   if (plan.writing) {
     return `${plan.writing === 1 ? 'A report is' : `${plan.writing} reports are`} still being written. Download all reports once ${plan.writing === 1 ? 'it is' : 'they are'} done.`;
   }
+  if (plan.requires_evaluation.length) return 'Some source papers have changed. Re-evaluate them and rebuild the reports before downloading.';
+  if (needsRebuild(plan)) return 'Some reports are out of date. Rebuild the teacher and school reports before downloading them.';
   if (!plan.teachers.length && !printsSchool(plan)) {
     return plan.old_layout.length || plan.school === 'old_layout'
       ? 'The reports for this test were written in the earlier layout. Rebuild them first, then download them.'
@@ -200,6 +235,7 @@ export function startZip(schoolId, testId, viewer) {
   const job = {
     school_id: school.id,
     test_id: test.id,
+    basis: plan.basis,
     status: 'running',
     done: 0,
     total: plan.teachers.length * 2 + (printsSchool(plan) ? 1 : 0),
@@ -324,7 +360,10 @@ async function printReport(page, steps, { audience, title }) {
           const sheet = document.querySelector('.report-sheet');
           if (!sheet || sheet.querySelector('.report-audience')?.textContent !== audience) return {};
           if (sheet.querySelector('.report-evidence[data-evidence="loading"]')) return {};
-          return { ready: [...document.images].every((img) => img.complete) };
+          if (sheet.querySelector('.evidence-missing')) return { error: 'A source paper could not be shown. Restore the source file before printing the final report.' };
+          const images = [...sheet.querySelectorAll('img')];
+          if (images.some((img) => img.complete && !img.naturalWidth)) return { error: 'A report image could not be loaded. Restore the image before printing.' };
+          return { ready: images.every((img) => img.complete) };
         }, audience),
         deadline
       );
@@ -353,8 +392,7 @@ const CHROMIUM_STOPPED = 'Chromium stopped while printing the reports, most like
 
 async function makeZip(job, plan, school) {
   const base = `http://127.0.0.1:${PORT}/#`;
-  const teacherNames = namer();
-  const managementNames = namer();
+  const artifactNames = reportArtifactNames(plan.teachers);
   const browser = await launchChromium().catch((error) => {
     console.error('Chromium did not start:', error);
     throw friendly('Chromium did not start on the server, so the reports cannot be printed.');
@@ -370,7 +408,7 @@ async function makeZip(job, plan, school) {
       try {
         await page.goto(`${base}/teachers/${teacher.id}/report/${job.test_id}`);
         const own = await printReport(page, steps, { audience: 'For the Teacher', title: `${teacher.name}: Teacher Report` });
-        await zip.add(`${job.folder}/${TEACHER_FOLDER}/${teacherNames(teacher.name)}.pdf`, own);
+        await zip.add(`${job.folder}/${TEACHER_FOLDER}/${artifactNames.get(teacher.id)}`, own);
         job.done += 1;
         printed += 1;
         ownPrinted = true;
@@ -383,7 +421,7 @@ async function makeZip(job, plan, school) {
           Date.now() + PAGE_TIMEOUT_MS
         );
         const management = await printReport(page, steps, { audience: 'For Management', title: `${teacher.name}: Management Report` });
-        await zip.add(`${job.folder}/${MANAGEMENT_FOLDER}/${managementNames(teacher.name)}.pdf`, management);
+        await zip.add(`${job.folder}/${MANAGEMENT_FOLDER}/${artifactNames.get(teacher.id)}`, management);
         printed += 1;
       } catch (error) {
         if (!browser.connected) throw friendly(CHROMIUM_STOPPED);
@@ -416,6 +454,12 @@ async function makeZip(job, plan, school) {
     }
 
     if (!printed) throw friendly('None of the reports could be printed. Try again in a minute.');
+    const currentSchool = selectSchool.get(job.school_id);
+    const currentTest = selectTest.get(job.test_id);
+    const latest = currentSchool && currentTest ? planFor(currentSchool, currentTest) : null;
+    if (!latest || latest.writing || needsRebuild(latest) || latest.basis !== job.basis) {
+      throw friendly('Results or source papers changed while the reports were printing. Rebuild the reports and download them again.');
+    }
     job.size = await zip.close();
   } catch (error) {
     await zip.abandon();

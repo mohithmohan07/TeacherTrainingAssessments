@@ -4,9 +4,10 @@
 // different dates, so the results gather every marked sitting in the test;
 // if a section was marked more than once, the latest marking counts.
 import crypto from 'node:crypto';
+import { currentSourceBasis, digest } from './provenance.js';
 import db from './db.js';
 import { levelsFromText } from './papers.js';
-import { sectionWriting } from './writing.js';
+import { sectionWriting, writingOf } from './writing.js';
 
 // Grade bands, applied to each section's percentage, named in everyday words.
 export const GRADES = [
@@ -71,6 +72,7 @@ function indicSectionLetter(text) {
 // paper with no sections is kept as one block under the key "".
 export function sectionKey(name) {
   const text = String(name ?? '').trim();
+  if (/^whole paper$/i.test(text)) return '';
   const match = /^(?:section|part)\s*[-:]?\s*['"‘’]?([a-z])\b/i.exec(text);
   if (match) return match[1].toUpperCase();
   return indicSectionLetter(text) ?? text;
@@ -89,7 +91,6 @@ const round = (n) => Math.round(n * 100) / 100;
 // the marks and the total. Marking the answers is the same either way.
 export const MARKINGS = [
   { key: 'standard', label: 'Standard', meaning: 'Every question counts. A question left blank gets 0 and stays in the total.' },
-  { key: 'lenient', label: 'Lenient', meaning: 'Only the questions answered count. Questions left blank are not in the marks or the total.' },
 ];
 
 // The kind of a marking; markings made before there was a choice are standard.
@@ -98,10 +99,12 @@ export const markingOf = (value) => (value === 'lenient' ? 'lenient' : 'standard
 const answered = (q) => String(q.teacher_answer ?? '').trim() !== '' || Number(q.marks_awarded) > 0;
 
 // A question in a section the teacher sat with nothing written and no marks.
-export const isBlank = (q) => !answered(q);
+export const isBlank = (q) => q.response_status ? q.response_status === 'unanswered' : !answered(q);
 
 // Whether a question counts towards the marks and the total.
-export const counts = (q, marking) => markingOf(marking) !== 'lenient' || answered(q);
+export const counts = (q, marking) => q.response_status
+  ? !['section_not_supplied', 'missing_page', 'extraction_failure'].includes(q.response_status)
+  : markingOf(marking) !== 'lenient' || answered(q);
 
 function groupSections(aiResult) {
   const marking = markingOf(aiResult?.marking);
@@ -127,28 +130,32 @@ function groupSections(aiResult) {
 // is scanned but the teacher sat only some sections that day. The marking
 // writes down what the teacher wrote for every question, so an empty answer
 // with no marks means nothing was written.
-const sectionWasSat = (section) => section.questions.some(answered);
+const sectionWasSat = (section, result) => {
+  const coverage = result?.submission?.sections?.find((s) => s.section === section.key);
+  if (coverage) return coverage.status === 'supplied_complete';
+  return section.questions.some(answered); // Legacy results retain their historical coverage.
+};
 
 // The sections of one marked sitting that the teacher sat, each with its
 // Written Expression (writing.js) when the sitting's writing was checked.
 export function sittingSections(aiResult) {
   return groupSections(aiResult)
-    .filter(sectionWasSat)
+    .filter((section) => sectionWasSat(section, aiResult))
     .map((s) => ({
       ...describe({ ...s, awarded: round(s.awarded), max: round(s.max), left_out_marks: round(s.left_out_marks) }),
-      writing: sectionWriting(aiResult?.writing, s.key),
+      writing: sectionWriting(writingOf(aiResult?.writing, aiResult?.questions ?? []), s.key),
     }));
 }
 
 // Sections on the paper that the teacher left entirely unanswered.
 export function unansweredSections(aiResult) {
   return groupSections(aiResult)
-    .filter((section) => !sectionWasSat(section))
+    .filter((section) => !sectionWasSat(section, aiResult))
     .map((section) => sectionName(section.key));
 }
 
 function describe(section) {
-  const percent = section.max > 0 ? Math.round((section.awarded / section.max) * 100) : null;
+  const percent = section.max > 0 ? round((section.awarded / section.max) * 100) : null;
   const band = gradeFor(percent);
   return {
     ...section,
@@ -183,7 +190,8 @@ export function teacherResults(teacherId, testId) {
   for (const sitting of sittings) {
     // The last marking that finished; a re-mark that failed leaves it in place.
     const result = sitting.ai_result ? JSON.parse(sitting.ai_result) : null;
-    const common = { assessment_id: sitting.id, date: sitting.assessment_date, evaluated_at: sitting.ai_evaluated_at };
+    const evaluationStale = Boolean(result?.audit?.source_digest && result.audit.source_digest !== digest(currentSourceBasis(sitting.id)));
+    const common = { evaluation_stale: evaluationStale, assessment_audit: result?.audit ?? null, submission: result?.submission ?? null, assessment_id: sitting.id, date: sitting.assessment_date, evaluated_at: sitting.ai_evaluated_at };
     if (result) {
       const bPapers = selectSectionBPapers.all(sitting.id);
       for (const section of sittingSections(result)) {
@@ -321,7 +329,11 @@ export function fingerprint(value) {
 }
 
 export function resultsBasis(sections) {
-  return sections.map((s) => [s.key, s.assessment_id, s.awarded, s.max, s.evaluated_at]);
+  return sections.map((s) => ({ key: s.key, subject: s.subject, assessment_id: s.assessment_id,
+    awarded: s.awarded, max: s.max, percent: s.percent, grade: s.grade, marking: s.marking,
+    questions: s.questions, writing: s.writing, summary: s.summary, strengths: s.strengths,
+    areas_to_improve: s.areas_to_improve, submission: s.submission,
+    audit: s.assessment_audit, evaluation_stale: s.evaluation_stale, evaluated_at: s.evaluated_at }));
 }
 
 /* ------------------------------------------------------------------- tests */
