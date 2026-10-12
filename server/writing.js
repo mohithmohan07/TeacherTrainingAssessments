@@ -167,6 +167,7 @@ export async function checkWriting(questions, source = {}) {
     instructions: `${INSTRUCTIONS}\n\n${note}`,
     content,
     name: 'written_expression',
+    maxRetries: 0, timeoutMs: 30_000,
     schema: SCHEMA,
     task: 'check the written expression',
     retry: 'Rebuild the report to try again.',
@@ -278,8 +279,10 @@ const average = (list) => (list.length ? list.reduce((a, b) => a + b, 0) / list.
 
 // A teacher's Written Expression over the sections judged: the average score
 // out of 10 and its level. Null when no section was judged.
+const comparableWriting = (s) => !s.coverage || (s.coverage.state === 'complete' && s.grade_eligible !== false);
+
 export function teacherWriting(sections) {
-  const judged = sections.filter((s) => s.writing?.judged && Number.isFinite(s.writing.score));
+  const judged = sections.filter((s) => comparableWriting(s) && s.writing?.judged && Number.isFinite(s.writing.score));
   if (!judged.length) return null;
   const score = oneDecimal(average(judged.map((s) => s.writing.score)));
   return { score, level: levelFor(score) };
@@ -291,7 +294,7 @@ export function teacherWriting(sections) {
 // how many teachers made them. Null when no teacher's writing was judged.
 export function schoolWriting(teachers) {
   const judged = teachers
-    .map((t) => ({ t, sections: t.sections.filter((s) => s.writing?.judged), overall: teacherWriting(t.sections) }))
+    .map((t) => ({ t, sections: t.sections.filter((s) => comparableWriting(s) && s.writing?.judged), overall: teacherWriting(t.sections) }))
     .filter((x) => x.overall);
   if (!judged.length) return null;
   const schoolAverage = oneDecimal(average(judged.map((x) => x.overall.score)));
@@ -320,7 +323,7 @@ export function schoolWriting(teachers) {
 export function writingExamples(teachers, most = 40) {
   const lines = [];
   for (const t of teachers) {
-    for (const e of t.sections.flatMap((s) => (s.writing?.judged ? s.writing.errors : [])).slice(0, 4)) {
+    for (const e of t.sections.flatMap((s) => (comparableWriting(s) && s.writing?.judged ? s.writing.errors : [])).slice(0, 4)) {
       lines.push(`${e.type}: ${e.problem} ("${clip(e.wrote, 60)}" → "${clip(e.correction, 60)}")`);
     }
   }

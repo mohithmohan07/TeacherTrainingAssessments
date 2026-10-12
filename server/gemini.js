@@ -56,17 +56,18 @@ async function callGemini(key, parts, generationConfig, timeoutMs) {
 const RETRIES = 10;
 const BUSY = [429, 500, 502, 503, 504];
 
-async function callGeminiPatiently(key, parts, generationConfig, timeoutMs) {
+async function callGeminiPatiently(key, parts, generationConfig, timeoutMs, maxRetries = RETRIES) {
+  const retries = Math.min(RETRIES, Math.max(0, Math.floor(Number(maxRetries) || 0)));
   for (let attempt = 0; ; attempt += 1) {
     let result;
     try {
       result = await callGemini(key, parts, generationConfig, timeoutMs);
     } catch (error) {
-      if (error.timedOut || attempt >= RETRIES) throw error;
+      if (error.timedOut || attempt >= retries) throw error;
       await new Promise((resolve) => setTimeout(resolve, Math.min(60_000, 2000 * 2 ** attempt) * (1 + Math.random() / 2)));
       continue;
     }
-    if (attempt >= RETRIES || !BUSY.includes(result.response.status)) return result;
+    if (attempt >= retries || !BUSY.includes(result.response.status)) return result;
     const delay = (result.payload?.error?.details ?? []).find((d) => String(d?.['@type']).endsWith('RetryInfo'))?.retryDelay;
     const asked = delay ? parseFloat(delay) * 1000 : 0;
     const wait = Math.min(60_000, Math.max(asked, 2000 * 2 ** attempt)) * (1 + Math.random() / 2);
@@ -83,6 +84,7 @@ export async function generateJson({
   parts = [],
   schema,
   timeoutMs = 240_000,
+  maxRetries = RETRIES,
   nothing = (reason) => `Gemini returned no paper (${reason}). Try again, or change the topic wording.`,
   garbled = 'Gemini returned something that was not a complete paper. Please try again.',
 }) {
@@ -92,9 +94,9 @@ export async function generateJson({
   }
 
   const content = [{ text: prompt }, ...parts];
-  let { response, payload } = await callGeminiPatiently(key, content, outputFormats.current(schema), timeoutMs);
+  let { response, payload } = await callGeminiPatiently(key, content, outputFormats.current(schema), timeoutMs, maxRetries);
   if (response.status === 400 && /responseFormat|unknown name|invalid json payload/i.test(payload?.error?.message ?? '')) {
-    ({ response, payload } = await callGeminiPatiently(key, content, outputFormats.legacy(schema), timeoutMs));
+    ({ response, payload } = await callGeminiPatiently(key, content, outputFormats.legacy(schema), timeoutMs, maxRetries));
   }
 
   if (!response.ok) {

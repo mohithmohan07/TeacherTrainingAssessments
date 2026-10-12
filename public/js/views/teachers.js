@@ -1,6 +1,6 @@
 // A teacher's profile: who they are, and what every test they have sat shows,
 // section by section, with how each section has moved from test to test.
-import { h, mount, formatDate, statusBadge, percentChip, potentialBadge, emptyState, logoFor, titleCase } from '../ui.js';
+import { h, mount, formatDate, statusBadge, percentChip, potentialBadge, emptyState, logoFor, titleCase, sectionGradeEligible, sectionScoreText } from '../ui.js';
 import { teachersApi } from '../api.js';
 import { writingChip } from '../writing.js';
 
@@ -53,8 +53,8 @@ function progressCard(tests, grades) {
     const cells = keys.map((key) => {
       const s = entry.sections.find((x) => columnOf(x) === key);
       if (!s) return h('td', {}, h('span', { class: 'hint' }, 'not sat'));
-      const change = previous[key] !== undefined && s.percent !== null ? s.percent - previous[key] : null;
-      if (s.percent !== null) previous[key] = s.percent;
+      const change = previous[key] !== undefined && sectionGradeEligible(s) ? s.percent - previous[key] : null;
+      if (sectionGradeEligible(s)) previous[key] = s.percent;
       return h(
         'td',
         {},
@@ -69,7 +69,7 @@ function progressCard(tests, grades) {
     'div',
     { class: 'card' },
     h('h2', {}, 'Progress'),
-    h('p', { class: 'hint' }, `Each section is graded on its own: ${grades.map((g) => `${g.grade} ${g.label} (${g.min}%+)`).join(' · ')}. Changes are in percentage points since the previous test.`),
+    h('p', { class: 'hint' }, `Each section is graded on its own: ${grades.map((g) => `${g.grade} ${g.label} (${g.min}%+)`).join(' · ')}. Changes compare complete assessments only, in percentage points.`),
     h(
       'div',
       { class: 'table-wrap' },
@@ -124,7 +124,7 @@ function testCard(teacher, entry) {
                   { style: 'cursor:pointer', onclick: () => window.navigate(`/assessments/${s.assessment_id}`) },
                   h('td', {}, h('strong', {}, titleCase(s.name)), s.title ? h('div', { class: 'hint' }, s.title) : null),
                   h('td', {}, formatDate(s.date) || '—'),
-                  h('td', { class: 'right' }, `${s.awarded} / ${s.max}`, s.marking === 'lenient' ? h('div', { class: 'hint' }, s.left_out ? `Lenient: ${s.left_out} not attempted left out` : 'Lenient') : null),
+                  h('td', { class: 'right' }, sectionScoreText(s), s.marking === 'lenient' ? h('div', { class: 'hint' }, s.left_out ? `Lenient: ${s.left_out} not attempted left out` : 'Lenient') : null),
                   h('td', {}, percentChip(s), s.grade_label ? h('span', { class: 'hint' }, ` ${s.grade_label}`) : null)
                 )
               )
@@ -134,10 +134,10 @@ function testCard(teacher, entry) {
       : h('p', { class: 'hint' }, 'Nothing has been evaluated in this test yet.'),
     sections.length ? h('div', { class: 'chips', style: 'margin-top:8px' }, writingChip(sections, { teacherName: teacher.name })) : null,
     potential ? h('p', {}, h('strong', {}, 'Strengths and Potential: '), potentialBadge(potential), ' ', h('span', { class: 'hint' }, `${potential.meaning} ${potential.evidence}`)) : null,
-    report?.teacher?.practice_ideas?.length
+    !report?.stale && report?.teacher?.practice_ideas?.length
       ? h('div', {}, h('h3', { class: 'subhead' }, 'Practice Ideas from the Teacher’s Report'), h('ul', {}, report.teacher.practice_ideas.map((idea) => h('li', {}, idea))))
       : null,
-    report?.management?.support?.length
+    !report?.stale && sections.every(sectionGradeEligible) && report?.management?.support?.length
       ? h('div', {}, h('h3', { class: 'subhead' }, 'Support Recommended to Management'), h('ul', {}, report.management.support.map((item) => h('li', {}, item))))
       : null,
     reportNote ? h('p', { class: 'hint' }, reportNote) : null,

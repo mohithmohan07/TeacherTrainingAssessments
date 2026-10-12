@@ -1,6 +1,6 @@
 import express from 'express';
 import db from '../db.js';
-import { GRADES, testFor } from '../results.js';
+import { GRADES, gradeEligible, testFor } from '../results.js';
 import { findReport, isOldLayout, isOutOfDate, lacksPlainWords, schoolOverview, schoolReportIsStale } from '../reports.js';
 import { queuedForMarking, unmarkedSittings } from '../bulk.js';
 
@@ -16,13 +16,13 @@ const selectTests = db.prepare('SELECT id, name FROM tests WHERE school_id = ? O
 // A sitting waiting its turn in Evaluate all counts as being marked.
 const selectOpenSittings = db.prepare(`
   SELECT a.teacher_id,
-         MAX(a.ai_status = 'running' OR a.id IN (SELECT value FROM json_each(@queued))) AS marking,
+         MAX(a.status = 'assembling' OR a.ai_status = 'running' OR a.id IN (SELECT value FROM json_each(@queued))) AS marking,
          MAX(a.ai_status = 'failed')  AS failed,
-         MAX(a.ai_status NOT IN ('running', 'failed') AND EXISTS (
+         MAX(a.status != 'assembling' AND a.ai_status NOT IN ('running', 'failed') AND EXISTS (
            SELECT 1 FROM assessment_files f WHERE f.assessment_id = a.id AND f.kind = 'response'
          )) AS to_evaluate
     FROM assessments a
-   WHERE a.test_id = @test_id AND a.school_id = @school_id AND a.status != 'evaluated'
+   WHERE a.test_id = @test_id AND a.school_id = @school_id AND a.status NOT IN ('evaluated', 'finalized')
    GROUP BY a.teacher_id
 `);
 
@@ -31,7 +31,7 @@ const selectOpenSittings = db.prepare(`
 const selectUnmarkedBySection = db.prepare(`
   SELECT a.section, a.teacher_id, COUNT(*) AS papers
     FROM assessments a
-   WHERE a.test_id = @test_id AND a.school_id = @school_id AND a.status != 'evaluated'
+   WHERE a.test_id = @test_id AND a.school_id = @school_id AND a.status NOT IN ('evaluated', 'finalized')
      AND EXISTS (SELECT 1 FROM assessment_files f WHERE f.assessment_id = a.id AND f.kind = 'response')
    GROUP BY a.section, a.teacher_id
 `);
@@ -88,6 +88,7 @@ function schoolSummary(school, test) {
     ]);
     return {
       ...stat,
+      limited: overview.teachers.filter((t) => t.sections.some((s) => s.key === stat.key && !gradeEligible(s) && s.coverage?.state !== 'not_supplied')).map(person),
       to_mark: { papers: toMark.reduce((n, r) => n + r.papers, 0), teachers: toMark.map((r) => person(byId.get(r.teacher_id))) },
       no_answers: [...uploaded].filter((id) => !answered.has(id) && byId.has(id)).map((id) => person(byId.get(id))),
     };
@@ -105,7 +106,8 @@ function schoolSummary(school, test) {
     test,
     tests: selectTests.all(school.id),
     teacher_count: overview.teachers.length,
-    assessed: overview.assessed,
+    assessed: overview.teachers.filter((t) => t.sections.some(gradeEligible)).length,
+    limited_assessment: overview.teachers.filter((t) => t.sections.some((s) => !gradeEligible(s) && s.coverage?.state !== 'not_supplied')).map(person),
     waiting,
     // The papers behind the "Marking failed" and "waiting for Evaluate" rows,
     // which each have a button to evaluate them all at once.

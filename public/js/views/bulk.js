@@ -6,7 +6,7 @@
 // changed, side by side with the question paper, before it is filed. Filing
 // never marks anything; Evaluate does.
 import { h, mount, toast, select, viewPages, confirmAction } from '../ui.js';
-import { bulkApi, papersApi, schoolsApi, teachersApi, testsApi } from '../api.js';
+import { api, bulkApi, papersApi, schoolsApi, teachersApi, testsApi } from '../api.js';
 import { loadPdfjs, pagesOf } from '../evidence.js';
 import { paperFacts } from '../paper-picker.js';
 import { chooseMarking } from '../marking-choice.js';
@@ -80,7 +80,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
   const test = tests.find((t) => String(t.id) === query.get('test')) ?? tests[0];
   const [teachers, library] = await Promise.all([teachersApi.list({ school_id: school.id }), papersApi.list()]);
 
-  const state = { items: [], uploads: [], filed: null, marks: null, busy: false };
+  const state = { items: [], finalizations: [], uploads: [], filed: null, marks: null, busy: false };
   const boardLink = `#/assessments?school=${school.id}&test=${test.id}`;
 
   const uploadBox = h('div', {});
@@ -189,7 +189,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
         'div',
         { class: 'card' },
         h('h2', {}, '1. Upload the answer papers'),
-        h('p', { class: 'hint' }, `For ${test.name} at ${school.name}. Upload every PDF first: nothing is matched while they upload. Nothing is filed until you check it below, and nothing is marked until you press Evaluate.`),
+        h('p', { class: 'hint' }, `For ${test.name} at ${school.name}. Upload every PDF first: nothing is assessed while they upload. Finalize assessments below when all files are ready. Supported results and qualified outcomes are completed together; manual matching is optional.`),
         dropzone,
         shown.length
           ? h('ul', { class: 'bulk-progress' }, shown.map((row) => h('li', { class: row.state }, h('strong', {}, row.name), ' ', h('span', {}, row.text))))
@@ -203,6 +203,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
   async function refresh() {
     const data = await bulkApi.list(school.id, test.id);
     state.items = data.items;
+    state.finalizations = data.finalizations ?? [];
     drawReview();
     schedulePoll();
   }
@@ -210,7 +211,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
   let pollTimer = null;
   function schedulePoll() {
     clearTimeout(pollTimer);
-    if (!state.items.some((item) => ['waiting', 'running'].includes(item.sort_status))) return;
+    if (!state.items.some((item) => ['waiting', 'running'].includes(item.sort_status)) && !state.finalizations.some((item) => ['running', 'assessing'].includes(item.state))) return;
     pollTimer = setTimeout(() => {
       if (!root.isConnected || !reviewBox.isConnected) return;
       refresh().catch(() => schedulePoll());
@@ -233,6 +234,40 @@ export async function renderBulk(root, query = new URLSearchParams()) {
       drawReview();
     }
   };
+
+  async function finalizeAll(ids = null) {
+    state.busy = true;
+    drawReview();
+    try {
+      await api.postJson('/api/bulk/finalize', { school_id: school.id, test_id: test.id, ...(ids ? { ids } : {}) });
+      await refresh();
+    } catch (error) {
+      toast(error.message, 'error');
+    } finally {
+      state.busy = false;
+      drawReview();
+    }
+  }
+
+  function finalizationCard() {
+    const working = state.finalizations.filter((item) => ['running', 'assessing'].includes(item.state)).length;
+    const matchBusy = state.items.some((item) => ['waiting', 'running'].includes(item.sort_status));
+    return h('div', { class: 'card' },
+      h('h2', {}, '2. Finalize assessments'),
+      h('p', { class: 'hint' }, 'Assess the supported responses and retain a clear outcome for any material that cannot be assessed. Unreadable or unassigned material is never treated as a zero answer.'),
+      state.items.length ? h('button', { class: 'btn btn-primary', type: 'button', disabled: uploading() || state.busy || matchBusy,
+        onclick: () => finalizeAll() }, `Finalize ${state.items.length} submission${state.items.length === 1 ? '' : 's'}`) : null,
+      working ? h('p', { class: 'marking-state' }, h('span', { class: 'spinner' }), `${working} submission${working === 1 ? '' : 's'} being completed. You can leave this page.`) : null,
+      state.finalizations.map((item) => h('div', { class: 'bulk-file', style: 'margin-top:16px' },
+        h('strong', {}, item.file_name),
+        h('span', { class: 'hint' }, item.state === 'running' ? 'Resolving supplied evidence…' : item.state === 'assessing' ? 'Assessing supported responses…' : item.state === 'failed' ? item.error : item.source_outcome === 'unassigned' ? 'Unassigned submission outcome available' : 'Submission outcome available'),
+        item.source_pages?.length ? h('button', { class: 'btn btn-sm', type: 'button', onclick: () => viewPages({ title: item.file_name, pages: item.source_pages.map((p) => ({ src: p.src, name: `Source page ${p.source_page}` })) }) }, 'View retained sources') : null,
+        item.download_url ? h('a', { class: 'btn btn-sm', href: item.download_url, download: '' }, 'Download outcome') : null,
+        item.state === 'failed' ? h('button', { class: 'btn btn-sm', type: 'button', disabled: state.busy, onclick: () => finalizeAll(item.retry_ids?.length ? item.retry_ids : [item.item_id]) }, 'Retry finalization') : null,
+        [...item.filed, ...(item.unavailable ?? [])].map((row) => h('a', { class: 'btn btn-sm', href: `#/teachers/${row.teacher.id}/report/${test.id}` }, `${row.teacher.name} · ${row.section ? `Section ${row.section}` : 'Not assessed'}`))
+      ))
+    );
+  }
 
   async function fileAll() {
     const ready = state.items.filter((item) => item.ready);
@@ -280,7 +315,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
     return h(
       'div',
       { class: 'card' },
-      h('h2', {}, '2. Find the question papers'),
+      h('h2', {}, 'Optional: match papers manually'),
       matching
         ? h('div', { class: 'marking-state' }, h('span', { class: 'spinner' }), `Matching ${matching} PDF${matching === 1 ? '' : 's'} at once. You can leave this page; matching carries on.`)
         : null,
@@ -363,6 +398,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
 
     mount(
       reviewBox,
+      finalizationCard(),
       state.items.length ? matchCard() : null,
       state.filed?.length ? filedCard(state.filed, boardLink, state.marks, evaluateAll) : null,
       h(
@@ -374,7 +410,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
           h(
             'div',
             {},
-            h('h2', {}, '3. Check and file'),
+            h('h2', {}, 'Optional: check and file manually'),
             h(
               'p',
               { class: 'hint', style: 'margin:0' },

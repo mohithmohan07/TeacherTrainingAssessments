@@ -99,22 +99,72 @@ export const markingOf = (value) => (value === 'lenient' ? 'lenient' : 'standard
 const answered = (q) => String(q.teacher_answer ?? '').trim() !== '' || Number(q.marks_awarded) > 0;
 
 // A question in a section the teacher sat with nothing written and no marks.
-export const isBlank = (q) => q.response_status ? q.response_status === 'unanswered' : !answered(q);
+export const isBlank = (q) => boundedQuestion(q) && questionState(q) !== 'assessed' ? false : q.response_status ? q.response_status === 'unanswered' : !answered(q);
 
-// Whether a question counts towards the marks and the total.
-export const counts = (q, marking) => q.response_status
-  ? !['section_not_supplied', 'missing_page', 'extraction_failure'].includes(q.response_status)
-  : markingOf(marking) !== 'lenient' || answered(q);
+// New evidence-bounded results distinguish an unassessable answer from zero.
+// Old results without these fields retain their original counting rules.
+const UNASSESSABLE_RESPONSES = new Set(['unreadable', 'missing_page', 'extraction_failure', 'unmatched', 'identity_unresolved', 'marking_unavailable', 'paper_unavailable']);
+const boundedQuestion = (q) => q.assessment_state !== undefined || q.qualification !== undefined || q.marks_awarded === null;
+const boundedResult = (result) => Boolean(result?.outcome || result?.completion || result?.questions?.some(boundedQuestion));
+const questionState = (q, submissionSection) => {
+  if (submissionSection?.status === 'not_supplied' || q.assessment_state === 'not_supplied' || q.response_status === 'section_not_supplied') return 'not_supplied';
+  if (q.assessment_state === 'unassessable' || UNASSESSABLE_RESPONSES.has(q.response_status) || q.marks_awarded === null || q.marks_awarded === undefined || !Number.isFinite(Number(q.marks_awarded))) return 'unassessable';
+  return 'assessed';
+};
+
+// Pure coverage metadata. Printed maxima are never rescaled: an assessed
+// partial answer retains its full printed maximum, while an unassessable row
+// remains visible in the supplied maximum and outside the assessed subset.
+export function coverageOf(questions = [], submissionSection) {
+  const coverage = { state: 'unassessable', assessed_questions: 0, unassessable_questions: 0, not_supplied_questions: 0, assessed_max: 0, unassessable_max: 0, supplied_max: 0, total_max: 0 };
+  let limited = false;
+  for (const q of questions) {
+    const state = questionState(q, submissionSection);
+    const max = Number.isFinite(Number(q.max_marks)) && Number(q.max_marks) > 0 ? Number(q.max_marks) : 0;
+    coverage[`${state}_questions`] += 1;
+    coverage.total_max += max;
+    if (state !== 'not_supplied') {
+      coverage.supplied_max += max;
+      coverage[`${state}_max`] += max;
+    }
+    if (state === 'assessed' && q.qualification === 'limited_readability') limited = true;
+  }
+  if (submissionSection?.status === 'not_supplied' || (questions.length && coverage.not_supplied_questions === questions.length)) coverage.state = 'not_supplied';
+  else if (!coverage.assessed_questions) coverage.state = 'unassessable';
+  else if (coverage.unassessable_questions || coverage.not_supplied_questions || limited || submissionSection?.status === 'incomplete') coverage.state = 'partial';
+  else coverage.state = 'complete';
+  for (const key of ['assessed_max', 'unassessable_max', 'supplied_max', 'total_max']) coverage[key] = round(coverage[key]);
+  return coverage;
+}
+
+// All comparative/grade consumers use this predicate. A subset percentage is
+// useful evidence, but must not become a section grade or a comparison.
+export function gradeEligible(section) {
+  if (!section || section.grade_eligible === false || section.outcome === 'no_assessment' || section.completion?.state === 'no_assessment') return false;
+  if (section.coverage && section.coverage.state !== 'complete') return false;
+  return typeof section.percent === 'number' && Number.isFinite(section.percent);
+}
+
+// Whether a question counts towards assessed marks and their denominator.
+export const counts = (q, marking) => boundedQuestion(q)
+  ? questionState(q) === 'assessed'
+  : q.response_status
+    ? !['section_not_supplied', 'missing_page', 'extraction_failure'].includes(q.response_status)
+    : markingOf(marking) !== 'lenient' || answered(q);
 
 function groupSections(aiResult) {
   const marking = markingOf(aiResult?.marking);
+  const bounded = boundedResult(aiResult);
   const sections = new Map();
-  for (const q of aiResult?.questions ?? []) {
-    const key = sectionKey(q.section);
+  const add = (key) => {
     if (!sections.has(key)) sections.set(key, { key, awarded: 0, max: 0, marking, left_out: 0, left_out_marks: 0, questions: [] });
-    const section = sections.get(key);
+    return sections.get(key);
+  };
+  for (const q of aiResult?.questions ?? []) {
+    const section = add(sectionKey(q.section));
     section.questions.push(q);
-    if (!counts(q, marking)) {
+    const supplied = aiResult?.submission?.sections?.find((s) => sectionKey(s.section) === section.key);
+    if (!(bounded ? questionState(q, supplied) === 'assessed' : counts(q, marking))) {
       section.left_out += 1;
       section.left_out_marks += Number(q.max_marks) || 0;
       continue;
@@ -122,32 +172,47 @@ function groupSections(aiResult) {
     section.awarded += Number(q.marks_awarded) || 0;
     section.max += Number(q.max_marks) || 0;
   }
+  if (bounded) {
+    for (const supplied of aiResult?.submission?.sections ?? []) add(sectionKey(supplied.section));
+    for (const section of sections.values()) {
+      const supplied = aiResult?.submission?.sections?.find((s) => sectionKey(s.section) === section.key);
+      section.coverage = coverageOf(section.questions, supplied);
+      // An unassessable section has no score, rather than 0/0.
+      if (!section.coverage.assessed_questions) section.awarded = section.max = null;
+      section.outcome = aiResult.outcome;
+      section.completion = aiResult.completion;
+    }
+  }
   return [...sections.values()];
 }
 
-// A section with nothing written against any of its questions was not sat,
-// so it is left out rather than graded 0. This matters when the whole paper
-// is scanned but the teacher sat only some sections that day. The marking
-// writes down what the teacher wrote for every question, so an empty answer
-// with no marks means nothing was written.
 const sectionWasSat = (section, result) => {
-  const coverage = result?.submission?.sections?.find((s) => s.section === section.key);
-  if (coverage) return coverage.status === 'supplied_complete';
-  return section.questions.some(answered); // Legacy results retain their historical coverage.
+  if (section.coverage) return section.coverage.state !== 'not_supplied';
+  const supplied = result?.submission?.sections?.find((s) => sectionKey(s.section) === section.key);
+  if (supplied) return supplied.status === 'supplied_complete';
+  return section.questions.some(answered); // Legacy results retain historical coverage.
 };
 
-// The sections of one marked sitting that the teacher sat, each with its
-// Written Expression (writing.js) when the sitting's writing was checked.
+// A completed attempt with no trusted ledger still produces a reportable
+// status. It invents neither a question nor a printed maximum.
 export function sittingSections(aiResult) {
-  return groupSections(aiResult)
+  const sections = groupSections(aiResult)
     .filter((section) => sectionWasSat(section, aiResult))
     .map((s) => ({
-      ...describe({ ...s, awarded: round(s.awarded), max: round(s.max), left_out_marks: round(s.left_out_marks) }),
+      ...describe({ ...s, awarded: s.awarded === null ? null : round(s.awarded), max: s.max === null ? null : round(s.max), left_out_marks: round(s.left_out_marks) }),
       writing: sectionWriting(writingOf(aiResult?.writing, aiResult?.questions ?? []), s.key),
     }));
+  if (!sections.length && (aiResult?.outcome === 'no_assessment' || aiResult?.completion?.state === 'no_assessment')) {
+    const key = sectionKey(aiResult.completion?.section);
+    return [{ key, name: key ? sectionName(key) : 'Assessment status', title: SECTION_TITLES[key] ?? '', questions: [], awarded: null, max: null, percent: null, grade: null, grade_label: null,
+      marking: markingOf(aiResult.marking), left_out: 0, left_out_marks: 0, writing: null,
+      coverage: coverageOf([]), grade_eligible: false, outcome: 'no_assessment', completion: aiResult.completion }];
+  }
+  return sections;
 }
 
-// Sections on the paper that the teacher left entirely unanswered.
+// Entire sections not supplied (or historically not sat), never a synonym
+// for a supplied answer that could not be read.
 export function unansweredSections(aiResult) {
   return groupSections(aiResult)
     .filter((section) => !sectionWasSat(section, aiResult))
@@ -155,8 +220,9 @@ export function unansweredSections(aiResult) {
 }
 
 function describe(section) {
-  const percent = section.max > 0 ? round((section.awarded / section.max) * 100) : null;
-  const band = gradeFor(percent);
+  const percent = section.max > 0 && section.awarded !== null ? round((section.awarded / section.max) * 100) : null;
+  const eligible = gradeEligible({ ...section, percent });
+  const band = eligible ? gradeFor(percent) : null;
   return {
     ...section,
     name: sectionName(section.key),
@@ -164,6 +230,7 @@ function describe(section) {
     percent,
     grade: band?.grade ?? null,
     grade_label: band?.label ?? null,
+    ...(section.coverage ? { grade_eligible: eligible } : {}),
   };
 }
 
@@ -179,6 +246,8 @@ const selectSectionBPapers = db.prepare(
     WHERE ap.assessment_id = ? AND (',' || p.sections || ',') LIKE '%,B,%' ORDER BY ap.position`
 );
 
+const selectPaperIds = db.prepare('SELECT paper_id FROM assessment_papers WHERE assessment_id = ? ORDER BY paper_id');
+
 // Every section the teacher has results for in this test, A to Z. Section B
 // is written for the teacher's subject, and a teacher of two subjects can sit
 // a Section B paper for each: each paper gets its own result and grade,
@@ -187,14 +256,26 @@ const selectSectionBPapers = db.prepare(
 export function teacherResults(teacherId, testId) {
   const byPart = new Map();
   const sittings = selectSittings.all(teacherId, testId);
+  const sittingById = new Map(sittings.map((sitting) => [sitting.id, sitting]));
+  const selectionOf = (id) => selectPaperIds.all(id).map((paper) => paper.paper_id).join(',');
   for (const sitting of sittings) {
+    if (sitting.status === 'assembling') continue;
     // The last marking that finished; a re-mark that failed leaves it in place.
     const result = sitting.ai_result ? JSON.parse(sitting.ai_result) : null;
     const evaluationStale = Boolean(result?.audit?.source_digest && result.audit.source_digest !== digest(currentSourceBasis(sitting.id)));
     const common = { evaluation_stale: evaluationStale, assessment_audit: result?.audit ?? null, submission: result?.submission ?? null, assessment_id: sitting.id, date: sitting.assessment_date, evaluated_at: sitting.ai_evaluated_at };
     if (result) {
       const bPapers = selectSectionBPapers.all(sitting.id);
-      for (const section of sittingSections(result)) {
+      const sections = sittingSections(result);
+      if (result.outcome === 'no_assessment' && sections.length === 1 && !sections[0].questions.length && !sections[0].key) {
+        // A fresh whole-paper attempt supersedes the same earlier whole-paper
+        // selection even when no trusted ledger remains to name its sections.
+        const selection = selectionOf(sitting.id);
+        for (const [part, previous] of byPart) {
+          if (!sittingById.get(previous.assessment_id)?.section && selectionOf(previous.assessment_id) === selection) byPart.delete(part);
+        }
+      }
+      for (const section of sections) {
         const part = section.key === 'B' && bPapers.length ? bPapers.map((p) => p.id).join(',') : '';
         byPart.set(`${section.key}|${part}`, {
           ...section,
@@ -230,7 +311,8 @@ export function teacherResults(teacherId, testId) {
 //   - the headline follows from those, and says how many of the three sections
 //     it rests on, since one section is thin evidence.
 export function potentialFor(sections) {
-  const graded = sections.filter((s) => s.percent !== null);
+  if (sections.some((s) => (s.coverage || s.grade_eligible === false || s.outcome === 'no_assessment') && s.coverage?.state !== 'not_supplied' && !gradeEligible(s))) return null;
+  const graded = sections.filter(gradeEligible);
   if (!graded.length) return null;
 
   const strengths = graded.filter((s) => s.grade === 'A' || s.grade === 'B');
@@ -299,7 +381,8 @@ export const NEEDS = [
 ];
 
 export function needOf(sections) {
-  const grades = sections.filter((s) => s.percent !== null && s.grade).map((s) => s.grade);
+  if (sections.some((s) => (s.coverage || s.grade_eligible === false || s.outcome === 'no_assessment') && s.coverage?.state !== 'not_supplied' && !gradeEligible(s))) return null;
+  const grades = sections.filter((s) => gradeEligible(s) && s.grade).map((s) => s.grade);
   if (!grades.length) return null;
   if (grades.includes('D')) return 'support';
   return grades.includes('C') ? 'developing' : 'on_track';
@@ -333,6 +416,7 @@ export function resultsBasis(sections) {
     awarded: s.awarded, max: s.max, percent: s.percent, grade: s.grade, marking: s.marking,
     questions: s.questions, writing: s.writing, summary: s.summary, strengths: s.strengths,
     areas_to_improve: s.areas_to_improve, submission: s.submission,
+    coverage: s.coverage, grade_eligible: s.grade_eligible, outcome: s.outcome, completion: s.completion,
     audit: s.assessment_audit, evaluation_stale: s.evaluation_stale, evaluated_at: s.evaluated_at }));
 }
 

@@ -1,5 +1,7 @@
 import express from 'express';
-import db from '../db.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import db, { UPLOADS_DIR } from '../db.js';
 import { GRADES, NEEDS, SECTION_TITLES, potentialFor, teacherResults } from '../results.js';
 import {
   findReport,
@@ -25,8 +27,8 @@ const router = express.Router();
 const selectTeacher = db.prepare('SELECT * FROM teachers WHERE id = ?');
 const selectSchool = db.prepare('SELECT id, name, logo_path, city, state FROM schools WHERE id = ?');
 const selectTest = db.prepare('SELECT * FROM tests WHERE id = ?');
-const selectSitting = db.prepare('SELECT id, assessment_date FROM assessments WHERE id = ? AND teacher_id = ?');
-const selectSittingFiles = db.prepare('SELECT kind, stored_name, mime_type FROM assessment_files WHERE assessment_id = ? ORDER BY position, id');
+const selectSitting = db.prepare('SELECT id, assessment_date, ai_result FROM assessments WHERE id = ? AND teacher_id = ?');
+const selectSittingFiles = db.prepare('SELECT id, kind, stored_name, mime_type FROM assessment_files WHERE assessment_id = ? ORDER BY position, id');
 
 function lookupTeacher(req, res) {
   const teacher = selectTeacher.get(Number(req.query.teacher_id ?? req.body?.teacher_id));
@@ -60,17 +62,28 @@ function trainingState() {
 // library, then any scanned) and the teacher's answer paper. The sittings are
 // those behind the results now and behind the written report, so the page
 // has them whichever it shows.
-function evidenceFor(teacherId, ...sectionLists) {
+export function evidenceFor(teacherId, ...sectionLists) {
   const ids = [...new Set(sectionLists.flat().map((s) => s.assessment_id).filter(Boolean))];
   return ids.flatMap((id) => {
     const sitting = selectSitting.get(id, teacherId);
     if (!sitting) return [];
     const files = selectSittingFiles.all(id);
-    const pages = (kind) => files.filter((f) => f.kind === kind).map((f) => ({ url: `/uploads/${f.stored_name}`, type: f.mime_type }));
+    const statusOnly = sectionLists.flat().filter((section) => section.assessment_id === id).every((section) => section.outcome === 'no_assessment' || section.coverage?.state === 'unassessable');
+    let audit = {};
+    try { audit = JSON.parse(sitting.ai_result ?? '{}').audit ?? {}; } catch { /* Invalid metadata exposes no new evidence. */ }
+    const excluded = new Set(audit.excluded_response_pages ?? []);
+    const unavailableFiles = new Set(audit.availability?.unavailable_file_ids ?? []);
+    const unavailablePapers = new Set(audit.availability?.unavailable_paper_ids ?? []);
+    // Only hide loss explicitly recorded at evaluation. A newly missing source
+    // must remain visible to the existing evidence/freshness guards. Legacy
+    // status-only artifacts without provenance retain their safe fallback.
+    const available = (file, library = false) => !(library ? unavailablePapers : unavailableFiles).has(file.id) &&
+      (!statusOnly || audit.source_digest || fs.existsSync(path.join(UPLOADS_DIR, file.stored_name)));
+    const pages = (kind) => files.filter((f) => f.kind === kind).filter((_f, index) => kind !== 'response' || !excluded.has(index + 1)).filter((file) => available(file)).map((f) => ({ url: `/uploads/${f.stored_name}`, type: f.mime_type }));
     return [{
       assessment_id: id,
       date: sitting.assessment_date,
-      papers: sittingPapers(id).map((p) => ({ url: `/uploads/${p.stored_name}`, sections: String(p.sections).split(',').filter(Boolean) })),
+      papers: sittingPapers(id).filter((p) => available(p, true)).map((p) => ({ url: `/uploads/${p.stored_name}`, sections: String(p.sections).split(',').filter(Boolean) })),
       question_paper: pages('question_paper'),
       response: pages('response'),
     }];

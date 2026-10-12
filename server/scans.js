@@ -4,6 +4,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import db, { UPLOADS_DIR } from './db.js';
 
+const selectAssessmentStatus = db.prepare('SELECT status FROM assessments WHERE id = ?');
+const assertSourceEditable = (id, { allowAssembling = false } = {}) => {
+  if (!allowAssembling && selectAssessmentStatus.get(id)?.status === 'assembling') throw new Error('This submission batch is still being assembled.');
+};
+
 export const SCAN_KINDS = new Set(['question_paper', 'response']);
 
 export function removeStoredFile(storedName) {
@@ -28,10 +33,15 @@ const insertFile = db.prepare(
 
 // Uploading pages never evaluates anything. A draft becomes 'scanned' so the
 // board shows the scans have arrived, and an assessment that has already been
-// evaluated keeps the status and the score it was given.
+// evaluated keeps the status and the score it was given. Adding actual new
+// evidence to a no-assessment outcome reopens it for evaluation; the previous
+// result remains as historical evidence and its source digest becomes stale.
 const markScanned = db.prepare(
   `UPDATE assessments
-      SET status = CASE WHEN status = 'draft' THEN 'scanned' ELSE status END,
+      SET status = CASE WHEN status IN ('draft', 'finalized') THEN 'scanned' ELSE status END,
+          ai_status = CASE WHEN status = 'finalized' THEN 'none' ELSE ai_status END,
+          evaluation_checkpoint = CASE WHEN status = 'finalized' THEN NULL ELSE evaluation_checkpoint END,
+          evaluation_progress = CASE WHEN status = 'finalized' THEN NULL ELSE evaluation_progress END,
           updated_at = datetime('now')
     WHERE id = ?`
 );
@@ -45,6 +55,7 @@ const flipKinds = db.prepare(
 );
 
 export function swapScanKinds(assessmentId) {
+  assertSourceEditable(assessmentId);
   flipKinds.run(assessmentId);
 }
 
@@ -68,6 +79,8 @@ const backToDraft = db.prepare(
 // pages are named after the teacher they were scanned for, so names that
 // start with the first teacher's name take the new one.
 export const movePages = db.transaction((fromId, toId, kinds, { from, to }) => {
+  assertSourceEditable(fromId);
+  assertSourceEditable(toId);
   let moved = 0;
   for (const kind of kinds) {
     let position = nextPosition.get(toId, kind).max_position;
@@ -82,12 +95,13 @@ export const movePages = db.transaction((fromId, toId, kinds, { from, to }) => {
       });
     }
   }
-  markScanned.run(toId);
+  if (moved) markScanned.run(toId);
   if (!countPages.get(fromId).n) backToDraft.run(fromId);
   return moved;
 });
 
 export const attachScans = db.transaction((assessmentId, kind, files) => {
+  assertSourceEditable(assessmentId);
   const startAt = nextPosition.get(assessmentId, kind).max_position + 1;
   files.forEach((file, index) => {
     insertFile.run({
@@ -100,13 +114,15 @@ export const attachScans = db.transaction((assessmentId, kind, files) => {
       position: startAt + index,
     });
   });
-  markScanned.run(assessmentId);
+  if (files.length) markScanned.run(assessmentId);
 });
 
 // Pages already on disk, such as the pages of a PDF uploaded with others and
 // sorted before filing (bulk.js), added after the pages of the same kind.
-export const attachStoredPages = db.transaction((assessmentId, kind, pages) => {
+export const attachStoredPages = db.transaction((assessmentId, kind, pages, { allowAssembling = false } = {}) => {
+  // Only atomic bulk finalization may append siblings to its staged sitting.
+  assertSourceEditable(assessmentId, { allowAssembling });
   const startAt = nextPosition.get(assessmentId, kind).max_position + 1;
   pages.forEach((page, index) => insertFile.run({ assessment_id: assessmentId, kind, ...page, position: startAt + index }));
-  markScanned.run(assessmentId);
+  if (pages.length) markScanned.run(assessmentId);
 });

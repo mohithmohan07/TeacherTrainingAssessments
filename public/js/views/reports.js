@@ -75,9 +75,20 @@ const numbered = (items, render) => (items?.length ? h('ol', { class: 'report-po
 const point = (p) => [p.title ? h('strong', {}, `${titleCase(p.title.replace(/[.:]$/, ''))}. `) : null, p.detail ?? ''];
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const listing = (items) => (items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}` : items[0] ?? '');
-const marks = (n) => String(Math.round(Number(n) * 100) / 100);
+const marks = (n) => n === null || n === undefined || !Number.isFinite(Number(n)) ? '—' : String(Math.round(Number(n) * 100) / 100);
+const marksPair = (awarded, max) => max == null ? '—' : `${marks(awarded)} / ${marks(max)}`;
+const eligible = (s) => s.grade_eligible !== false && (!s.coverage || s.coverage.state === 'complete') && s.grade && s.percent != null;
+const coverageLabel = (s) => s.outcome === 'no_assessment' ? 'No assessment result is available for this submission.'
+  : s.coverage?.state === 'unassessable' ? 'Not assessable from the submitted response'
+    : s.coverage?.state === 'partial' ? `${s.coverage.assessed_questions} questions assessed. ${s.coverage.unassessable_questions ? `${s.coverage.unassessable_questions} not assessable. ` : 'Part of the response was unclear. '}Marks cover ${marks(s.coverage.assessed_max)} of ${marks(s.coverage.supplied_max)} possible marks; the percentage covers assessed questions only. Final grade withheld.` : '';
+const coverageNote = (sections) => {
+  const limited = sections.filter((s) => coverageLabel(s));
+  return limited.length ? h('p', { class: 'report-note report-coverage' }, limited.some((s) => s.coverage?.state === 'partial')
+    ? 'Some responses could not be assessed. Results cover the assessed questions only; final grades are withheld for incomplete sections.'
+    : 'No assessment result is available for this submission.') : null;
+};
 const share = (n, total) => (total ? Math.round((100 * n) / total) : 0);
-const gradeChip = (s) => (s.grade ? h('span', { class: `grade-chip grade-${s.grade}` }, `${s.grade} · ${s.grade_label}`) : '—');
+const gradeChip = (s) => (eligible(s) ? h('span', { class: `grade-chip grade-${s.grade}` }, `${s.grade} · ${s.grade_label}`) : '—');
 
 // "Lenient marking: questions not attempted are left out of the marks and
 // the total. Left out: Section B, 2 questions worth 5 marks." Only when a
@@ -131,9 +142,9 @@ function resultsTable(sections, { grades, section_titles: titles = {} }, { forTe
           h(
             'tr',
             {},
-            h('td', {}, h('strong', {}, titleCase(s.name)), s.title ? h('div', { class: 'hint' }, s.title) : null, s.date ? h('div', { class: 'hint' }, `Taken ${formatDate(s.date)}`) : null),
-            h('td', { class: 'right nowrap' }, `${marks(s.awarded)} / ${marks(s.max)}`, s.marking === 'lenient' ? h('div', { class: 'hint' }, 'Answered questions only') : null),
-            h('td', { class: 'score-col' }, scoreBar(s.percent, grades, { label: s.name })),
+            h('td', {}, h('strong', {}, titleCase(s.name)), s.title ? h('div', { class: 'hint' }, s.title) : null, coverageLabel(s) ? h('div', { class: 'hint' }, coverageLabel(s)) : null),
+            h('td', { class: 'right nowrap' }, marksPair(s.awarded, s.max), s.marking === 'lenient' ? h('div', { class: 'hint' }, 'Answered questions only') : null),
+            h('td', { class: 'score-col' }, scoreBar(s.percent, grades, { label: s.name }), s.coverage?.state === 'partial' && s.percent != null ? h('div', { class: 'hint' }, 'Assessed questions only') : null),
             h('td', {}, gradeChip(s)),
             writing ? writingCell(s) : null
           )
@@ -188,7 +199,6 @@ const teacherDetails = (teacher, test, report) => [
   ['Teacher', teacher.name],
   ['Teaches', [teacher.grade, teacher.subjects].filter(Boolean).join(' · ')],
   ['Test', test.name],
-  ['Report Date', formatDate(report?.written_at)],
 ];
 
 // "A Excellent, 85% and above · B Good, 70% to below 85% · …"
@@ -220,10 +230,12 @@ function withQuestions(sections, live) {
   });
 }
 
-const isBlank = (q) => q.blank ?? (!String(q.teacher_answer ?? '').trim() && !(Number(q.marks_awarded) > 0));
+const isAssessed = (q) => q.assessment_state ? q.assessment_state === 'assessed' : !['unreadable', 'missing_page', 'extraction_failure', 'unmatched', 'identity_unresolved', 'marking_unavailable', 'paper_unavailable', 'section_not_supplied'].includes(q.response_status);
+const rowStatus = (q) => !isAssessed(q) ? (q.assessment_state === 'not_supplied' || q.response_status === 'section_not_supplied' ? 'Not supplied' : 'Not assessable from the submitted response') : q.qualification === 'limited_readability' ? 'Partly readable; assessed content only' : '';
+const isBlank = (q) => isAssessed(q) && (q.blank ?? (!String(q.teacher_answer ?? '').trim() && !(Number(q.marks_awarded) > 0)));
 // Lenient marking leaves the questions not attempted out of the totals.
-const notCounted = (q) => q.counted === false;
-const markTone = (q) => (notCounted(q) ? 'q-skip' : q.max_marks > 0 && q.marks_awarded >= q.max_marks ? 'q-full' : q.marks_awarded > 0 ? 'q-part' : 'q-none');
+const notCounted = (q) => isAssessed(q) && q.counted === false;
+const markTone = (q) => (!isAssessed(q) || notCounted(q) ? 'q-skip' : q.max_marks > 0 && q.marks_awarded >= q.max_marks ? 'q-full' : q.marks_awarded > 0 ? 'q-part' : 'q-none');
 const questionLabel = (q) => q.question || '—';
 
 // The marks for every question as one grid, a row per question and a column
@@ -237,9 +249,9 @@ function marksGrid(sections) {
   const unique = shown.every((s) => new Set(s.questions.map(questionLabel)).size === s.questions.length);
   const cell = (q) =>
     q
-      ? [h('span', { class: `q-marks ${markTone(q)}` }, `${marks(q.marks_awarded)} / ${marks(q.max_marks)}`), isBlank(q) ? h('span', { class: 'q-blank' }, notCounted(q) ? 'not counted' : 'blank') : null]
+      ? [h('span', { class: `q-marks ${markTone(q)}` }, marksPair(isAssessed(q) ? q.marks_awarded : null, q.max_marks)), rowStatus(q) ? h('span', { class: 'q-blank' }, rowStatus(q)) : isBlank(q) ? h('span', { class: 'q-blank' }, notCounted(q) ? 'not counted' : 'blank') : null]
       : h('span', { class: 'hint' }, '—');
-  const total = (s) => h('strong', {}, `${marks(s.awarded)} / ${marks(s.max)}`);
+  const total = (s) => h('strong', {}, marksPair(s.awarded, s.max));
 
   if (unique && (shown.length === 1 || shared.length * 2 >= labels.length)) {
     return h(
@@ -253,7 +265,7 @@ function marksGrid(sections) {
           'tbody',
           {},
           labels.map((l) => h('tr', {}, h('td', {}, h('strong', {}, l)), shown.map((s) => h('td', {}, cell(s.questions.find((q) => questionLabel(q) === l)))))),
-          h('tr', { class: 'total-row' }, h('td', {}, h('strong', {}, 'Total')), shown.map((s) => h('td', {}, total(s))))
+          h('tr', { class: 'total-row' }, h('td', {}, h('strong', {}, shown.some((s) => s.coverage?.state === 'partial') ? 'Assessed total' : 'Total')), shown.map((s) => h('td', {}, total(s))))
         )
       )
     );
@@ -270,7 +282,7 @@ function marksGrid(sections) {
           'tbody',
           {},
           s.questions.map((q) => h('tr', {}, h('td', {}, h('strong', {}, questionLabel(q))), h('td', {}, cell(q)))),
-          h('tr', { class: 'total-row' }, h('td', {}, h('strong', {}, 'Total')), h('td', {}, total(s)))
+          h('tr', { class: 'total-row' }, h('td', {}, h('strong', {}, s.coverage?.state === 'partial' ? 'Assessed total' : 'Total')), h('td', {}, total(s)))
         )
       )
     )
@@ -324,15 +336,16 @@ function answersSection(sections, { forTeacher, written = false }) {
   const answered = forTeacher ? 'What You Answered' : 'What the Teacher Answered';
   const expected = 'What Should Have Been Answered';
   const theirs = (q) => {
+    if (!isAssessed(q)) return [q.teacher_answer ? h('div', { class: 'answer-text', dir: 'auto' }, q.teacher_answer) : null, h('span', { class: 'hint' }, rowStatus(q))];
     if (isBlank(q)) return h('span', { class: 'answer-blank' }, notCounted(q) ? 'Left blank (not counted)' : 'Left blank');
-    return q.teacher_answer ? h('div', { class: 'answer-text', dir: 'auto' }, q.teacher_answer) : h('span', { class: 'hint' }, '—');
+    return [q.teacher_answer ? h('div', { class: 'answer-text', dir: 'auto' }, q.teacher_answer) : h('span', { class: 'hint' }, '—'), rowStatus(q) ? h('span', { class: 'hint' }, rowStatus(q)) : null];
   };
   const model = (q) => {
     if (expectedOf(q)) return [
       h('div', { class: 'answer-text', dir: 'auto' }, expectedOf(q)),
-      q.feedback ? h('p', { class: 'report-note' }, h('strong', {}, 'Feedback: '), q.feedback) : null,
+      isAssessed(q) && q.feedback ? h('p', { class: 'report-note' }, h('strong', {}, 'Feedback: '), q.feedback) : null,
     ];
-    return q.feedback ? [h('span', { class: 'hint' }, 'Examiner’s note: '), q.feedback] : h('span', { class: 'hint' }, '—');
+    return isAssessed(q) && q.feedback ? [h('span', { class: 'hint' }, 'Examiner’s note: '), q.feedback] : h('span', { class: 'hint' }, '—');
   };
   return h(
     'section',
@@ -360,7 +373,7 @@ function answersSection(sections, { forTeacher, written = false }) {
                   h(
                     'td',
                     { class: 'answer-q' },
-                    h('div', { class: 'answer-q-head' }, h('strong', {}, questionLabel(q)), h('span', { class: `q-marks ${markTone(q)}` }, `${marks(q.marks_awarded)} / ${marks(q.max_marks)}`)),
+                    h('div', { class: 'answer-q-head' }, h('strong', {}, questionLabel(q)), h('span', { class: `q-marks ${markTone(q)}` }, marksPair(isAssessed(q) ? q.marks_awarded : null, q.max_marks))),
                     q.question_text ? h('div', { class: 'answer-asked', dir: 'auto' }, q.question_text) : null
                   ),
                   h('td', { 'data-label': answered }, theirs(q)),
@@ -413,7 +426,7 @@ function sittingDocuments(sitting) {
       part: several && paper.sections.length ? partsNamed(paper.sections.map((key) => ({ key, name: `Section ${key}` }))) : '',
       files: [{ url: paper.url, pdf: true }],
     })),
-    sitting.question_paper.length ? { name: 'Question Paper', part: sitting.papers.length ? 'Scanned' : '', files: sitting.question_paper } : null,
+    sitting.question_paper.length ? { name: 'Question Paper', part: '', files: sitting.question_paper } : null,
     sitting.response.length ? { name: 'Answer Paper', part: '', files: sitting.response } : null,
   ].filter(Boolean);
 }
@@ -429,19 +442,20 @@ function evidencePage(page, { doc, index, total, sitting, lead }) {
     page.src
       ? h('button', { class: 'evidence-thumb', type: 'button', title: 'See this page larger', onclick: () => openLightbox(page.original ?? page.src, alt) }, h('img', { src: page.src, alt }))
       : h('div', { class: 'evidence-missing' }, page.note),
-    h('figcaption', {}, h('span', { class: 'evidence-context' }, `${name} · `), `Page ${index} of ${total}`, h('span', { class: 'evidence-context' }, ` · ${sitting}`))
+    // Keep the original scan without added provenance captions.
   );
 }
 
 // Makes a paper's pages and puts them in its box, ready to print.
-async function fillDocument(box, doc, sitting, lead) {
+async function fillDocument(box, doc, sitting, lead, { statusOnly = false } = {}) {
   const results = await Promise.allSettled(
     doc.files.map((file) => (UNSHOWN_TYPES.has(file.type) ? Promise.reject(new Error('unshown')) : pagesOf(file)))
   );
   const pages = results.flatMap((result, i) => {
     const file = doc.files[i];
     if (result.status === 'fulfilled') return result.value.map((src) => ({ src, original: file.pdf ? null : file.url }));
-    if (UNSHOWN_TYPES.has(file.type)) return [{ note: 'This page is a TIFF file, which a report cannot show. Upload it again as a JPG or PNG to show it here.' }];
+    if (statusOnly) return []; // A status artifact retains available scans, never a broken-source placeholder.
+    if (UNSHOWN_TYPES.has(file.type)) return [{ note: 'This source page is unavailable.' }];
     console.error(`Could not show ${file.url}:`, result.reason);
     return [{ note: file.pdf ? 'The question paper could not be shown.' : 'This page could not be shown.' }];
   });
@@ -474,10 +488,10 @@ function evidenceSection(sections, evidence, { forTeacher }) {
     return h(
       'div',
       { class: 'evidence-sitting' },
-      h('h3', {}, partsNamed(shown), sitting.date ? h('span', { class: 'answers-title' }, `Taken ${formatDate(sitting.date)}`) : null),
+      h('h3', {}, partsNamed(shown)),
       docs.map((doc, d) => {
-        const box = h('div', { class: 'evidence-pages' }, h('p', { class: 'hint' }, 'Preparing the pages…'));
-        filling.push(fillDocument(box, doc, label, n === 0 && d === 0));
+        const box = h('div', { class: 'evidence-pages' }, h('p', { class: 'hint no-print' }, ''));
+        filling.push(fillDocument(box, doc, label, n === 0 && d === 0, { statusOnly: shown.every((s) => s.outcome === 'no_assessment' || s.coverage?.state === 'unassessable') }));
         return h('div', { class: 'evidence-doc' }, h('h4', {}, doc.part ? `${doc.name}, ${doc.part}` : doc.name), box);
       })
     );
@@ -487,7 +501,6 @@ function evidenceSection(sections, evidence, { forTeacher }) {
     'section',
     { class: 'report-evidence', 'data-evidence': 'loading' },
     h('h2', {}, 'Evidence', h('small', {}, forTeacher ? 'The question paper and your answer paper' : 'The question paper and the teacher’s answer paper')),
-    h('p', { class: 'report-note no-print' }, 'Each page prints on a page of its own. Click a page to see it larger.'),
     blocks
   );
   section.ready = Promise.allSettled(filling).then(() => {
@@ -662,9 +675,9 @@ export async function renderTeacherReport(root, teacherId, testId, query = new U
       sheet = reportSheet(
         { school, audience: audience === 'teacher' ? 'For the Teacher' : 'For Management', title: 'Results So Far', details: teacherDetails(teacher, test, null) },
         resultsTable(data.sections, data),
-        running || report?.content ? null : h('p', { class: 'hint no-print' }, 'The written report has not been built yet. Press Build report.'),
+        coverageNote(data.sections),
         marksSection(data.sections, { forTeacher: audience === 'teacher' }),
-        gradeKey(data.grades),
+        data.sections.some((s) => s.percent != null) ? gradeKey(data.grades) : null,
         writingSection(data.sections, { forTeacher: audience === 'teacher' }),
         answersSection(data.sections, { forTeacher: audience === 'teacher' }),
         evidenceSection(data.sections, data.evidence, { forTeacher: audience === 'teacher' })
@@ -716,7 +729,7 @@ function teacherSheet(data, content) {
     t.next_steps.length ? [h('h2', {}, 'Your Next Steps'), numbered(t.next_steps, point)] : null,
     t.practice_ideas.length ? [h('h2', {}, 'Ideas to Practise'), bullets(t.practice_ideas)] : null,
     marksSection(sections, { forTeacher: true }),
-    gradeKey(data.grades),
+    sections.some((s) => s.percent != null) ? gradeKey(data.grades) : null,
     writingSection(sections, { forTeacher: true }),
     answersSection(sections, { forTeacher: true, written: Boolean(content.answers) }),
     evidenceSection(content.sections, data.evidence, { forTeacher: true })
@@ -732,7 +745,7 @@ function potentialBox(potential, aiRoles) {
     'div',
     { class: 'potential-box' },
     h('div', { class: 'potential-head' }, h('h3', {}, 'Strengths and Potential'), potentialBadge(potential)),
-    h('p', {}, potential.meaning, ' ', h('span', { class: 'hint' }, potential.evidence)),
+    h('p', {}, potential.meaning),
     roles.length ? h('p', { class: 'potential-areas' }, h('strong', {}, 'Could Take On: '), roles.map((r) => r.replace(/\.$/, '')).join('; '), '.') : null
   );
 }
@@ -764,7 +777,7 @@ function managementSheet(data, content) {
     plan?.goal ? h('p', { class: 'report-callout' }, h('strong', {}, 'Goal for the Final Test: '), plan.goal) : null,
     planSection(plan),
     marksSection(sections, { forTeacher: false }),
-    gradeKey(data.grades),
+    sections.some((s) => s.percent != null) ? gradeKey(data.grades) : null,
     writingSection(sections, { forTeacher: false }),
     answersSection(sections, { forTeacher: false, written: Boolean(content.answers) }),
     evidenceSection(content.sections, data.evidence, { forTeacher: false })
@@ -776,7 +789,8 @@ function managementSheet(data, content) {
 // The pie: how many teachers are on track, developing or need support.
 function glance(figures, needs) {
   const whole = figures.whole;
-  if (!whole?.teachers) return null;
+  const classified = whole?.classified ?? whole?.teachers ?? 0;
+  if (!classified) return null;
   const slices = needs.map((n) => ({ key: n.key, label: n.label, value: whole.needs[n.key] ?? 0 }));
   return h(
     'div',
@@ -785,7 +799,7 @@ function glance(figures, needs) {
     h(
       'div',
       { class: 'glance' },
-      donut(slices, { size: 132, total: whole.teachers, caption: whole.teachers === 1 ? 'teacher' : 'teachers' }),
+      donut(slices, { size: 132, total: classified, caption: classified === 1 ? 'teacher' : 'teachers' }),
       h(
         'table',
         { class: 'glance-table' },
@@ -799,7 +813,7 @@ function glance(figures, needs) {
               h('td', {}, h('i', { class: `swatch fill-${n.key}` })),
               h('td', {}, h('strong', {}, n.label), h('div', { class: 'hint' }, n.meaning)),
               h('td', { class: 'right glance-count' }, whole.needs[n.key] ?? 0),
-              h('td', { class: 'right hint nowrap' }, `${share(whole.needs[n.key] ?? 0, whole.teachers)}%`)
+              h('td', { class: 'right hint nowrap' }, `${share(whole.needs[n.key] ?? 0, classified)}%`)
             )
           )
         )
@@ -820,8 +834,8 @@ function stageTable(figures, keys, grades) {
       { class: whole ? 'total-row' : null },
       h('td', {}, h('strong', {}, s.name), s.classes ? h('div', { class: 'hint' }, s.classes) : null),
       h('td', { class: 'right' }, s.teachers),
-      keys.map((key) => h('td', { class: 'score-col' }, scoreBar(s.averages[key], grades, { label: `${s.name}, ${sectionHead(key)}` }))),
-      h('td', { class: 'right nowrap' }, `${s.needs.support} of ${s.teachers}`)
+      keys.map((key) => h('td', { class: 'score-col' }, scoreBar(s.averages[key], grades, { label: `${s.name}, ${sectionHead(key)}` }), h('div', { class: 'hint' }, `${s.sat?.[key] ?? 0} teachers with complete results`))),
+      h('td', { class: 'right nowrap' }, `${s.needs.support} of ${s.classified ?? s.teachers}`)
     );
   return h(
     'div',
@@ -837,10 +851,8 @@ function stageTable(figures, keys, grades) {
         h('tbody', {}, figures.stage_stats.map((s) => row(s)), row({ name: 'Whole School', classes: '', ...figures.whole }, true))
       )
     ),
-    h('p', { class: 'report-key' }, 'Each bar is the average percentage of that stage’s teachers who took the section. The shading behind it marks the grades, D on the left to A on the right. “Needs More Support” counts teachers with any section at Grade D (Needs Practice).'),
-    figures.stage_stats.some((s) => s.key === null)
-      ? h('p', { class: 'report-note no-print' }, 'Teachers under “Classes Not Given” have no class saved. Add the classes they teach on Schools & teachers, then rebuild, to place them in a stage.')
-      : null
+    h('p', { class: 'report-key' }, 'Each bar averages complete section results only. The shading behind it marks the grades, D on the left to A on the right. “Needs More Support” counts teachers with complete supplied sections and at least one Grade D (Needs Practice).'),
+    null
   );
 }
 
@@ -860,7 +872,7 @@ function sectionGrades(figures, grades) {
         h(
           'div',
           { class: 'grade-row' },
-          h('div', { class: 'grade-row-name' }, h('strong', {}, titleCase(s.name)), h('div', { class: 'hint' }, `${s.sat} took it${s.papers > s.sat ? ` (${s.papers} papers)` : ''} · average ${s.average}%`)),
+          h('div', { class: 'grade-row-name' }, h('strong', {}, titleCase(s.name)), h('div', { class: 'hint' }, `${s.sat} with complete results${s.papers > s.sat ? ` (${s.papers} papers)` : ''} · average ${s.average}%`)),
           stackedBar(bands.map((g) => ({ key: g.grade, label: `Grade ${g.grade}, ${g.label}`, value: s.counts[g.grade] ?? 0 })), { label: s.name })
         )
       )
@@ -881,9 +893,9 @@ const dayCount = (p) => (p.days_min === p.days_max ? plural(p.days_min, 'day') :
 // path, the days in all, and how many need none. Each teacher's own plan is
 // in their management report.
 function trainingTotal(training) {
-  if (!training) return null;
+  if (!training || !training.assessed) return null;
   if (!training.paths.length) {
-    return h('p', { class: 'report-callout' }, h('strong', {}, 'Training: '), 'every teacher tested so far is at Grade B (Good) or better in each section taken, so no training is needed.');
+    return h('p', { class: 'report-callout' }, h('strong', {}, 'Training: '), `${plural(training.none.length, 'teacher')} with complete results achieved Grade B (Good) or better in each section assessed.`);
   }
   const paths = training.paths.map((p, i) => `${i ? p.teachers.length : plural(p.teachers.length, 'teacher')} on ${p.name} (${dayCount(p)} each)`);
   return h(
@@ -916,7 +928,7 @@ function lenientTeachers(figures) {
 // Who is on track, developing or in need of support in each stage, with the
 // sections that put them there.
 function teachersByStage(figures, needs, test) {
-  const assessed = figures.teachers.filter((t) => t.sections.length);
+  const assessed = figures.teachers.filter((t) => t.sections.length && t.need);
   if (!assessed.length || !figures.stage_stats?.length) return null;
   const columns = [...needs].reverse();
   const gradeFor = { developing: 'C', support: 'D' };
@@ -990,7 +1002,7 @@ export async function renderSchoolReport(root, schoolId, testId) {
 
     const buildButton = h(
       'button',
-      { class: `btn ${written ? '' : 'btn-primary'}`, type: 'button', disabled: running || evaluationStale || !data.assessed, onclick: build },
+      { class: `btn ${written ? '' : 'btn-primary'}`, type: 'button', disabled: running || evaluationStale || !(data.submitted ?? data.assessed), onclick: build },
       running ? 'Writing…' : report?.content ? 'Rebuild report' : 'Build report'
     );
     const keys = figures.section_stats.map((s) => s.key);
@@ -1002,8 +1014,7 @@ export async function renderSchoolReport(root, schoolId, testId) {
         title: 'School Report',
         details: [
           ['Test', test.name],
-          ['Teachers Tested', `${figures.assessed} of ${figures.teachers.length}`],
-          ['Report Date', written ? formatDate(report.written_at) : null],
+          ['Teachers Assessed', `${figures.assessed} of ${figures.teachers.length}`],
         ],
       },
       h('h2', {}, 'Summary'),
@@ -1016,12 +1027,12 @@ export async function renderSchoolReport(root, schoolId, testId) {
       written?.actions.length ? [h('h3', {}, 'What We Will Do'), numbered(written.actions, (a) => [a.timing ? h('strong', {}, `${a.timing}: `) : null, a.action])] : null,
       trainingTotal(figures.training),
       written?.school_needs.length ? [h('h3', {}, 'What We Need from the School'), bullets(written.school_needs)] : null,
-      !written && !running ? h('p', { class: 'hint no-print' }, 'The charts and figures are live. Press Build report to add the summary, findings and plan of action.') : null,
+      figures.incomplete?.length ? h('p', { class: 'report-note report-coverage' }, `Incomplete assessment coverage: ${figures.incomplete.join(', ')}. Final teacher categories are withheld; averages include complete sections only.`) : null,
       schoolWritingSection(figures.writing, written?.written_expression),
       teachersByStage(figures, data.needs, test),
       lenientTeachers(figures),
-      figures.not_assessed.length ? h('p', { class: 'report-note' }, `Not yet tested: ${figures.not_assessed.join(', ')}.`) : null,
-      gradeKey(data.grades)
+      figures.not_assessed.length ? h('p', { class: 'report-note' }, `No submission results available: ${figures.not_assessed.join(', ')}.`) : null,
+      figures.section_stats.some((s) => s.sat) ? gradeKey(data.grades) : null
     );
 
     mount(
@@ -1035,7 +1046,7 @@ export async function renderSchoolReport(root, schoolId, testId) {
       ),
       reportState(report, { building: h('button', { class: 'btn-link', type: 'button', onclick: build }, 'Rebuild report'), what: 'the school report' }),
       data.assessed && !running ? trainingNotice(data.training_state, written, h('button', { class: 'btn-link', type: 'button', onclick: build }, 'Rebuild report')) : null,
-      evaluationStale ? emptyState('Some source papers have changed. Re-evaluate those sittings before building or printing the school report.') : data.assessed ? sheet : emptyState('No teacher has been evaluated in this test yet.')
+      evaluationStale ? emptyState('Some source papers have changed. Re-evaluate those sittings before building or printing the school report.') : (data.submitted ?? data.assessed) ? sheet : emptyState('No teacher has been evaluated in this test yet.')
     );
   }
 

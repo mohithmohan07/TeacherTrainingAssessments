@@ -19,12 +19,12 @@ const selectAssessmentById = db.prepare('SELECT * FROM assessments WHERE id = ?'
 
 // The board row acts on the teacher's current sitting in the test, for the
 // full paper or for the one section the board is working on. One that has
-// already been evaluated is left alone: uploading again opens a new sitting
+// already been evaluated or finalized is left alone: uploading again opens a new sitting
 // in the same test, which is how a teacher sits Section A on one date and
 // Sections B and C on another. Their results are added together.
 export function currentAssessmentFor(teacher, test, section = null) {
   const latest = selectLatestAssessment.get(teacher.id, test.id, section);
-  if (latest && latest.status !== 'evaluated') return latest;
+  if (latest && !['evaluated', 'finalized', 'assembling'].includes(latest.status)) return latest;
 
   const info = insertAssessment.run({
     school_id: teacher.school_id,
@@ -52,10 +52,11 @@ const selectPaperRow = db.prepare('SELECT * FROM papers WHERE id = ?');
 export function sittingForPaper(teacher, test, section, paperId, { create = true } = {}) {
   if (section !== 'B' || !paperId) {
     if (create) return currentAssessmentFor(teacher, test, section);
-    return selectLatestAssessment.get(teacher.id, test.id, section) ?? null;
+    const latest = selectLatestAssessment.get(teacher.id, test.id, section);
+    return latest?.status === 'assembling' ? null : latest ?? null;
   }
   const open = selectSectionSittings.all(teacher.id, test.id, section).find((sitting) => {
-    if (sitting.status === 'evaluated') return false;
+    if (['evaluated', 'finalized', 'assembling'].includes(sitting.status)) return false;
     const ids = selectPaperIds.all(sitting.id).map((row) => row.paper_id);
     return !ids.length || (ids.length === 1 && ids[0] === paperId);
   });

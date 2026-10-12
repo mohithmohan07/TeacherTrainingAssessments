@@ -74,7 +74,7 @@ const READING_SCHEMA = {
 // Included in evaluation checkpoints so a prompt/schema or grounding-policy
 // update cannot silently reuse an extraction produced by an older reader.
 export const READING_VERSION = crypto.createHash('sha256')
-  .update(JSON.stringify(['source-grounding-v3-mixed-image-fallback', LANGUAGE_INSTRUCTIONS, SWAP_RULE, LANGUAGE_SCHEMA, READING_PROMPT, READING_SCHEMA])).digest('hex');
+  .update(JSON.stringify(['source-grounding-v4-bounded-image-fallback', LANGUAGE_INSTRUCTIONS, SWAP_RULE, LANGUAGE_SCHEMA, READING_PROMPT, READING_SCHEMA])).digest('hex');
 
 // Types Gemini accepts as image input. Of the types OpenAI reads, GIF is the
 // one it does not.
@@ -95,8 +95,9 @@ export function listed(names) {
 // 'mixed', with the languages named. `paper` is the scanned question paper
 // when it could have been filed the wrong way round with the response, and
 // empty otherwise.
-export async function answerLanguage({ paper, response }) {
+export async function answerLanguage({ paper, response }, requestOptions = {}) {
   const raw = await requestJson({
+    ...requestOptions,
     instructions: LANGUAGE_INSTRUCTIONS + (paper.length ? SWAP_RULE : ''),
     content: [
       ...(paper.length
@@ -200,7 +201,8 @@ async function readBatch(batch, total) {
     prompt: `${READING_PROMPT}\n\n${batch.length === 1 ? `This is page ${first}` : `These are pages ${batch.map((page) => page.number).join(', ')}`} of ${pagesOf(total)}. Keep these exact page numbers, including any gaps.`,
     parts: await pageParts(batch),
     schema: READING_SCHEMA,
-    timeoutMs: 5 * 60 * 1000,
+    timeoutMs: 90_000,
+    maxRetries: 1,
     nothing: (reason) => `Gemini did not read the answer pages (${reason}). Press Evaluate to try again.`,
     garbled: 'Gemini sent back a reading of the answers that was cut off or garbled. Press Evaluate to try again.',
   });

@@ -1,6 +1,6 @@
 import {
   h, mount, field, input, textarea, select, toast, confirmAction, statusBadge,
-  formatDate, formatBytes, emptyState, viewPages, sectionChip,
+  formatDate, formatBytes, emptyState, viewPages, sectionChip, sectionScoreText,
 } from '../ui.js';
 import { schoolsApi, teachersApi, assessmentsApi, testsApi, reportsApi, bulkApi } from '../api.js';
 import { choosePaper, paperFacts, paperThumb } from '../paper-picker.js';
@@ -46,6 +46,7 @@ const STATUS_OPTIONS = [
   { value: 'draft', label: 'Draft' },
   { value: 'scanned', label: 'Scans uploaded' },
   { value: 'evaluated', label: 'Evaluated' },
+  { value: 'finalized', label: 'Assessment complete (no marks)' },
 ];
 
 /* ------------------------------------------------------------ assessment list */
@@ -338,7 +339,7 @@ function teacherBoardCard(state, reload, redraw) {
 function scanCell(state, teacher, kind, count, firstPage, reload, redraw) {
   const label = count ? pageCount(count) : 'None yet';
   const scanning = scanner.status === 'ready';
-  const idleLabel = scanning
+  const idleLabel = teacher.assessment_status === 'assembling' ? (scanning ? 'Scan to new sitting' : 'Upload to new sitting') : scanning
     ? (count ? 'Scan more' : `Scan ${KIND_NAMES[kind]}`)
     : count ? 'Add pages' : `Upload ${KIND_NAMES[kind]}`;
   const fileInput = h('input', { type: 'file', accept: 'image/*', multiple: true, style: 'display:none' });
@@ -428,7 +429,7 @@ function scanCell(state, teacher, kind, count, firstPage, reload, redraw) {
 // they are filed under. Until the paper is marked, pages that are another
 // teacher's can be moved from there.
 function showRowPages(state, teacher, kind, firstPage, reload) {
-  const movable = teacher.assessment_status !== 'evaluated' && teacher.ai_status !== 'running';
+  const movable = !['evaluated', 'finalized', 'assembling'].includes(teacher.assessment_status) && teacher.ai_status !== 'running';
   viewPages({
     title: `${teacher.name} · ${capitalise(KIND_NAMES[kind])}${state.section ? ` · Section ${state.section}` : ''}`,
     pages: [{ src: `/uploads/${firstPage}`, name: `First page of ${teacher.name}’s ${KIND_NAMES[kind]}` }],
@@ -519,7 +520,7 @@ async function scanWithDialog(dialog, { teacherName, label }) {
 // the library's best fit is suggested beside the upload button; nothing is
 // used until it is confirmed in the dialog.
 function questionPaperCell(state, teacher, reload, redraw) {
-  const locked = teacher.assessment_status === 'evaluated' || teacher.ai_status === 'running';
+  const locked = ['evaluated', 'finalized', 'assembling'].includes(teacher.assessment_status) || teacher.ai_status === 'running';
 
   if (teacher.papers.length) {
     return h(
@@ -597,7 +598,7 @@ async function confirmPaper(state, teacher, reload) {
 // the evaluation screen has the same button.
 function swapButton(teacher, reload) {
   const hasPages = teacher.question_paper_count > 0 || teacher.response_count > 0;
-  if (!teacher.assessment_id || !hasPages || teacher.assessment_status === 'evaluated' || teacher.ai_status === 'running') return null;
+  if (!teacher.assessment_id || !hasPages || ['evaluated', 'finalized', 'assembling'].includes(teacher.assessment_status) || teacher.ai_status === 'running') return null;
 
   const button = h(
     'button',
@@ -721,12 +722,13 @@ function lenientNote(sections) {
 // Without both sets of scans it just opens the screen. If this teacher has no
 // assessment yet, one is created.
 function evaluateButton(state, teacher) {
-  const evaluated = teacher.assessment_status === 'evaluated';
+  const evaluated = ['evaluated', 'finalized'].includes(teacher.assessment_status);
+  const assembling = teacher.assessment_status === 'assembling';
   const running = teacher.ai_status === 'running';
   const button = h(
     'button',
-    { class: 'btn btn-sm btn-primary', type: 'button' },
-    running ? 'Marking…' : evaluated ? 'Review' : 'Evaluate'
+    { class: 'btn btn-sm btn-primary', type: 'button', disabled: assembling },
+    assembling ? 'Preparing submission…' : running ? 'Marking…' : evaluated ? 'Review' : 'Evaluate'
   );
 
   button.addEventListener('click', async () => {
@@ -1031,8 +1033,8 @@ export async function renderAssessmentDetail(root, id) {
         assessment = latest;
         draw();
         if (latest.ai_status === 'done') {
-          const marked = latest.sections.map((s) => `${s.name} ${s.percent}%`).join(', ');
-          toast(`Marked${marked ? `: ${marked}` : ''}. The teacher’s reports are being written.`, 'success');
+          const marked = latest.sections.map((s) => s.grade_eligible === false ? `${s.name}: ${s.percent === null ? 'not assessed' : 'partial assessment; no grade'}` : `${s.name} ${s.percent}%`).join(', ');
+          toast(`Assessment finished${marked ? `: ${marked}` : ''}. The teacher’s reports are being written.`, 'success');
         }
         else toast('The marking did not finish. See the evaluation for why.', 'error');
         break;
@@ -1078,6 +1080,7 @@ export async function renderAssessmentDetail(root, id) {
             'button',
             {
               class: 'btn btn-danger',
+              disabled: assessment.status === 'assembling',
               onclick: async () => {
                 if (!confirmAction('Delete this assessment and its scans?')) return;
                 await assessmentsApi.remove(assessment.id);
@@ -1109,7 +1112,7 @@ export async function renderAssessmentDetail(root, id) {
 
 function scansCard(assessment, refresh) {
   const hasPages = assessment.question_paper_files.length > 0 || assessment.response_files.length > 0;
-  const swap = hasPages && assessment.ai_status !== 'running'
+  const swap = hasPages && assessment.status !== 'assembling' && assessment.ai_status !== 'running'
     ? h('button', { class: 'btn btn-sm', type: 'button' }, 'Swap question paper and answer paper')
     : null;
   swap?.addEventListener('click', async () => {
@@ -1149,7 +1152,7 @@ function scansCard(assessment, refresh) {
 }
 
 // Pages filed under the wrong teacher can be moved until the paper is marked.
-const movableSitting = (assessment) => assessment.status !== 'evaluated' && assessment.ai_status !== 'running';
+const movableSitting = (assessment) => !['evaluated', 'finalized', 'assembling'].includes(assessment.status) && assessment.ai_status !== 'running';
 
 async function moveSittingPages(assessment, kind, refresh) {
   const moved = await movePages({
@@ -1169,7 +1172,7 @@ async function moveSittingPages(assessment, kind, refresh) {
 // Papers from the library confirmed as this sitting's question paper. OpenAI
 // reads them as PDFs, so nothing needs scanning for the question paper.
 function libraryPapers(assessment, refresh) {
-  const locked = assessment.ai_status === 'running';
+  const locked = assessment.ai_status === 'running' || assessment.status === 'assembling';
   const teacher = { id: assessment.teacher_id, name: assessment.teacher_name, grade: assessment.teacher_grade };
   const choose = h(
     'button',
@@ -1233,9 +1236,11 @@ function libraryPapers(assessment, refresh) {
 }
 
 function scanGroup(assessment, kind, label, files, refresh) {
+  const assembling = assessment.status === 'assembling';
   const fileInput = h('input', { type: 'file', accept: 'image/*', multiple: true });
 
   const upload = async (list) => {
+    if (assembling) return;
     const chosen = Array.from(list ?? []);
     if (!chosen.length) return;
     const data = new FormData();
@@ -1254,7 +1259,7 @@ function scanGroup(assessment, kind, label, files, refresh) {
 
   fileInput.addEventListener('change', () => upload(fileInput.files));
 
-  const scanButton = scanner.status === 'ready'
+  const scanButton = !assembling && scanner.status === 'ready'
     ? h('button', { class: 'btn btn-sm', type: 'button' }, 'Scan pages')
     : null;
   scanButton?.addEventListener('click', async () => {
@@ -1335,6 +1340,7 @@ function scanGroup(assessment, kind, label, files, refresh) {
                 {
                   class: 'remove',
                   title: 'Remove this page',
+                  disabled: assembling,
                   onclick: async () => {
                     if (!confirmAction(`Remove ${file.original_name}?`)) return;
                     await assessmentsApi.removeFile(assessment.id, file.id);
@@ -1357,7 +1363,7 @@ function scanGroup(assessment, kind, label, files, refresh) {
     h('div', { class: 'scan-group-head' }, h('h3', {}, `${label} (${files.length})`), scanButton),
     thumbs,
     h('div', { style: 'height:12px' }),
-    dropzone
+    assembling ? h('p', { class: 'hint' }, 'This submission is being prepared. Its pages are read-only until the batch finishes.') : dropzone
   );
 }
 
@@ -1366,12 +1372,13 @@ function scanGroup(assessment, kind, label, files, refresh) {
 function markingCard(assessment, runEvaluation, onSaved) {
   const hasScans = (assessment.question_paper_files.length > 0 || assessment.papers.length > 0) && assessment.response_files.length > 0;
   const running = assessment.ai_status === 'running';
+  const assembling = assessment.status === 'assembling';
   const result = assessment.ai_result;
 
   const button = h(
     'button',
-    { class: `btn ${result ? '' : 'btn-primary'}`, type: 'button', disabled: running || !hasScans },
-    running ? 'Marking…' : result ? 'Evaluate again' : 'Evaluate'
+    { class: `btn ${result ? '' : 'btn-primary'}`, type: 'button', disabled: assembling || running || !hasScans },
+    assembling ? 'Preparing submission…' : running ? 'Marking…' : result ? 'Evaluate again' : 'Evaluate'
   );
   button.addEventListener('click', async () => {
     const marking = await chooseMarking({ teacherName: assessment.teacher_name, current: result ? (result.marking ?? 'standard') : null, again: Boolean(result) });
@@ -1382,7 +1389,9 @@ function markingCard(assessment, runEvaluation, onSaved) {
   });
 
   let body;
-  if (running) {
+  if (assembling) {
+    body = h('p', { class: 'hint' }, 'The batch is still joining this teacher’s source pages. Assessment starts after every source is ready.');
+  } else if (running) {
     body = h('div', { class: 'marking-state' }, h('span', { class: 'spinner' }), 'OpenAI is marking each question, then checking the writing. Answers not all in English are read by Gemini first. This usually takes a few minutes; you can leave this page and come back.');
   } else if (assessment.ai_status === 'failed') {
     body = h('div', { class: 'marking-state error' }, assessment.ai_error || 'The marking did not finish.');
@@ -1397,7 +1406,7 @@ function markingCard(assessment, runEvaluation, onSaved) {
     { class: 'card' },
     h('div', { class: 'scan-group-head' }, h('h2', { style: 'margin:0' }, 'Marking'), button),
     body ?? null,
-    result ? markingResult(assessment, result, onSaved) : null
+    result && !assembling ? markingResult(assessment, result, onSaved) : null
   );
 }
 
@@ -1405,7 +1414,7 @@ const notAttempted = (q) => q.response_status ? q.response_status === 'unanswere
 
 // How the marks were counted, chosen when Evaluate was pressed.
 function markingNote(result, sections) {
-  if (result.marking !== 'lenient') return h('p', { class: 'hint' }, 'Unanswered questions in supplied complete sections score zero; entire sections not supplied are excluded.');
+  if (result.marking !== 'lenient') return h('p', { class: 'hint' }, 'Unanswered questions in supplied complete sections score zero. Unassessable answers are not zero; limited coverage has no grade. Entire sections not supplied are excluded.');
   const count = sections.reduce((n, s) => n + (s.left_out || 0), 0);
   const worth = Math.round(sections.reduce((n, s) => n + (s.left_out_marks || 0), 0) * 100) / 100;
   return h(
@@ -1422,18 +1431,18 @@ function markingNote(result, sections) {
 function markingResult(assessment, result, onSaved) {
   const lenient = result.marking === 'lenient';
   const list = (title, items) =>
-    items.length ? h('div', {}, h('h3', {}, title), h('ul', {}, items.map((item) => h('li', {}, item)))) : null;
+    items?.length ? h('div', {}, h('h3', {}, title), h('ul', {}, items.map((item) => h('li', {}, item)))) : null;
 
   const markInputs = result.questions.map((q) =>
-    h('input', { type: 'number', class: 'mark-input', min: 0, max: q.max_marks, step: 0.5, value: q.marks_awarded, disabled: Boolean(q.response_status && !['answered', 'partial'].includes(q.response_status)), 'aria-label': `Marks for ${q.question}` })
+    h('input', { type: 'number', class: 'mark-input', min: 0, max: q.max_marks, step: 0.5, value: q.marks_awarded ?? '', placeholder: q.marks_awarded === null ? 'Not assessed' : null, disabled: Boolean(q.marks_awarded === null || q.assessment_state === 'unassessable' || q.assessment_state === 'not_supplied' || q.response_status && !['answered', 'partial'].includes(q.response_status)), 'aria-label': `Marks for ${q.question}` })
   );
   const saveButton = h('button', { class: 'btn btn-sm btn-primary', type: 'button', style: 'display:none' }, 'Save corrected marks');
-  const changed = () => markInputs.some((el, i) => Number(el.value) !== result.questions[i].marks_awarded);
+  const changed = () => markInputs.some((el, i) => result.questions[i].marks_awarded !== null && Number(el.value) !== result.questions[i].marks_awarded);
   for (const el of markInputs) el.addEventListener('input', () => { saveButton.style.display = changed() ? '' : 'none'; });
   saveButton.addEventListener('click', async () => {
     saveButton.disabled = true;
     try {
-      const updated = await assessmentsApi.saveMarks(assessment.id, markInputs.map((el) => el.value));
+      const updated = await assessmentsApi.saveMarks(assessment.id, markInputs.map((el, i) => result.questions[i].marks_awarded === null ? null : el.value));
       toast('Marks saved. Rebuild the teacher’s report to take them in.', 'success');
       onSaved(updated);
     } catch (error) {
@@ -1446,7 +1455,7 @@ function markingResult(assessment, result, onSaved) {
     'div',
     { class: 'marking-result' },
     h('div', { class: 'marking-total chips' }, assessment.sections.map((section) => sectionChip(section))),
-    h('p', { class: 'hint' }, assessment.sections.map((s) => `${s.name}: ${s.awarded} / ${s.max}${s.grade_label ? ` (${s.grade_label})` : ''}`).join(' · ')),
+    h('p', { class: 'hint' }, assessment.sections.map((s) => `${s.name}: ${sectionScoreText(s)}${s.grade_label ? ` (${s.grade_label})` : ''}`).join(' · ')),
     markingNote(result, assessment.sections),
     writingCard(assessment, onSaved),
     result.pages_swapped
@@ -1487,7 +1496,7 @@ function markingResult(assessment, result, onSaved) {
                 { style: 'white-space:nowrap' },
                 markInputs[i],
                 ` / ${q.max_marks}`,
-                q.response_status === 'section_not_supplied' ? h('span', { class: 'q-blank' }, 'section not supplied · excluded') : q.response_status === 'unreadable' ? h('span', { class: 'q-blank' }, 'handwriting unclear') : notAttempted(q) ? h('span', { class: 'q-blank' }, lenient ? 'not counted' : 'unanswered') : null
+                q.assessment_state === 'unassessable' ? h('span', { class: 'q-blank' }, 'not assessed') : q.qualification === 'limited_readability' ? h('span', { class: 'q-blank' }, 'limited readable evidence') : q.response_status === 'section_not_supplied' ? h('span', { class: 'q-blank' }, 'section not supplied · excluded') : q.response_status === 'unreadable' ? h('span', { class: 'q-blank' }, 'handwriting unclear') : notAttempted(q) ? h('span', { class: 'q-blank' }, lenient ? 'not counted' : 'unanswered') : null
               ),
               h(
                 'td',
@@ -1510,7 +1519,7 @@ function markingResult(assessment, result, onSaved) {
     h(
       'p',
       { class: 'hint' },
-      `Marked by OpenAI (${assessment.ai_model})${assessment.ai_evaluated_at ? ` on ${formatDate(assessment.ai_evaluated_at.slice(0, 10))}` : ''}. ${readingNote(result.reading)}If you disagree with a mark, change it in the Marks column and save.`
+      result.outcome === 'no_assessment' ? 'The assessment attempt is complete. The available material could not support reliable marks.' : `Marked by OpenAI (${assessment.ai_model})${assessment.ai_evaluated_at ? ` on ${formatDate(assessment.ai_evaluated_at.slice(0, 10))}` : ''}. ${readingNote(result.reading)}If you disagree with a mark, change it in the Marks column and save.`
     ),
     h(
       'p',
@@ -1525,7 +1534,7 @@ function markingResult(assessment, result, onSaved) {
 // whose check failed, has a button to check it now.
 function writingCard(assessment, onSaved) {
   const sections = assessment.sections;
-  if (!sections.length) return null;
+  if (!sections.length || assessment.ai_result?.outcome === 'no_assessment') return null;
   const checked = checkedSections(sections);
   const problem = sections.find((s) => s.writing && !s.writing.checked)?.writing.problem;
   let action = null;
@@ -1599,6 +1608,7 @@ function readingNote(reading) {
 }
 
 function detailsCard(assessment, refresh) {
+  if (assessment.status === 'assembling') return h('div', { class: 'card' }, h('h2', {}, 'Details'), h('p', {}, 'This submission is being prepared. Details and scores cannot be changed until the batch finishes.'));
   const form = h(
     'form',
     {

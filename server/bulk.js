@@ -15,17 +15,19 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import db, { UPLOADS_DIR } from './db.js';
-import { friendly, openaiConfigured, requestJson } from './openai.js';
-import { geminiConfigured } from './gemini.js';
-import { readAnswers } from './reading.js';
+import { OPENAI_MODEL, friendly, openaiConfigured, requestJson } from './openai.js';
+import { GEMINI_MODEL, geminiConfigured } from './gemini.js';
+import { READING_VERSION, readAnswers } from './reading.js';
 import { OPENAI_IMAGE_TYPES, pageInputs } from './paper-inputs.js';
 import { PAPER_SECTIONS, allPapers, presentPaper, rankPapers, setSittingPapers, subjectKeys, levelsFromText, teacherProfile, paperCompatibilityProblem } from './papers.js';
 import { definiteNameConflict, nameRelationship } from './identity.js';
 export { paperCompatibilityProblem } from './papers.js';
 import { attachStoredPages, removeStoredFile } from './scans.js';
 import { sittingForPaper } from './sittings.js';
-import { MARKINGS, testFor } from './results.js';
-import { startEvaluation } from './evaluate.js';
+import { MARKINGS, testFor, teacherResults } from './results.js';
+import { startEvaluation, finalizeUnavailable } from './evaluate.js';
+import { digest, fileBasis } from './provenance.js';
+import { queueTeacherReports, findReport, isOutOfDate } from './reports.js';
 import { jobsAtOnce } from './capacity.js';
 import { keepAwake } from './idle.js';
 
@@ -249,6 +251,7 @@ export const addItem = (school, test, fileName, files) => {
 };
 
 export function removeItem(id) {
+  if (isFinalizationLocked(selectItem.get(id))) return 'This submission is retained with its final outcome and source pages.';
   const pages = selectPages.all(id);
   deleteItemRow.run(id);
   for (const page of pages) removeStoredFile(page.stored_name);
@@ -259,6 +262,7 @@ export function removeItem(id) {
 // The teacher chosen on the review screen. A PDF that could not be sorted
 // without knowing its teacher is sorted again once it has one.
 export function chooseTeacher(item, teacherId) {
+  if (isFinalizationLocked(item)) return 'This submission is being finalized or already has a final outcome.';
   if (['waiting', 'running'].includes(item.sort_status)) return 'Wait for matching to finish before changing the teacher.';
   const teacher = teacherId ? selectTeacher.get(teacherId) : null;
   if (teacherId && (!teacher || teacher.school_id !== item.school_id)) return 'Pick a teacher from this school.';
@@ -273,6 +277,7 @@ export function chooseTeacher(item, teacherId) {
 }
 
 export function choosePapers(item, papers) {
+  if (isFinalizationLocked(item)) return 'This submission is being finalized or already has a final outcome.';
   if (['waiting', 'running'].includes(item.sort_status)) return 'Wait for matching to finish before choosing papers.';
   const chosen = parse(item.papers, {});
   const result = parse(item.result, {});
@@ -299,6 +304,7 @@ export function choosePapers(item, papers) {
 
 // Moves pages between sections (or Section B papers), or out of use (null).
 export function choosePageSections(item, pages) {
+  if (isFinalizationLocked(item)) return 'This submission is being finalized or already has a final outcome.';
   const result = parse(selectItem.get(item.id)?.result, {});
   result.page_confirmations ??= {};
   for (const { id, section } of pages ?? []) {
@@ -330,6 +336,7 @@ export function matchAll(schoolId, testId) {
 }
 
 export function queueSort(id) {
+  if (isFinalizationLocked(selectItem.get(id))) return;
   setStatus.run('waiting', null, id);
   if (!waiting.includes(id)) waiting.push(id);
   pump();
@@ -642,7 +649,7 @@ async function sortItem(id) {
 
 // Validate before assigning. No guessed paper is inherited from a preceding
 // page, profile rank, or catalogue entry whose questions were never inspected.
-export function buildSortPlan(teacher, school, library, pages, sorted, result) {
+export function buildSortPlan(teacher, school, library, pages, sorted, result, { allowSuppliedBlank = false } = {}) {
   const complete = completePages(sorted.pages, pages.length);
   const byNumber = new Map((sorted.pages ?? []).map((p) => [Number(p.page), p]));
   const bGroups = new Map();
@@ -665,16 +672,21 @@ export function buildSortPlan(teacher, school, library, pages, sorted, result) {
     }
     const said = (sorted.papers ?? []).filter((p) => p.section === section && Number(p.paper_id) === paperId);
     const summary = said.length === 1 ? said[0] : null;
+    const identity = result.identity?.pages.find((p) => p.page_id === page.id);
+    const paper = library.find((p) => p.id === paperId);
+    const named = identity?.paper_title_written ? namedMaster(identity.paper_title_written, library) : null;
+    const suppliedBlank = allowSuppliedBlank && found.has_answers === false && section && (
+      (named?.paper?.id === paperId && String(paper?.sections) === section) ||
+      (result.paper_confirmations?.[group] === paperId && result.page_confirmations?.[page.id] === group));
     if (section) {
-      if (found.has_answers !== true) issues.push('A section was assigned without confirmed answer content. Review this page.');
-      const paper = library.find((p) => p.id === paperId);
+      if (found.has_answers !== true && !suppliedBlank) issues.push('A section was assigned without confirmed answer content. Review this page.');
       const problem = paperCompatibilityProblem(paper, teacher, school, section);
       if (problem) issues.push(problem);
       if (!(result.candidate_paper_ids ?? []).includes(paperId)) issues.push('The selected paper was not supplied in full for comparison.');
       const labels = (summary?.matched_question_labels ?? []).map((q) => String(q).trim().toLowerCase());
-      if (!summary || summary.confidence !== 'high' || !String(summary.reason ?? '').trim() || !labels.length ||
+      if (!summary || summary.confidence !== 'high' || !String(summary.reason ?? '').trim() || (!suppliedBlank && !labels.length) ||
           !Array.isArray(summary.alternatives) || summary.alternatives.length ||
-          !(found.questions ?? []).some((q) => labels.includes(String(q).trim().toLowerCase()))) {
+          (!suppliedBlank && !(found.questions ?? []).some((q) => labels.includes(String(q).trim().toLowerCase())))) {
         issues.push('The paper match is weak or ambiguous. Choose the administered master explicitly.');
       }
       const confirmed = result.paper_confirmations?.[group];
@@ -682,7 +694,6 @@ export function buildSortPlan(teacher, school, library, pages, sorted, result) {
     } else if (found.has_answers !== false || paperId || (found.questions ?? []).length) {
       issues.push('This source page is unresolved, not a verified blank. Assign its section or explicitly exclude it.');
     }
-    const identity = result.identity?.pages.find((p) => p.page_id === page.id);
     if (identity?.paper_title_written) {
       const master = namedMaster(identity.paper_title_written, library);
       if (master.ambiguous) issues.push('The paper title written on this page does not identify one library master. Import or identify that exact master.');
@@ -690,7 +701,7 @@ export function buildSortPlan(teacher, school, library, pages, sorted, result) {
     }
     const questions = (found.questions ?? []).map((q) => String(q).trim()).filter(Boolean);
     sourcePages.push({ page_id: page.id, source_page: page.position, section, group, paper_id: paperId,
-      has_answers: found.has_answers !== false, questions, confidence: summary?.confidence ?? null,
+      has_answers: found.has_answers !== false, supplied_blank: Boolean(suppliedBlank), questions, confidence: summary?.confidence ?? null,
       reason: String(summary?.reason ?? ''), issues });
     assignments.push({ id: page.id, section: group, questions: questions.join(', ') });
   }
@@ -783,7 +794,7 @@ export function presentItem(item, others = []) {
       reason: result?.sections?.[key]?.reason ?? '',
       // What filing does to the teacher's sitting for this section.
       existing: sitting
-        ? sitting.status === 'evaluated'
+        ? ['evaluated', 'finalized'].includes(sitting.status)
           ? 'marked'
           : sitting.ai_status === 'running'
             ? 'marking'
@@ -796,6 +807,7 @@ export function presentItem(item, others = []) {
   });
 
   const problems = [];
+  if (isFinalizationLocked(item)) problems.push('This submission is retained with its final outcome.');
   const sorting = ['waiting', 'running'].includes(item.sort_status);
   const unmatched = item.sort_status === 'new';
   if (sorting) problems.push('Still being matched.');
@@ -845,7 +857,7 @@ export function presentItem(item, others = []) {
 }
 
 export function presentItems(schoolId, testId) {
-  const items = selectItems.all(schoolId, testId);
+  const items = selectItems.all(schoolId, testId).filter((item) => !isFinalizationLocked(item));
   return items.map((item) => presentItem(item, items));
 }
 
@@ -1021,8 +1033,8 @@ markingQueue.restore();
 setImmediate(() => markingQueue.pump());
 
 export function evaluateSittings(ids, markingChoice) {
+  if (ids.some((id) => db.prepare("SELECT 1 FROM assessments WHERE id = ? AND status = 'assembling'").get(id))) return 'This submission batch is still being assembled.';
   if (!MARKINGS.some((m) => m.key === markingChoice)) return 'Choose Standard marking.';
-  if (!openaiConfigured()) return 'OpenAI is not set up on the server: the OPENAI_API_KEY secret is missing.';
   markingQueue.enqueue(ids, markingChoice);
   markingQueue.pump();
   return null;
@@ -1040,7 +1052,7 @@ const selectUnmarked = db.prepare(`
          EXISTS (SELECT 1 FROM assessment_files f WHERE f.assessment_id = a.id AND f.kind = 'response') AS has_answers
     FROM assessments a
     JOIN teachers t ON t.id = a.teacher_id
-   WHERE a.school_id = ? AND a.test_id = ? AND (a.status != 'evaluated' OR a.ai_status = 'failed') AND a.ai_status != 'running'
+   WHERE a.school_id = ? AND a.test_id = ? AND (a.status NOT IN ('evaluated', 'finalized') OR a.ai_status = 'failed') AND a.ai_status != 'running' AND a.status != 'assembling'
    ORDER BY t.name COLLATE NOCASE, a.section, a.id
 `);
 
@@ -1079,3 +1091,432 @@ export function markingState(ids) {
     return row ? { id, state: queued ? 'queued' : row.ai_status, error: row.ai_error, progress: parse(row.evaluation_progress, null) } : { id, state: 'gone' };
   });
 }
+
+
+/* ------------------------------------------ evidence-bounded finalization */
+
+const FINALIZATION_VERSION = 'bulk-finalization-v1';
+const isFinalizationLocked = (item) => Boolean(item && ['finalization_waiting', 'finalizing', 'finalization_failed', 'finalized'].includes(item.sort_status));
+const finalizationWaiting = [];
+const finalizationActive = new Set();
+
+// All compatible masters are inspected in full, including low-ranked variants.
+// The legacy manual matcher keeps its short list; finalization never treats
+// catalogue ranking as evidence that a different administered master was used.
+export function finalizationCandidates(teacher, school, library) {
+  return library.filter((paper) => PAPER_SECTIONS.some((section) => !paperCompatibilityProblem(paper, teacher, school, section)));
+}
+
+function bulkSourceBasis(id) {
+  const item = selectItem.get(id);
+  if (!item) return null;
+  const prior = parse(item.result, {});
+  return {
+    version: FINALIZATION_VERSION,
+    config: { model: OPENAI_MODEL, reading_model: GEMINI_MODEL, reading_version: READING_VERSION, prompts: digest([LOOK_INSTRUCTIONS, LOOK_SCHEMA, SORT_INSTRUCTIONS, SORT_SCHEMA]) },
+    item: { id: item.id, school_id: item.school_id, test_id: item.test_id, file_name: item.file_name,
+      teacher_id: item.teacher_id, matched_by: item.matched_by, papers: item.papers },
+    confirmations: { papers: prior.paper_confirmations ?? {}, pages: prior.page_confirmations ?? {} },
+    school: selectSchool.get(item.school_id), teachers: selectSchoolTeachers.all(item.school_id),
+    pages: selectPages.all(id).map(fileBasis), library: allPapers().map(fileBasis),
+  };
+}
+
+function saveFinalization(id, state) {
+  const row = selectItem.get(id);
+  if (!row) throw friendly('This submission no longer exists.');
+  setResult.run(JSON.stringify({ ...parse(row.result, {}), finalization: state }), id);
+}
+
+// Independently resolve each page. Mixed PDFs can be split, but a manual
+// selection, filename or model-chosen ID cannot override a definite name.
+export function finalizationOwners(item, pages, identity, teachers, conflicts = []) {
+  const conflictSet = new Set(conflicts);
+  const namedIds = new Set(identity.pages.filter((p) => p.teacher_id).map((p) => p.teacher_id));
+  const fromFile = teacherFromFileName(item.file_name, teachers);
+  return pages.map((page) => {
+    const seen = identity.complete ? identity.pages.find((p) => p.page_id === page.id) : null;
+    if (!seen || conflictSet.has(page.id)) return { page_id: page.id, teacher_id: null, reason_code: 'identity_unresolved' };
+    let teacher = teachers.find((t) => t.id === seen.teacher_id);
+    if (!teacher && item.matched_by === 'you') teacher = teachers.find((t) => t.id === item.teacher_id);
+    if (!teacher && !seen.name_written && fromFile && (!namedIds.size || (namedIds.size === 1 && namedIds.has(fromFile.id)))) teacher = fromFile;
+    if (!teacher || (seen.name_written && definiteNameConflict(teacher.name, seen.name_written)) ||
+        !contextFits(teacher, seen.grade_written, seen.subjects_written)) return { page_id: page.id, teacher_id: null, reason_code: 'identity_unresolved' };
+    const explicitUnknownSubject = seen.subjects_written && !subjectKeys(seen.subjects_written).size && teacher.subjects &&
+      !String(teacher.subjects).split(/[,;/|]/).some((subject) => identityName(subject) === identityName(seen.subjects_written));
+    if (explicitUnknownSubject) return { page_id: page.id, teacher_id: null, reason_code: 'identity_unresolved' };
+    return { page_id: page.id, teacher_id: teacher.id, reason_code: null };
+  });
+}
+
+function definiteObservationConflicts(first, next) {
+  if (!first?.complete || !Array.isArray(next?.pages)) return [];
+  return first.pages.filter((old) => {
+    const fresh = next.pages.find((p) => p.page_id === old.page_id);
+    return fresh && ((old.name_confidence === 'certain' && fresh.name_confidence === 'certain' && definiteNameConflict(old.name_written, fresh.name_written)) ||
+      (old.paper_title_written && fresh.paper_title_written && paperName(old.paper_title_written) !== paperName(fresh.paper_title_written)) ||
+      !contextFits({ grade: old.grade_written, subjects: old.subjects_written }, fresh.grade_written, fresh.subjects_written));
+  }).map((p) => p.page_id);
+}
+
+// One terminal record covers every original page exactly once. Originals stay
+// owned by bulk_pages; assessments receive distinct copies so deleting an
+// assessment attachment cannot destroy this submission's retained source.
+export async function finalizeBulkItem(id, { request = requestJson, configured = openaiConfigured,
+  evaluate = true, unavailable = finalizeUnavailable } = {}) {
+  let item = selectItem.get(id);
+  if (!item) return null;
+  const original = parse(item.result, {});
+  if (item.sort_status === 'finalized' && original.finalization?.outcome) return original.finalization.outcome;
+  if (['waiting', 'running'].includes(item.sort_status)) throw friendly('This submission is already being matched.');
+  setStatus.run('finalizing', null, id);
+  const source = bulkSourceBasis(id), basis = digest(source);
+  let work = original.finalization;
+  work = work?.basis === basis && work.version === FINALIZATION_VERSION ? work : {
+    version: FINALIZATION_VERSION, basis, batch_id: original.finalization?.batch_id ?? `submission-${id}`, state: 'running', identity_attempts: 0, identity: null, conflicts: [], matches: {},
+  };
+  work.batch_id ??= original.finalization?.batch_id ?? `submission-${id}`;
+  work.state = 'running';
+  saveFinalization(id, work);
+  const unchanged = () => {
+    if (digest(bulkSourceBasis(id)) !== basis) throw friendly('The submission sources changed during finalization.');
+  };
+  const { pages, teachers, school } = source;
+  const availablePages = pages.filter((p) => p.sha256 !== 'missing' && OPENAI_IMAGE_TYPES.has(p.mime_type));
+  const files = availablePages.map((p) => ({ ...p, original_name: `${item.file_name} - source page ${p.position}` }));
+  let identity = work.identity;
+  let owners = identity ? finalizationOwners(item, pages, identity, teachers, work.conflicts) : [];
+  const readableSources = files.length > 0;
+  if (configured() && readableSources) {
+    while (work.identity_attempts < 2 && (!identity?.complete || owners.some((p) => !p.teacher_id && availablePages.some((s) => s.id === p.page_id)))) {
+      const focus = owners.filter((p) => !p.teacher_id).map((p) => pages.find((s) => s.id === p.page_id)?.position);
+      work.identity_attempts += 1;
+      saveFinalization(id, work); // Reserve the attempt before the provider call.
+      try {
+        unchanged();
+        const look = await request({ instructions: LOOK_INSTRUCTIONS + (work.identity_attempts > 1
+          ? `\nFOCUSED REREAD: inspect ambiguous identity fields on source pages ${focus.join(', ') || 'all'}. Use the original images. Do not replace an earlier definite contradictory name merely to resolve uncertainty.` : ''),
+          content: [{ type: 'input_text', text: `TEACHERS: ${JSON.stringify(teachers)}\nSOURCE FILE: ${item.file_name}` }, ...await pageInputs('ANSWER SHEETS', files)],
+          name: 'answer_sheets_first_look', schema: LOOK_SCHEMA, maxRetries: 1, timeoutMs: 120000, task: 'read the source identities', retry: 'The submission will retain any unassessable evidence.' });
+        unchanged();
+        const observed = inspectIdentity(item, availablePages, look, teachers);
+        if (observed.complete) work.languages = availablePages.map((p, i) => ({ page_id: p.id, language: look.pages.find((seen) => seen.page === i + 1)?.language ?? 'mixed', languages: look.pages.find((seen) => seen.page === i + 1)?.languages ?? [] }));
+        work.conflicts = [...new Set([...work.conflicts, ...definiteObservationConflicts(identity, observed)])];
+        // Keep certain earlier page observations when the focused reread is
+        // less specific; it cannot erase a source-written master or identity.
+        if (identity?.complete && observed.complete) for (const p of observed.pages) {
+          const old = identity.pages.find((s) => s.page_id === p.page_id);
+          if (old?.paper_title_written && !p.paper_title_written) p.paper_title_written = old.paper_title_written;
+          if (old?.grade_written && !p.grade_written) p.grade_written = old.grade_written;
+          if (old?.subjects_written && !p.subjects_written) p.subjects_written = old.subjects_written;
+          if (old?.name_confidence === 'certain' && p.name_confidence !== 'certain') Object.assign(p, old);
+        }
+        if (!identity?.complete || observed.complete) identity = work.identity = observed;
+        owners = finalizationOwners(item, pages, identity, teachers, work.conflicts);
+        work.identity_error = null;
+      } catch (error) {
+        unchanged();
+        work.identity_error = String(error.userMessage ?? error.message);
+      }
+      saveFinalization(id, work);
+    }
+  }
+  unchanged();
+  owners = identity ? finalizationOwners(item, pages, identity, teachers, work.conflicts) : pages.map((p) => ({ page_id: p.id, teacher_id: null, reason_code: 'identity_unresolved' }));
+  // Use the established multilingual reading path when available; an OCR
+  // outage never suppresses the original images used for content matching.
+  if (configured() && readableSources && geminiConfigured() && !work.reading_attempted) {
+    work.reading_attempted = true;
+    saveFinalization(id, work);
+    const nonEnglish = files.filter((p) => work.languages?.some((l) => l.page_id === p.id && l.language !== 'english'));
+    if (nonEnglish.length) {
+      try {
+        const languages = [...new Set((work.languages ?? []).flatMap((p) => p.languages))];
+        const readings = await readAnswers(nonEnglish, languages);
+        work.readings = nonEnglish.map((p, i) => ({ page_id: p.id, text: readings[i] }));
+      } catch (error) { work.reading_error = String(error.userMessage ?? error.message); }
+      unchanged(); saveFinalization(id, work);
+    }
+  }
+  const decisions = pages.map((p) => ({ page_id: p.id, source_page: p.position, source_available: p.sha256 !== 'missing', teacher_id: owners.find((o) => o.page_id === p.id)?.teacher_id ?? null,
+    section: null, paper_id: null, state: 'unassigned', reason_code: availablePages.some((a) => a.id === p.id) ? 'identity_unresolved' : 'source_unavailable' }));
+  const knownTeachers = [...new Set(owners.map((p) => p.teacher_id).filter(Boolean))];
+  for (const teacherId of knownTeachers) {
+    const teacher = teachers.find((t) => t.id === teacherId);
+    const mine = pages.filter((p) => owners.some((o) => o.page_id === p.id && o.teacher_id === teacherId));
+    const checkpoint = work.matches[teacherId] ??= { attempts: 0, plan: null, conflicts: [] };
+    const candidates = finalizationCandidates(teacher, school, source.library).filter((p) => p.sha256 !== 'missing');
+    const evidence = { identity, candidate_paper_ids: candidates.map((p) => p.id),
+      paper_confirmations: teacher.id === item.teacher_id ? original.paper_confirmations ?? {} : {},
+      page_confirmations: teacher.id === item.teacher_id ? original.page_confirmations ?? {} : {} };
+    let plan = checkpoint.plan;
+    if (configured() && candidates.length && readableSources) {
+      while (checkpoint.attempts < 2 && (!plan?.complete || plan.sourcePages.some((p) => p.issues.length))) {
+        checkpoint.attempts += 1;
+        saveFinalization(id, work);
+        try {
+          unchanged();
+          const paperInputs = await Promise.all(candidates.map(async (p) => [
+            { type: 'input_text', text: `QUESTION PAPER ${describe(p)}` },
+            { type: 'input_file', filename: `paper-${p.id}.pdf`, file_data: `data:application/pdf;base64,${(await fs.readFile(path.join(UPLOADS_DIR, p.stored_name))).toString('base64')}` },
+          ]));
+          const sorted = await request({ instructions: SORT_INSTRUCTIONS + '\nSUPPLIED BLANK ANSWER SHEETS: If an answer sheet explicitly names an exact compatible single-section administered master, retain that section and paper_id even when all answer spaces are blank; set has_answers false. This is a supplied section, not an absent section. Explain the exact printed title/section evidence with high confidence only when unambiguous. Cover sheets and loose blank pages without that evidence remain unassigned; never infer a blank answer sheet from failed reading.' + (checkpoint.attempts > 1
+            ? `\nFOCUSED REMATCH: re-inspect unresolved source pages and their response content against ALL supplied compatible masters. Earlier observations: ${JSON.stringify(plan?.sourcePages ?? [])}. Keep genuine conflicts unresolved; never choose the nearest-looking paper.` : ''),
+            content: [{ type: 'input_text', text: `TEACHER: ${JSON.stringify(teacher)}\nAUTHORITATIVE MASTER CONFIRMATIONS: ${JSON.stringify(evidence.paper_confirmations)}\nSOURCE IDENTITY/TITLES: ${JSON.stringify(identity.pages.filter((p) => mine.some((m) => m.id === p.page_id)))}` },
+              ...paperInputs.flat(), ...await pageInputs('ANSWER SHEETS', mine.map((p) => ({ ...p, original_name: `${item.file_name} source page ${p.position}` }))),
+              ...(work.readings ?? []).filter((r) => r.text && mine.some((p) => p.id === r.page_id)).map((r) => ({ type: 'input_text', text: `Supporting transcription for source page ${pages.find((p) => p.id === r.page_id).position}; verify against its image: ${r.text}` }))],
+            name: 'answer_sheets_sorted', schema: SORT_SCHEMA, maxRetries: 1, timeoutMs: 120000, task: 'align the supplied responses with their administered papers', retry: 'Any unassessable evidence will be retained.' });
+          unchanged();
+          const next = buildSortPlan(teacher, school, source.library, mine, sorted, evidence, { allowSuppliedBlank: true });
+          if (plan?.complete && next.complete) for (const p of next.sourcePages) {
+            const old = plan.sourcePages.find((s) => s.page_id === p.page_id);
+            if (old && !old.issues.length && !p.issues.length && (old.paper_id !== p.paper_id || old.section !== p.section)) checkpoint.conflicts.push(p.page_id);
+            // A focused retry cannot discard an independently safe first-pass
+            // match merely because another page remained unassessable.
+            if (old && !old.issues.length && p.issues.length) Object.assign(p, old);
+          }
+          // Malformed retry output cannot erase a validated first-pass map.
+          if (!plan?.complete || next.complete) plan = checkpoint.plan = next;
+          checkpoint.error = next.complete ? null : 'The focused response did not account for every source page.';
+        } catch (error) {
+          unchanged();
+          checkpoint.error = String(error.userMessage ?? error.message);
+        }
+        saveFinalization(id, work);
+      }
+    }
+    for (const page of mine) {
+      const decision = decisions.find((d) => d.page_id === page.id);
+      const matched = plan?.complete && plan.sourcePages.find((p) => p.page_id === page.id);
+      const safe = matched && !matched.issues.length && !checkpoint.conflicts.includes(page.id);
+      Object.assign(decision, { state: 'no_assessment', reason_code: configured() ? 'paper_unavailable' : 'assessment_unavailable' });
+      if (safe && matched.section && matched.paper_id) Object.assign(decision, { section: matched.section, paper_id: matched.paper_id, state: 'filed', reason_code: null });
+      else if (safe && matched.has_answers === false) Object.assign(decision, { state: 'retained', reason_code: 'no_answer_content' });
+    }
+  }
+  unchanged();
+  const copies = [];
+  const attachable = decisions.filter((d) => ['filed', 'no_assessment'].includes(d.state));
+  for (const decision of attachable) {
+    const page = pages.find((p) => p.id === decision.page_id);
+    const copied = `finalized-${item.id}-${page.id}-${page.sha256.slice(0, 16)}${path.extname(page.stored_name)}`;
+    await fs.copyFile(path.join(UPLOADS_DIR, page.stored_name), path.join(UPLOADS_DIR, copied));
+    copies.push({ ...page, stored_name: copied });
+  }
+  unchanged();
+  const outcome = db.transaction(() => {
+    unchanged();
+    const current = parse(selectItem.get(id)?.result, {}).finalization;
+    if (current?.outcome) return current.outcome;
+    const groups = new Map();
+    for (const d of attachable) {
+      const key = `${d.teacher_id}|${d.state}|${d.section || ''}|${d.paper_id || ''}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(d);
+    }
+    const filed = [], unavailableIds = [];
+    for (const group of groups.values()) {
+      const first = group[0], teacher = teachers.find((t) => t.id === first.teacher_id);
+      // All PDFs in this explicit batch share one fresh sitting for the
+      // same teacher/section/master. Marking cannot start until every source
+      // outcome in the batch commits, so no running assessment is modified.
+      const existing = first.state === 'filed' ? db.prepare(`SELECT DISTINCT a.id FROM assessments a
+        JOIN assessment_files f ON f.assessment_id = a.id
+        JOIN assessment_papers ap ON ap.assessment_id = a.id
+        WHERE a.school_id = ? AND a.test_id = ? AND a.teacher_id = ? AND a.section IS ?
+          AND ap.paper_id = ? AND a.ai_status = 'none' AND a.status = 'assembling' AND a.evaluation_queue IS NULL
+          AND json_valid(f.source_metadata) AND json_extract(f.source_metadata, '$.finalization_batch_id') = ?
+        ORDER BY a.id LIMIT 1`).get(item.school_id, item.test_id, teacher.id, first.section, first.paper_id, work.batch_id) : null;
+      const assessmentId = existing?.id ?? Number(db.prepare(`INSERT INTO assessments (school_id, teacher_id, test_id, section, title, assessment_date, subject, status)
+        VALUES (?, ?, ?, ?, ?, date('now'), ?, 'draft')`).run(item.school_id, teacher.id, item.test_id, first.section,
+        `${source.school.name} - ${teacher.name} - Submission ${id}${first.section ? ` - Section ${first.section}` : ''}`,
+        first.paper_id ? source.library.find((p) => p.id === first.paper_id)?.subject ?? '' : '').lastInsertRowid);
+      const groupPages = group.map((d) => copies.find((p) => p.id === d.page_id));
+      attachStoredPages(assessmentId, 'response', groupPages.map((p) => ({ stored_name: p.stored_name,
+        original_name: `${item.file_name} - source page ${p.position}${path.extname(p.stored_name)}`, mime_type: p.mime_type, size_bytes: p.size_bytes })), { allowAssembling: true });
+      for (const d of group) {
+        const copied = copies.find((p) => p.id === d.page_id);
+        const metadata = { source_file: item.file_name, source_page: d.source_page, source_page_count: pages.length,
+          bulk_item_id: id, bulk_page_id: d.page_id, finalization_batch_id: work.batch_id, teacher_id: teacher.id, teacher_name: teacher.name,
+          identity: identity.pages.find((p) => p.page_id === d.page_id), identity_confirmed: item.matched_by === 'you' && item.teacher_id === teacher.id,
+          administered_paper_id: d.paper_id, filed_section: d.section, finalization_basis: basis,
+          unresolved_sibling_pages: decisions.filter((p) => p.state === 'unassigned' || (p.state === 'no_assessment' && p.teacher_id === teacher.id))
+            .map((p) => ({ source_page: p.source_page, reason_code: p.reason_code })),
+          original_match: work.matches[teacher.id]?.plan?.sourcePages.find((p) => p.page_id === d.page_id) ?? null };
+        db.prepare('UPDATE assessment_files SET source_metadata = ? WHERE assessment_id = ? AND stored_name = ?').run(JSON.stringify(metadata), assessmentId, copied.stored_name);
+        d.assessment_id = assessmentId;
+      }
+      if (first.paper_id) {
+        setSittingPapers(assessmentId, [first.paper_id]);
+        db.prepare("UPDATE assessments SET status = 'assembling' WHERE id = ?").run(assessmentId);
+      }
+      if (first.state === 'filed') filed.push({ assessment_id: assessmentId, teacher: { id: teacher.id, name: teacher.name }, section: first.section, paper_id: first.paper_id, pages: group.length });
+      else unavailableIds.push({ assessment_id: assessmentId, reason_code: first.reason_code, teacher: { id: teacher.id, name: teacher.name } });
+    }
+    const result = { version: FINALIZATION_VERSION, batch_id: work.batch_id, item_id: id, file_name: item.file_name, basis, completed_at: new Date().toISOString(),
+      pages: decisions, filed, unavailable: unavailableIds };
+    work.state = 'finalized'; work.outcome = result;
+    saveFinalization(id, work);
+    setStatus.run('finalized', null, id);
+    // Snapshot-only no-assessment creation has no provider dependency. Parent
+    // helper runs synchronously after the attached source rows are visible.
+    for (const row of unavailableIds) unavailable(row.assessment_id, row.reason_code, '', { queueReports: false });
+    return result;
+  })();
+  if (evaluate) flushFinalizationBatch(work.batch_id);
+  return outcome;
+}
+
+function finalizationBatchItems(batchId) {
+  return db.prepare("SELECT * FROM bulk_items WHERE json_valid(result) AND json_extract(result, '$.finalization.batch_id') = ? ORDER BY id").all(batchId);
+}
+
+export function flushFinalizationBatch(batchId) {
+  const items = finalizationBatchItems(batchId);
+  if (!items.length || items.some((item) => item.sort_status !== 'finalized')) return false;
+  const outcomes = items.map((item) => parse(item.result, {}).finalization.outcome);
+  const filed = outcomes.flatMap((outcome) => outcome.filed);
+  const dispatched = items.every((item) => parse(item.result, {}).finalization.dispatched === true);
+  if (!dispatched) {
+    const staleSources = items.some((item, i) => digest(bulkSourceBasis(item.id)) !== outcomes[i].basis);
+    const changedAttachments = [...new Set(filed.map((row) => row.assessment_id))].some((id) => {
+      const expected = outcomes.flatMap((outcome) => outcome.pages.filter((p) => p.state === 'filed' && p.assessment_id === id)
+        .map((p) => ({ ...p, item_id: outcome.item_id })));
+      const reference = filed.find((row) => row.assessment_id === id);
+      const assessment = db.prepare('SELECT * FROM assessments WHERE id = ?').get(id);
+      const papers = db.prepare('SELECT paper_id FROM assessment_papers WHERE assessment_id = ?').all(id);
+      const files = db.prepare("SELECT * FROM assessment_files WHERE assessment_id = ? ORDER BY position, id").all(id);
+      if (!assessment || assessment.status !== 'assembling' || assessment.ai_status !== 'none' || assessment.teacher_id !== reference.teacher.id || assessment.section !== reference.section ||
+          papers.length !== 1 || papers[0].paper_id !== reference.paper_id || files.length !== expected.length || files.some((f) => f.kind !== 'response')) return true;
+      const seen = new Set();
+      return files.some((file) => {
+        const metadata = parse(file.source_metadata, {});
+        const match = expected.find((p) => p.item_id === metadata.bulk_item_id && p.page_id === metadata.bulk_page_id);
+        const key = `${metadata.bulk_item_id}:${metadata.bulk_page_id}`;
+        const source = match && selectPages.all(match.item_id).find((p) => p.id === match.page_id);
+        if (!match || seen.has(key) || !source || fileBasis(file).sha256 !== fileBasis(source).sha256) return true;
+        seen.add(key); return false;
+      });
+    });
+    if (staleSources || changedAttachments) {
+      db.transaction(() => {
+        const invalidatedIds = new Set(outcomes.flatMap((outcome) => [...outcome.filed, ...outcome.unavailable]).map((row) => row.assessment_id));
+        for (const id of invalidatedIds) {
+          const previous = db.prepare('SELECT * FROM assessments WHERE id = ?').get(id);
+          if (!previous || (previous.ai_status !== 'none' && parse(previous.ai_result, {})?.outcome !== 'no_assessment')) continue;
+          db.prepare("UPDATE assessments SET status = 'finalized', ai_status = 'done', ai_result = NULL, score = NULL, max_score = NULL, ai_error = NULL, evaluation_checkpoint = ?, evaluation_progress = ? WHERE id = ?").run(
+            JSON.stringify({ superseded_result: parse(previous.ai_result, null), reason_code: 'batch_sources_changed', batch_id: batchId }),
+            JSON.stringify({ stage: 'superseded', reason_code: 'batch_sources_changed', batch_id: batchId }), id);
+        }
+        for (const item of items) {
+          const result = parse(item.result, {}), previous = result.finalization;
+          result.finalization = { version: FINALIZATION_VERSION, batch_id: batchId, state: 'failed', basis: null,
+            invalidated_outcome: previous.outcome, error: 'The submission sources changed before batch assessment began.' };
+          setResult.run(JSON.stringify(result), item.id); setStatus.run('finalization_failed', null, item.id);
+        }
+      })();
+      return false;
+    }
+    db.transaction(() => {
+      const ids = [];
+      for (const id of new Set(filed.map((row) => row.assessment_id))) {
+        const assessment = db.prepare('SELECT * FROM assessments WHERE id = ?').get(id);
+        const contributorIds = new Set(outcomes.filter((outcome) => outcome.pages.some((p) => p.assessment_id === id)).map((outcome) => outcome.item_id));
+        const unresolved = outcomes.flatMap((outcome) => outcome.pages
+          .filter((p) => (p.state === 'unassigned' && contributorIds.has(outcome.item_id)) || (p.state === 'no_assessment' && p.teacher_id === assessment.teacher_id))
+          .map((p) => ({ source_file: outcome.file_name, source_page: p.source_page, reason_code: p.reason_code })));
+        for (const file of db.prepare("SELECT id, source_metadata FROM assessment_files WHERE assessment_id = ? AND kind = 'response'").all(id)) {
+          const metadata = parse(file.source_metadata, {}); metadata.unresolved_sibling_pages = unresolved;
+          db.prepare('UPDATE assessment_files SET source_metadata = ? WHERE id = ?').run(JSON.stringify(metadata), file.id);
+        }
+        const ordered = db.prepare("SELECT id, source_metadata FROM assessment_files WHERE assessment_id = ? AND kind = 'response'").all(id)
+          .sort((a, b) => { const x = parse(a.source_metadata, {}), y = parse(b.source_metadata, {}); return x.bulk_item_id - y.bulk_item_id || x.source_page - y.source_page || a.id - b.id; });
+        ordered.forEach((file, index) => db.prepare('UPDATE assessment_files SET position = ? WHERE id = ?').run(index + 1, file.id));
+        db.prepare("UPDATE assessments SET status = 'scanned' WHERE id = ?").run(id); ids.push(id);
+      }
+      for (const item of items) { const work = parse(selectItem.get(item.id).result, {}).finalization; work.dispatched = true; saveFinalization(item.id, work); }
+      if (ids.length) markingQueue.enqueue(ids, 'standard');
+    })();
+  }
+  markingQueue.pump();
+  const unavailableTeachers = outcomes.flatMap((outcome) => outcome.unavailable.map((row) => row.teacher.id));
+  for (const teacherId of new Set(unavailableTeachers)) {
+    const report = findReport('teacher', items[0].test_id, teacherId);
+    if (!report?.content || report.status === 'failed' || isOutOfDate(report, teacherResults(teacherId, items[0].test_id))) queueTeacherReports(teacherId, items[0].test_id);
+  }
+  return true;
+}
+
+export function finalizationState(schoolId, testId) {
+  return selectItems.all(schoolId, testId).filter(isFinalizationLocked).map((item) => {
+    const work = parse(item.result, {}).finalization ?? {};
+    const outcome = work.outcome;
+    const assessments = outcome ? [...outcome.filed.map((f) => f.assessment_id), ...outcome.unavailable.map((f) => f.assessment_id)] : [];
+    const marking = assessments.length ? markingState(assessments) : [];
+    const active = marking.some((m) => ['queued', 'running'].includes(m.state));
+    const batchItems = work.batch_id ? finalizationBatchItems(work.batch_id) : [];
+    const blocked = outcome?.filed.length && batchItems.some((i) => i.sort_status === 'finalization_failed');
+    const assembling = outcome?.filed.length && batchItems.some((i) => i.sort_status !== 'finalized');
+    return { item_id: item.id, file_name: item.file_name, state: item.sort_status === 'finalization_failed' || blocked ? 'failed' : item.sort_status !== 'finalized' || assembling ? 'running' : active ? 'assessing' : 'finalized',
+      error: item.sort_status === 'finalization_failed' || blocked ? 'This submission changed or could not be saved. Its original pages are retained. Retry finalization with the current sources.' : null,
+      retry_ids: blocked || item.sort_status === 'finalization_failed' ? batchItems.filter((i) => i.sort_status === 'finalization_failed').map((i) => i.id) : [],
+      source_outcome: outcome ? outcome.pages.every((p) => p.state === 'unassigned') ? 'unassigned' : outcome.filed.length ? 'filed' : 'no_assessment' : null,
+      filed: outcome?.filed ?? [], unavailable: outcome?.unavailable ?? [], marking,
+      unassessed_pages: outcome?.pages.filter((p) => ['unassigned', 'no_assessment'].includes(p.state)).map((p) => p.source_page) ?? [],
+      source_pages: selectPages.all(item.id).map((p) => ({ source_page: p.position, src: `/uploads/${p.stored_name}` })),
+      download_url: item.sort_status === 'finalization_failed' || blocked || (outcome && !active && !assembling) ? `/api/bulk/${item.id}/outcome` : null };
+  });
+}
+
+export function finalizationOutcome(id, { statusOnly = false } = {}) {
+  const item = selectItem.get(Number(id));
+  if (!item || !['finalized', 'finalization_failed'].includes(item.sort_status)) return null;
+  const context = { school: selectSchool.get(item.school_id), test: selectTest.get(item.test_id) };
+  if (statusOnly || item.sort_status === 'finalization_failed') return { ...context, item_id: item.id, file_name: item.file_name,
+    processing_state: 'failed', teachers: [], filed: [], unavailable: [],
+    pages: selectPages.all(item.id).map((p) => ({ page_id: p.id, source_page: p.position, source_available: fileBasis(p).sha256 !== 'missing',
+      state: 'unassigned', teacher_id: null, reason_code: 'assessment_unavailable' })) };
+  const outcome = parse(item.result, {}).finalization?.outcome;
+  if (!outcome) return null;
+  return { ...outcome, ...context,
+    teachers: selectSchoolTeachers.all(item.school_id).filter((t) => outcome.pages.some((p) => p.teacher_id === t.id)) };
+}
+
+function pumpFinalizations() {
+  while (finalizationActive.size < MATCHING_AT_ONCE && finalizationWaiting.length) {
+    const id = finalizationWaiting.shift();
+    if (finalizationActive.has(id)) continue;
+    finalizationActive.add(id);
+    keepAwake(finalizeBulkItem(id).catch((error) => {
+      // A changed source or database fault is a genuine operational failure,
+      // never a successful assessment. Preserve the sources and diagnostic.
+      const item = selectItem.get(id);
+      if (item) { const result = parse(item.result, {}); result.finalization ??= {}; result.finalization.state = 'failed';
+        result.finalization.error = String(error.userMessage ?? error.message); setResult.run(JSON.stringify(result), id); setStatus.run('finalization_failed', null, id); }
+    }).finally(() => { finalizationActive.delete(id); pumpFinalizations(); }));
+  }
+}
+
+export function queueFinalizations(schoolId, testId, ids = null) {
+  const added = [];
+  const batchId = `batch-${schoolId}-${testId}-${Date.now()}-${digest(`${Math.random()}`).slice(0, 12)}`;
+  db.transaction(() => {
+    for (const item of selectItems.all(schoolId, testId)) {
+      if ((ids && !ids.includes(item.id)) || ['waiting', 'running', 'finalized'].includes(item.sort_status) || finalizationActive.has(item.id) || finalizationWaiting.includes(item.id)) continue;
+      const result = parse(item.result, {});
+      result.finalization = { ...result.finalization, batch_id: result.finalization?.batch_id ?? batchId, state: 'queued' };
+      setResult.run(JSON.stringify(result), item.id);
+      setStatus.run('finalization_waiting', null, item.id);
+      added.push(item.id);
+    }
+  })();
+  finalizationWaiting.push(...added);
+  pumpFinalizations();
+  return { started: added.length, finalizations: finalizationState(schoolId, testId) };
+}
+
+for (const { id } of db.prepare("SELECT id FROM bulk_items WHERE sort_status IN ('finalization_waiting', 'finalizing') ORDER BY id").all()) finalizationWaiting.push(id);
+setImmediate(() => {
+  pumpFinalizations();
+  for (const { batch_id } of db.prepare("SELECT DISTINCT json_extract(result, '$.finalization.batch_id') AS batch_id FROM bulk_items WHERE sort_status = 'finalized' AND json_valid(result)").all()) if (batch_id) flushFinalizationBatch(batch_id);
+});
