@@ -483,3 +483,33 @@ test('an unexpected question-paper attachment cannot enter a staged bulk assessm
   assert.equal(bulk.itemFor(f.id).sort_status, 'finalization_failed');
   assert.equal(db.prepare('SELECT evaluation_queue FROM assessments WHERE id=?').get(id).evaluation_queue, null);
 });
+
+
+test('finalization reconciles screenshot headings with actual question evidence', async () => {
+  for (const title of ['Computer knowledge; Digital skills; Interpersonal & instructional communication skills', 'Knowledge, pedagogy, classroom management & child psychology']) {
+    const f = fixture(1);
+    const outcome = await bulk.finalizeBulkItem(f.id, options(async (req) => {
+      if (req.name === 'answer_sheets_first_look') return look([lookPage(1, teachers[0], { paper_title_written: title })]);
+      assert.match(req.instructions, /generic descriptive heading/);
+      return sorted([sortPage(1, 1, { header_evidence: { status: 'descriptive', reason: 'The supplied master has the same distinctive scenario and question 5A; the source text is a general heading, without a conflicting version identifier.' } })]);
+    }));
+    assert.equal(outcome.filed.length, 1);
+    assert.equal(outcome.filed[0].paper_id, 1);
+    assert.equal(outcome.unavailable.length, 0);
+  }
+});
+
+test('finalization does not treat punctuation changes in a generic heading as a different teacher', async () => {
+  const f = fixture(1);
+  let looks = 0;
+  const outcome = await bulk.finalizeBulkItem(f.id, options(async (req) => {
+    if (req.name === 'answer_sheets_first_look') {
+      looks++;
+      return look([lookPage(1, teachers[0], { name_confidence: looks === 1 ? 'uncertain' : 'certain',
+        paper_title_written: looks === 1 ? 'Knowledge pedagogy and classroom management' : 'Knowledge, pedagogy & classroom management' })]);
+    }
+    return sorted([sortPage(1, 1, { header_evidence: { status: 'descriptive', reason: 'Both observed headings describe the same subject knowledge content and the exact question scenario matches.' } })]);
+  }));
+  assert.equal(looks, 2);
+  assert.equal(outcome.filed.length, 1);
+});

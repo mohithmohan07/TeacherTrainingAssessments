@@ -555,12 +555,21 @@ Useful afterwards:
 ```bash
 fly logs                              # what the app is doing
 fly ssh console                       # a shell on the machine
-fly ssh sftp get /data/app.db         # download a copy of the database
 fly secrets set APP_PASSWORD='new'    # change the password; signs everyone out
 ```
 
-Fly snapshots the volume daily by default, but a snapshot is not a backup you
-control — download `app.db` now and then if the records matter.
+Docker startup creates and verifies a consistent SQLite online backup before
+loading the server's database schema changes, once per deployed code fingerprint.
+It includes committed WAL data, fails closed if backup or disk-space checks fail,
+and never automatically deletes older backups. See
+[deployment database backups](docs/deployment-backups.md) for paths and details.
+
+For an off-volume database copy, use `fly ssh sftp get` with the completed
+backup's `app.db` path from its `complete.json` manifest. Do not download the
+live `/data/app.db` alone: committed records may still be in its WAL file.
+These same-volume backups cover the database only. Uploaded scans and PDFs
+remain on the volume and need a separate backup plan, as does protection from
+loss of that volume.
 
 ## Where your data lives
 

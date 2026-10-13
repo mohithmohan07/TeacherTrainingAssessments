@@ -309,7 +309,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
   }
 
   function matchCard() {
-    const unmatched = state.items.filter((item) => ['new', 'failed'].includes(item.sort_status)).length;
+    const unmatched = state.items.filter((item) => (['new', 'failed'].includes(item.sort_status) || (item.sort_status === 'done' && !item.ready))).length;
     const matching = state.items.filter((item) => ['waiting', 'running'].includes(item.sort_status)).length;
     const waitForUploads = uploading();
     return h(
@@ -331,7 +331,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
                 ? 'Find the question papers'
                 : unmatched === state.items.length
                   ? `Find the question papers for all ${unmatched}`
-                  : `Find the question papers for the ${unmatched} not matched yet`
+                  : `Find the question papers for the ${unmatched} still needing a match`
             ),
           ]
         : matching
@@ -419,7 +419,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
                     `${state.items.length} PDF${state.items.length === 1 ? '' : 's'}`,
                     ready ? `${ready} ready` : '',
                     sorting ? `${sorting} being matched` : '',
-                    unmatched ? `${unmatched} not matched yet` : '',
+                    unmatched ? `${unmatched} still needing a match` : '',
                     need ? `${need} need${need === 1 ? 's' : ''} you` : '',
                   ].filter(Boolean).join(' · ')
                 : 'Answer papers you upload appear here.'

@@ -30,7 +30,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Health check for the hosting platform: no session needed, no data exposed.
-app.get('/healthz', (_req, res) => res.json({ ok: true, revision: process.env.APP_REVISION || 'unknown' }));
+app.get('/healthz', (_req, res) => res.json({ ok: true, revision: process.env.APP_REVISION || 'unknown', build_fingerprint: process.env.APP_BUILD_FINGERPRINT || null }));
 
 // Every other request counts as someone using the app, so it does not stop
 // itself meanwhile (idle.js).

@@ -220,7 +220,8 @@ export function teacherProfile(teacher, school) {
 export function paperCompatibilityProblem(paper, teacher, school, section) {
   const split = (value) => String(value ?? '').split(',').map((v) => v.trim()).filter(Boolean);
   const overlap = (a, b) => [...a].some((v) => b.has(v));
-  if (!paper || !split(paper.sections).includes(section)) return `The selected paper has no Section ${section}.`;
+  if (!paper) return `No question paper has been matched for Section ${section} yet.`;
+  if (!split(paper.sections).includes(section)) return `The selected paper has no Section ${section}.`;
   const profile = teacherProfile(teacher, school);
   const levels = new Set(split(paper.levels));
   if (levels.size && profile.levels.size && !overlap(levels, profile.levels)) return 'The selected paper is for a different school level. Check the teacher’s class and the administered master.';
