@@ -6,7 +6,7 @@ import { discardUploads } from '../scans.js';
 import { testFor } from '../results.js';
 import {
   addItem, evaluateSittings, evaluateUnmarked, markingState, matchAll, choosePageSections, choosePapers, chooseTeacher, fileReady, itemFor, presentItem, presentItems, queueSort, removeItem,
-  unmarkedSittings, queueFinalizations, finalizationState, finalizationOutcome,
+  unmarkedSittings, queueFinalizations, finalizationState, finalizationOutcome, matchingPlan,
 } from '../bulk.js';
 
 import { outcomeHtml, outcomeFilename } from '../outcome-artifacts.js';
@@ -65,9 +65,18 @@ router.put('/:id', (req, res) => {
 
 // "Find the question papers": every PDF of the test not matched yet, or whose
 // matching failed, is matched at once.
+// Metadata-only cost/call preview; no matching, enqueueing or provider traffic.
+router.get('/match-plan', (req, res) => {
+  const { school, test } = schoolAndTest(req.query);
+  if (!school) return res.status(400).json({ error: 'Pick a school.' });
+  res.json(matchingPlan(school.id, test.id));
+});
+
 router.post('/match', (req, res) => {
   const { school, test } = schoolAndTest(req.body);
   if (!school) return res.status(400).json({ error: 'Pick a school.' });
+  const plan = matchingPlan(school.id, test.id);
+  if (plan.packet_count > 1 && req.body.plan_id !== plan.id) return res.status(409).json({ error: 'Review the current matching plan before starting this batch. Nothing was queued.', plan });
   const started = matchAll(school.id, test.id);
   res.json({ started, items: presentItems(school.id, test.id) });
 });

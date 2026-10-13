@@ -298,14 +298,17 @@ export async function renderBulk(root, query = new URLSearchParams()) {
     state.busy = true;
     drawReview();
     try {
-      const result = await bulkApi.match(school.id, test.id);
+      const plan = await bulkApi.matchPlan(school.id, test.id);
+      if (plan.packet_count > 1 && !confirmAction(`Match ${plan.packet_count} PDFs (${plan.source_pages} pages)? About ${plan.nominal_model_calls} model calls are planned before focused rereads, OCR or retries. Each packet stops after ${Math.round(plan.limits.packetTimeoutMs / 60000)} minutes or ${plan.limits.maxProviderAttempts} provider attempts. ${plan.concurrency} packets run at once. Charges depend on actual tokens; no dollar estimate is available. This does not file or grade responses.`)) return;
+      const result = await bulkApi.match(school.id, test.id, plan.id);
       state.items = result.items;
     } catch (error) {
       toast(error.message, 'error');
+    } finally {
+      state.busy = false;
+      drawReview();
+      schedulePoll();
     }
-    state.busy = false;
-    drawReview();
-    schedulePoll();
   }
 
   function matchCard() {
@@ -494,6 +497,8 @@ export async function renderBulk(root, query = new URLSearchParams()) {
         )
       ),
       item.sort_error ? h('p', { class: 'notice' }, item.sort_error) : null,
+      item.matching_metrics ? h('details', { class: 'hint' }, h('summary', {}, 'Matching usage'),
+        h('p', {}, `${item.matching_metrics.attempts} of ${item.matching_metrics.limits.maxProviderAttempts} permitted provider requests; ${Math.round(item.matching_metrics.elapsedMs / 1000)} seconds elapsed. ${item.matching_metrics.usage.totalTokens === null ? 'Token usage not reported yet.' : `${item.matching_metrics.usage.totalTokens} reported tokens (may exclude attempts without usage data).`} ${item.compared_candidates === null ? '' : `${item.compared_candidates} compatible question papers considered.`}`)) : null,
       h(
         'div',
         { class: 'bulk-teacher' },

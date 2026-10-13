@@ -30,22 +30,49 @@ const outputFormats = {
   legacy: (schema) => ({ responseMimeType: 'application/json', responseJsonSchema: schema }),
 };
 
-async function callGemini(key, parts, generationConfig, timeoutMs) {
+function tokenUsage(raw) {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const usage = {};
+  for (const key of ['promptTokenCount', 'candidatesTokenCount', 'totalTokenCount', 'thoughtsTokenCount', 'cachedContentTokenCount']) {
+    if (Number.isSafeInteger(raw[key]) && raw[key] >= 0) usage[key] = raw[key];
+  }
+  return Object.keys(usage).length ? usage : undefined;
+}
+
+async function callGemini(key, parts, generationConfig, timeoutMs, requestPolicy, task) {
+  // The current/legacy format fallback and every transport retry are separate
+  // billable attempts against the same packet budget.
+  const tracked = requestPolicy?.beginAttempt({ provider: 'gemini', model: GEMINI_MODEL, task, timeoutMs });
   let response;
   try {
     response = await fetch(`${API_BASE}/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
       body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig }),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: AbortSignal.timeout(tracked?.timeoutMs ?? timeoutMs),
     });
   } catch (error) {
     const timedOut = error.name === 'TimeoutError' || error.name === 'AbortError';
+    tracked?.finish({ status: timedOut ? 'timeout' : 'error', error: timedOut ? 'timeout' : 'network_error' });
+    if (error.code === 'MATCHING_BUDGET_EXHAUSTED') throw error;
     const failure = new GeminiError(timedOut ? 'Gemini took too long to answer. Please try again.' : `Could not reach Gemini: ${error.message}`, 502, { passing: true });
     failure.timedOut = timedOut;
     throw failure;
   }
-  return { response, payload: await response.json().catch(() => null) };
+  let bodyError;
+  const payload = await response.json().catch((error) => { bodyError = error; return null; });
+  const bodyTimedOut = bodyError?.name === 'TimeoutError' || bodyError?.name === 'AbortError';
+  tracked?.finish({
+    status: bodyTimedOut ? 'timeout' : response.status,
+    usage: tokenUsage(payload?.usageMetadata),
+    error: bodyTimedOut ? 'timeout' : bodyError ? 'invalid_response_json' : response.ok ? undefined : `http_${response.status}`,
+  });
+  if (bodyTimedOut) {
+    const failure = new GeminiError('Gemini took too long to answer. Please try again.', 502, { passing: true });
+    failure.timedOut = true;
+    throw failure;
+  }
+  return { response, payload };
 }
 
 // Many requests at once (a school's answer papers read together) can pass
@@ -56,22 +83,28 @@ async function callGemini(key, parts, generationConfig, timeoutMs) {
 const RETRIES = 10;
 const BUSY = [429, 500, 502, 503, 504];
 
-async function callGeminiPatiently(key, parts, generationConfig, timeoutMs, maxRetries = RETRIES) {
+const retryPause = (ms, requestPolicy) => new Promise((resolve) => setTimeout(resolve, requestPolicy
+  ? Math.max(0, Math.min(ms, requestPolicy.remainingMs()))
+  : ms));
+
+async function callGeminiPatiently(key, parts, generationConfig, timeoutMs, maxRetries = RETRIES, requestPolicy, task) {
   const retries = Math.min(RETRIES, Math.max(0, Math.floor(Number(maxRetries) || 0)));
   for (let attempt = 0; ; attempt += 1) {
     let result;
     try {
-      result = await callGemini(key, parts, generationConfig, timeoutMs);
+      result = await callGemini(key, parts, generationConfig, timeoutMs, requestPolicy, task);
     } catch (error) {
-      if (error.timedOut || attempt >= retries) throw error;
-      await new Promise((resolve) => setTimeout(resolve, Math.min(60_000, 2000 * 2 ** attempt) * (1 + Math.random() / 2)));
+      // Admission/persistence failures come from the policy, not Gemini. A
+      // generic retry must never turn them into more unmetered API requests.
+      if (!(error instanceof GeminiError) || error.timedOut || attempt >= retries) throw error;
+      await retryPause(Math.min(60_000, 2000 * 2 ** attempt) * (1 + Math.random() / 2), requestPolicy);
       continue;
     }
     if (attempt >= retries || !BUSY.includes(result.response.status)) return result;
     const delay = (result.payload?.error?.details ?? []).find((d) => String(d?.['@type']).endsWith('RetryInfo'))?.retryDelay;
     const asked = delay ? parseFloat(delay) * 1000 : 0;
     const wait = Math.min(60_000, Math.max(asked, 2000 * 2 ** attempt)) * (1 + Math.random() / 2);
-    await new Promise((resolve) => setTimeout(resolve, wait));
+    await retryPause(wait, requestPolicy);
   }
 }
 
@@ -85,6 +118,8 @@ export async function generateJson({
   schema,
   timeoutMs = 240_000,
   maxRetries = RETRIES,
+  requestPolicy,
+  task = 'generate_json',
   nothing = (reason) => `Gemini returned no paper (${reason}). Try again, or change the topic wording.`,
   garbled = 'Gemini returned something that was not a complete paper. Please try again.',
 }) {
@@ -94,9 +129,9 @@ export async function generateJson({
   }
 
   const content = [{ text: prompt }, ...parts];
-  let { response, payload } = await callGeminiPatiently(key, content, outputFormats.current(schema), timeoutMs, maxRetries);
+  let { response, payload } = await callGeminiPatiently(key, content, outputFormats.current(schema), timeoutMs, maxRetries, requestPolicy, task);
   if (response.status === 400 && /responseFormat|unknown name|invalid json payload/i.test(payload?.error?.message ?? '')) {
-    ({ response, payload } = await callGeminiPatiently(key, content, outputFormats.legacy(schema), timeoutMs, maxRetries));
+    ({ response, payload } = await callGeminiPatiently(key, content, outputFormats.legacy(schema), timeoutMs, maxRetries, requestPolicy, task));
   }
 
   if (!response.ok) {

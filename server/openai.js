@@ -36,6 +36,31 @@ export function passing(message) {
 const RETRIES = 15;
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Policies are optional, so evaluation keeps its existing retry behavior.
+// Matching shares one deadline across providers, including retry waits.
+const retryPause = (ms, requestPolicy) => pause(requestPolicy
+  ? Math.max(0, Math.min(ms, requestPolicy.remainingMs()))
+  : ms);
+
+// Only token counters enter the meter. Never pass a response, prompt, error
+// message, API key, or request headers to an observer of provider attempts.
+function tokenUsage(raw) {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const usage = {};
+  const copy = (from, to, keys) => {
+    for (const key of keys) {
+      if (Number.isSafeInteger(from?.[key]) && from[key] >= 0) to[key] = from[key];
+    }
+  };
+  copy(raw, usage, ['input_tokens', 'output_tokens', 'total_tokens']);
+  for (const [key, counters] of [['input_tokens_details', ['cached_tokens']], ['output_tokens_details', ['reasoning_tokens']]]) {
+    const details = {};
+    copy(raw[key], details, counters);
+    if (Object.keys(details).length) usage[key] = details;
+  }
+  return Object.keys(usage).length ? usage : undefined;
+}
+
 const busy = (res, payload) =>
   (res.status === 429 && ![payload?.error?.code, payload?.error?.type].includes('insufficient_quota')) ||
   [500, 502, 503, 504].includes(res.status);
@@ -56,7 +81,7 @@ function waitBefore(res, payload, attempt) {
 // Sends one request and returns the parsed JSON object. `task` finishes the
 // sentence "OpenAI took more than five minutes to …" and `retry` says what to
 // press to try again, so every failure reads as advice.
-export async function requestJson({ instructions, content, name, schema, task, retry, maxRetries = RETRIES, timeoutMs = TIMEOUT_MS }) {
+export async function requestJson({ instructions, content, name, schema, task, retry, maxRetries = RETRIES, timeoutMs = TIMEOUT_MS, requestPolicy }) {
   const retries = Math.min(RETRIES, Math.max(0, Math.floor(Number(maxRetries) || 0)));
   const timeout = Math.min(TIMEOUT_MS, Math.max(1000, Number(timeoutMs) || TIMEOUT_MS));
   const body = {
@@ -71,6 +96,9 @@ export async function requestJson({ instructions, content, name, schema, task, r
   let res;
   let payload;
   for (let attempt = 0; ; attempt += 1) {
+    // Reserve immediately before every actual fetch, not once per logical
+    // request. Budget errors stay outside the network-error retry handler.
+    const tracked = requestPolicy?.beginAttempt({ provider: 'openai', model: OPENAI_MODEL, task: name || task, timeoutMs: timeout });
     try {
       res = await fetch(OPENAI_URL, {
         method: 'POST',
@@ -79,22 +107,33 @@ export async function requestJson({ instructions, content, name, schema, task, r
           'content-type': 'application/json',
         },
         body: sent,
-        signal: AbortSignal.timeout(timeout),
+        signal: AbortSignal.timeout(tracked?.timeoutMs ?? timeout),
       });
     } catch (error) {
-      if (error.name !== 'TimeoutError' && attempt < retries) {
-        await pause(waitBefore(null, null, attempt));
+      const timedOut = error.name === 'TimeoutError' || error.name === 'AbortError';
+      tracked?.finish({ status: timedOut ? 'timeout' : 'error', error: timedOut ? 'timeout' : 'network_error' });
+      if (error.code === 'MATCHING_BUDGET_EXHAUSTED') throw error;
+      if (!timedOut && attempt < retries) {
+        await retryPause(waitBefore(null, null, attempt), requestPolicy);
         continue;
       }
       throw passing(
-        error.name === 'TimeoutError'
+        timedOut
           ? `OpenAI took more than five minutes to ${task}. ${retry}`
           : `Could not reach OpenAI: ${error.message}`
       );
     }
-    payload = await res.json().catch(() => null);
+    let bodyError;
+    payload = await res.json().catch((error) => { bodyError = error; return null; });
+    const bodyTimedOut = bodyError?.name === 'TimeoutError' || bodyError?.name === 'AbortError';
+    tracked?.finish({
+      status: bodyTimedOut ? 'timeout' : res.status,
+      usage: tokenUsage(payload?.usage),
+      error: bodyTimedOut ? 'timeout' : bodyError ? 'invalid_response_json' : res.ok ? undefined : `http_${res.status}`,
+    });
+    if (bodyTimedOut) throw passing(`OpenAI took too long to ${task}. ${retry}`);
     if (busy(res, payload) && attempt < retries) {
-      await pause(waitBefore(res, payload, attempt));
+      await retryPause(waitBefore(res, payload, attempt), requestPolicy);
       continue;
     }
     break;

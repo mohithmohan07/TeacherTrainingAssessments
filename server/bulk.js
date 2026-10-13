@@ -31,6 +31,8 @@ import { queueTeacherReports, findReport, isOutOfDate } from './reports.js';
 import { jobsAtOnce } from './capacity.js';
 import { keepAwake } from './idle.js';
 import { compareQuestionBank } from './bank-matching.js';
+import { createMatchingBudget, estimateMatchingCalls } from './matching-budget.js';
+import { readIdentityPages, rereadIdentityPages } from './identity-reading.js';
 
 /* ------------------------------------------------------------- the rows */
 
@@ -164,9 +166,13 @@ export function inspectIdentity(item, pages, look, teachers) {
       ['certain', 'uncertain', 'none'].includes(p.name_confidence) && Number.isInteger(p.teacher_id)),
     pages: pages.map((page, index) => {
       const seen = byNumber.get(index + 1) ?? {};
-      const name = String(seen.name_written ?? '').trim();
-      const grade = String(seen.grade_written ?? '').trim();
-      const subjects = String(seen.subjects_written ?? '').trim();
+      const field = (key) => {
+        const origin = seen.field_evidence?.[key]?.origin;
+        return origin === 'answer_content' || origin === 'absent' ? '' : String(seen[key] ?? '').trim();
+      };
+      const name = field('name_written');
+      const grade = field('grade_written');
+      const subjects = field('subjects_written');
       const resolved = name && seen.name_confidence === 'certain' ? namedTeacher(name, grade, subjects, teachers) : null;
       return {
         page_id: page.id, source_file: item.file_name, source_page: page.position,
@@ -174,7 +180,10 @@ export function inspectIdentity(item, pages, look, teachers) {
         name_confidence: seen.name_confidence ?? 'uncertain',
         reported_teacher_id: Number(seen.teacher_id) || null,
         teacher_id: resolved?.id ?? null,
-        paper_title_written: String(seen.paper_title_written ?? '').trim(),
+        paper_title_written: field('paper_title_written'),
+        field_evidence: seen.field_evidence ?? null,
+        field_observations: Object.fromEntries(['name_written', 'grade_written', 'subjects_written', 'paper_title_written'].map((key) => [key, String(seen[key] ?? '').trim()])),
+        field_review_required: Boolean(seen.reread_name_conflict || seen.reread_header_conflict) || Object.values(seen.field_evidence ?? {}).some((e) => e.origin === 'uncertain'),
       };
     }),
   };
@@ -203,6 +212,7 @@ export function identityProblems(item, pages, result, teachers) {
       problems.push(`Source page ${source.source_page} has a class or subject that conflicts with ${selected.name}’s profile. Correct the profile/teacher or exclude that page before filing.`);
     }
   }
+  if (evidence.some((e) => e.field_review_required)) problems.push('A source identity/header field could not be distinguished from answer content. Re-read the flagged source page before filing.');
   const named = evidence.filter((e) => e.name_written);
   const conflictingNames = named.some((a, i) => named.slice(i + 1).some((b) =>
     a.name_confidence === 'certain' && b.name_confidence === 'certain' && definiteNameConflict(a.name_written, b.name_written)));
@@ -307,7 +317,7 @@ export function chooseTeacher(item, teacherId) {
     const current = selectItem.get(item.id);
     const result = parse(current.result, {});
     const pages = selectPages.all(item.id);
-    if (!pages.some((p) => p.section) && (!result.identity?.complete || !identityProblems(current, pages, result, selectSchoolTeachers.all(item.school_id)).length)) queueSort(item.id);
+    if (!result.identity?.complete || !identityProblems(current, pages, result, selectSchoolTeachers.all(item.school_id)).length) queueSort(item.id);
   }
   return null;
 }
@@ -360,8 +370,47 @@ export function boundedConcurrency(configured, memoryLimit) {
   return Math.max(1, Math.min(memoryLimit, Number.isInteger(value) && value > 0 ? value : 3));
 }
 export const MATCHING_AT_ONCE = boundedConcurrency(process.env.BULK_MATCHING_CONCURRENCY, jobsAtOnce(150));
+export const MATCHING_LIMITS = Object.freeze({ packetTimeoutMs: 15 * 60 * 1000, requestTimeoutMs: 90 * 1000, maxProviderAttempts: 40 });
 const waiting = [];
 let running = 0;
+
+// Read-only planning: metadata and source counts only, no model calls or writes.
+// Estimates are logical calls, not prices; provider retries and OCR are separate.
+export function matchingPlan(schoolId, testId, ids = null) {
+  const school = selectSchool.get(schoolId);
+  const library = allPapers();
+  const requested = ids ? new Set(ids.map(Number)) : null;
+  const items = selectItems.all(schoolId, testId).filter((item) => (!requested || requested.has(item.id)) &&
+    (['new', 'failed'].includes(item.sort_status) || (item.sort_status === 'done' && !presentItem(item).ready)));
+  const packets = items.map((item) => {
+    const teacher = item.teacher_id ? selectTeacher.get(item.teacher_id) : null;
+    const pages = selectPages.all(item.id);
+    const candidates = teacher ? candidatePapers(teacher, school, library) : library;
+    const estimate = estimateMatchingCalls(candidates.length, { sourcePages: Math.max(1, pages.length) });
+    return { item_id: item.id, file_name: item.file_name, source_pages: pages.length,
+      compatible_candidates: candidates.length, candidate_ids: candidates.map((p) => p.id),
+      profile_resolved: Boolean(teacher), calls: estimate,
+      non_english_pages_last_observed: pages.filter((p) => p.language && p.language !== 'english').length };
+  });
+  return { id: digest({ items: items.map((item) => ({ ...item, pages: selectPages.all(item.id) })), library, school, teachers: items.map(item => item.teacher_id ? selectTeacher.get(item.teacher_id) : null), packets, limits: MATCHING_LIMITS }),
+    packets, packet_count: packets.length, source_pages: packets.reduce((n, p) => n + p.source_pages, 0),
+    nominal_model_calls: packets.reduce((n, p) => n + p.calls.totalCalls, 0),
+    maximum_provider_attempts: packets.length * MATCHING_LIMITS.maxProviderAttempts,
+    concurrency: MATCHING_AT_ONCE, limits: MATCHING_LIMITS,
+    estimate_note: 'Logical matching calls only; OCR, retries and actual token usage determine charges. No dollar price is estimated.' };
+}
+
+function itemMatchingPolicy(id, initialSnapshot = null) {
+  return createMatchingBudget({ ...MATCHING_LIMITS, ...(initialSnapshot ? { initialSnapshot } : {}),
+    onChange: (snapshot) => {
+      const current = selectItem.get(id);
+      if (!current) throw friendly('This submission was removed while matching. No further model requests will be made.');
+      const result = parse(current.result, {});
+      result.matching_metrics = snapshot;
+      setResult.run(JSON.stringify(result), id);
+    },
+  });
+}
 
 // "Find the question papers": every PDF of the test not matched yet, or whose
 // matching failed or still needs evidence, is matched now. Completed/filed
@@ -375,6 +424,13 @@ export function matchAll(schoolId, testId, { queue = queueSort } = {}) {
 
 export function queueSort(id) {
   if (isFinalizationLocked(selectItem.get(id))) return;
+  const current = selectItem.get(id);
+  const result = parse(current?.result, {});
+  if (result.matching_metrics) {
+    result.matching_history = [...(result.matching_history ?? []), result.matching_metrics].slice(-5);
+    delete result.matching_metrics;
+    setResult.run(JSON.stringify(result), id);
+  }
   setStatus.run('waiting', null, id);
   if (!waiting.includes(id)) waiting.push(id);
   pump();
@@ -407,9 +463,9 @@ setImmediate(pump);
 
 const LOOK_INSTRUCTIONS = `You are helping file a teacher's answers to a teacher training assessment. You are given every page of one PDF of answer sheets, scanned, usually handwritten, and the list of teachers at the school.
 
-1. Inspect EVERY page independently for teacher identity. One PDF may mistakenly contain two teachers. Never carry a teacher name onto an unnamed page. For each page, copy name_written, grade_written, subjects_written and paper_title_written exactly from explicit identity/header fields, or "" if absent. Do not use names in questions or answers as teacher names. paper_title_written is only an explicitly printed/written question-paper title, section heading or filename, never your inferred subject. Copy a generic heading faithfully; the later question comparison decides whether it names a unique master. A descriptive heading is not itself a version identifier. Give teacher_id only when the full name, initials and any written class/subject identify exactly one listed teacher; otherwise 0. Use name_confidence "certain", "uncertain" or "none". Never resolve namesakes by guessing. The top-level name_written/teacher_id summarize only when the named pages agree; otherwise use "" and 0. A filename is a clue, not authority over page evidence.
+1. Inspect EVERY page independently for teacher identity. One PDF may mistakenly contain two teachers. Never carry a teacher name onto an unnamed page. For each page, copy name_written, grade_written, subjects_written and paper_title_written exactly from explicit identity/header fields, or "" if absent. Do not use names in questions or answers as teacher names. paper_title_written is only an explicitly printed/written administered question-paper title, section heading or filename, never your inferred subject. Copy values only from actual identity/document header fields. Equations or answer notes near a blank Class/Subject box are answer content, not class/subject metadata. A report title, classroom example or assessment heading written within an answer is answer content, not this administered paper’s title. For every copied field, provide field_evidence with its visual origin and a short reason. Use identity_header for Name/Class/Subject fields, document_heading for the administered paper heading, answer_content for text belonging to an answer, absent when truly absent, and uncertain when its role cannot be established. Copy a generic heading faithfully; the later question comparison decides whether it names a unique master. A descriptive heading is not itself a version identifier. Give teacher_id only when the full name, initials and any written class/subject identify exactly one listed teacher; otherwise 0. Use name_confidence "certain", "uncertain" or "none". Never resolve namesakes by guessing. The top-level name_written/teacher_id summarize only when the named pages agree; otherwise use "" and 0. A filename is a clue, not authority over page evidence.
 
-Return exactly one entry for each input page, numbered 1 through the total page count, in original order.
+Return exactly one entry for each supplied image, using the local page numbers in the supplied batch map. Do not return observations for images outside this batch.
 
 2. For each page, say what language the teacher's writing on it is in: "english" when it is all in English, "other" when none of it is English (for example Kannada, Hindi or Sanskrit), "mixed" when it has both, even a word or a line. Judge the language, not the script: Hindi written in English letters is Hindi. Printed text, numbers and question labels such as "Q5 A" do not count. A page with no writing is "english". Name the languages in English in languages.`;
 
@@ -425,7 +481,7 @@ const LOOK_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['page', 'language', 'languages', 'name_written', 'teacher_id', 'grade_written', 'subjects_written', 'name_confidence', 'paper_title_written'],
+        required: ['page', 'language', 'languages', 'name_written', 'teacher_id', 'grade_written', 'subjects_written', 'name_confidence', 'paper_title_written', 'field_evidence'],
         properties: {
           page: { type: 'integer' },
           name_written: { type: 'string' },
@@ -434,6 +490,12 @@ const LOOK_SCHEMA = {
           subjects_written: { type: 'string' },
           name_confidence: { type: 'string', enum: ['certain', 'uncertain', 'none'] },
           paper_title_written: { type: 'string' },
+          field_evidence: { type: 'object', additionalProperties: false, required: ['name_written', 'grade_written', 'subjects_written', 'paper_title_written'],
+            properties: Object.fromEntries(['name_written', 'grade_written', 'subjects_written', 'paper_title_written'].map((key) => [key, {
+              type: 'object', additionalProperties: false, required: ['origin', 'reason'], properties: {
+                origin: { type: 'string', enum: ['identity_header', 'document_heading', 'answer_content', 'absent', 'uncertain'] }, reason: { type: 'string' },
+              },
+            }])) },
           language: { type: 'string', enum: ['english', 'other', 'mixed'] },
           languages: { type: 'array', items: { type: 'string' } },
         },
@@ -525,13 +587,14 @@ export function candidatePapers(teacher, school, papers, authoritativeIds = []) 
 const pagesOf = (count) => `${count} page${count === 1 ? '' : 's'}`;
 
 
-async function sortItem(id) {
+export async function sortItem(id, { request = requestJson, configured = openaiConfigured, read = readAnswers } = {}) {
   let item = selectItem.get(id);
   if (!item) return;
   setStatus.run('running', null, id);
+  const requestPolicy = itemMatchingPolicy(id, parse(item.result, {}).matching_metrics ?? null);
   const pages = selectPages.all(id);
 
-  if (!openaiConfigured()) {
+  if (!configured()) {
     throw friendly('OpenAI is not set up on the server (the OPENAI_API_KEY secret is missing), so these pages cannot be matched automatically. Choose the teacher, sections and papers yourself.');
   }
   const unreadable = pages.filter((page) => !OPENAI_IMAGE_TYPES.has(page.mime_type));
@@ -542,27 +605,70 @@ async function sortItem(id) {
   const files = pages.map((page) => ({ ...page, original_name: `${item.file_name} page ${page.position}` }));
 
   // 1. Whose answers, and the language of each page.
-  const look = await requestJson({
-    instructions: LOOK_INSTRUCTIONS,
-    content: [
-      {
-        type: 'input_text',
-        text: `TEACHERS AT THE SCHOOL:\n${teachers.map((t) => `id ${t.id}: ${t.name}${t.grade ? ` (${t.grade}${t.subjects ? `, ${t.subjects}` : ''})` : ''}`).join('\n')}`,
-      },
-      { type: 'input_text', text: `ANSWER SHEETS (${pagesOf(pages.length)}), from the file "${item.file_name}":` },
-      ...(await pageInputs('ANSWER SHEETS', files)),
-    ],
-    name: 'answer_sheets_first_look',
-    schema: LOOK_SCHEMA,
-    task: 'read the name and languages on these answer sheets',
-    retry: 'Press Match again to try again.',
+  const library = allPapers();
+  const identityContent = [
+    { type: 'input_text', text: `TEACHERS AT THE SCHOOL:\n${teachers.map((t) => `id ${t.id}: ${t.name}${t.grade ? ` (${t.grade}${t.subjects ? `, ${t.subjects}` : ''})` : ''}`).join('\n')}` },
+    { type: 'input_text', text: `SOURCE FILE: ${item.file_name}. A filename is a clue, not authority over a contradictory written name.` },
+  ];
+  let look = await readIdentityPages({ files, request, requestPolicy,
+    timeoutMs: MATCHING_LIMITS.requestTimeoutMs, maxRetries: 1,
+    instructions: LOOK_INSTRUCTIONS, schema: LOOK_SCHEMA, content: identityContent,
+    name: 'answer_sheets_first_look', task: 'read the identity and language on these answer pages', retry: 'Match again to retry the retained source pages.',
   });
+  const firstIdentity = inspectIdentity(item, pages, look, teachers);
+  const selected = item.teacher_id ? teachers.find((t) => t.id === item.teacher_id) : null;
+  const focus = firstIdentity.pages.flatMap((source, index) => {
+    const uncertainName = source.name_written && (!source.teacher_id || source.name_confidence !== 'certain');
+    const profileConflict = selected && (!contextFits(selected, source.grade_written, source.subjects_written) ||
+      (source.subjects_written && !subjectKeys(source.subjects_written).size && selected.subjects &&
+        !String(selected.subjects).split(/[,;/|]/).some((subject) => identityName(subject) === identityName(source.subjects_written))));
+    const differentTeacher = selected && source.teacher_id && source.teacher_id !== selected.id;
+    return source.field_review_required || uncertainName || profileConflict || differentTeacher || source.paper_title_written ? [index + 1] : [];
+  });
+  if (focus.length) {
+    look = await rereadIdentityPages({ previous: look, files, pageNumbers: focus, request, requestPolicy,
+      timeoutMs: MATCHING_LIMITS.requestTimeoutMs, maxRetries: 1, instructions: LOOK_INSTRUCTIONS, schema: LOOK_SCHEMA, content: identityContent,
+      name: 'answer_sheets_identity_reread', task: 'verify flagged identity fields against their source pages', retry: 'The original pages remain available for review.',
+      mergeObservation: (old, fresh) => {
+        // A focused read may distinguish answer content from a header; it may
+        // not erase a clearly different named teacher seen on that page.
+        const first = inspectIdentity(item, [{ id: 1, position: 1 }], { pages: [{ ...old, page: 1 }] }, teachers).pages[0];
+        const next = inspectIdentity(item, [{ id: 1, position: 1 }], { pages: [{ ...fresh, page: 1 }] }, teachers).pages[0];
+        for (const key of ['grade_written', 'subjects_written']) {
+          if (old.field_evidence?.[key]?.origin === 'identity_header' && String(old[key]).trim() &&
+              identityName(first[key]) !== identityName(next[key]) && fresh.field_evidence?.[key]?.origin !== 'answer_content') {
+            fresh = { ...fresh, [key]: old[key], field_evidence: { ...fresh.field_evidence, [key]: old.field_evidence[key] }, reread_name_conflict: true };
+          }
+        }
+        const firstMaster = namedMaster(first.paper_title_written, library).paper;
+        if (firstMaster && fresh.field_evidence?.paper_title_written?.origin !== 'answer_content' &&
+            namedMaster(next.paper_title_written, library).paper?.id !== firstMaster.id) {
+          fresh = { ...fresh, paper_title_written: old.paper_title_written,
+            field_evidence: { ...fresh.field_evidence, paper_title_written: old.field_evidence?.paper_title_written },
+            reread_header_conflict: true };
+        }
+        if (first.teacher_id && next.teacher_id !== first.teacher_id && first.name_confidence === 'certain') {
+          return { ...fresh, name_written: old.name_written, teacher_id: old.teacher_id, name_confidence: old.name_confidence,
+            grade_written: old.grade_written, subjects_written: old.subjects_written,
+            field_evidence: { ...fresh.field_evidence, name_written: old.field_evidence?.name_written,
+              grade_written: old.field_evidence?.grade_written, subjects_written: old.field_evidence?.subjects_written },
+            reread_name_conflict: true };
+        }
+        if (first.name_confidence === 'certain' && first.name_written &&
+            (!next.name_written || next.name_confidence !== 'certain' || identityName(first.name_written) !== identityName(next.name_written))) {
+          return { ...fresh, name_written: old.name_written, teacher_id: old.teacher_id, name_confidence: old.name_confidence,
+            field_evidence: { ...fresh.field_evidence, name_written: old.field_evidence?.name_written },
+            reread_name_conflict: true };
+        }
+        return fresh;
+      },
+    });
+  }
 
   const written = String(look.name_written ?? '').trim();
   item = selectItem.get(id);
   if (!item) return;
   const previous = parse(item.result, {});
-  const library = allPapers();
   const identity = retainMasterObservations(previous.identity, inspectIdentity(item, pages, look, teachers), library);
   const identities = [...new Set(identity.pages.map((p) => p.teacher_id).filter(Boolean))];
   const fromSheet = identities.length === 1 ? teachers.find((t) => t.id === identities[0]) : null;
@@ -583,9 +689,12 @@ async function sortItem(id) {
     name_written: written,
     sheet_teacher_id: fromSheet?.id ?? null,
     identity,
+    identity_reading: look.audit ?? null,
     paper_confirmations: previous.paper_confirmations ?? {},
     page_confirmations: previous.page_confirmations ?? {},
     source_pages: previous.source_pages ?? [],
+    matching_metrics: requestPolicy.snapshot(),
+    matching_history: previous.matching_history ?? [],
     languages: [...languages],
     read_by_gemini: 0,
     notes: [],
@@ -609,7 +718,7 @@ async function sortItem(id) {
       result.notes.push('Some pages are not in English, and Gemini is not set up to read them, so OpenAI matched them from the pictures alone.');
     } else {
       try {
-        const texts = await readAnswers(notEnglish, names);
+        const texts = await read(notEnglish, names, { requestPolicy });
         notEnglish.forEach((page, i) => texts[i] !== null && readings.set(page.id, texts[i]));
         result.read_by_gemini = texts.filter((text) => text !== null).length;
         const unread = notEnglish.length - result.read_by_gemini;
@@ -618,6 +727,7 @@ async function sortItem(id) {
           result.notes.push(`Gemini would not read ${which} not in English, so OpenAI matched ${unread === 1 ? 'it' : 'them'} from the pictures alone.`);
         }
       } catch (error) {
+        if (['MATCHING_BUDGET_EXHAUSTED', 'MATCHING_BUDGET_PERSISTENCE_FAILED'].includes(error.code)) throw error;
         result.notes.push(`Gemini could not read the pages that are not in English (${error.userMessage ?? error.message}), so OpenAI matched them from the pictures alone.`);
       }
     }
@@ -628,6 +738,8 @@ async function sortItem(id) {
   const candidates = candidatePapers(teacher, school, library, authoritativeIds);
   if (!candidates.length) throw friendly(library.length ? 'No library paper is compatible with this teacher’s class, subject and board. Confirm the profile and import the administered master; no paper was substituted.' : 'The paper library has no papers yet. Import the paper pack on the Paper library page, then press Match again.');
   result.candidate_paper_ids = candidates.map((p) => p.id);
+  result.matching_metrics = requestPolicy.snapshot();
+  setResult.run(JSON.stringify(result), id);
 
   const pageContent = await Promise.all(
     files.map(async (page, i) => {
@@ -642,7 +754,8 @@ async function sortItem(id) {
   );
 
   const sorted = await compareQuestionBank({
-    candidates, request: requestJson, answerPageCount: pages.length,
+    candidates, request, answerPageCount: pages.length,
+    requestPolicy, maxRetries: 1, timeoutMs: MATCHING_LIMITS.requestTimeoutMs,
     instructions: SORT_INSTRUCTIONS,
     content: [
       { type: 'input_text', text: `THE TEACHER: ${teacher.name}${teacher.grade ? `, teaches ${teacher.grade}` : ''}${teacher.subjects ? `, subjects ${teacher.subjects}` : ''}. School: ${school.name}.` },
@@ -658,6 +771,7 @@ async function sortItem(id) {
   });
 
   if (!selectItem.get(id)) return; // removed while it was being sorted
+  result.matching_metrics = requestPolicy.snapshot();
   result.bank_comparison = sorted.bank_comparison ?? null;
   saveSort(id, teacher, school, library, pages, sorted, result);
 }
@@ -768,6 +882,7 @@ export const saveSort = db.transaction((id, teacher, school, library, pages, sor
 function paperReviewProblems(item, pages, result, teacher, school, library) {
   const chosen = parse(item.papers, {});
   const problems = [];
+  if (item.sort_status === 'needs_teacher') return ['Matching stopped during identity verification. The question-paper comparison has not run yet.'];
   for (const page of pages) {
     const source = result?.source_pages?.find((p) => p.page_id === page.id);
     const manualPage = Object.hasOwn(result?.page_confirmations ?? {}, page.id);
@@ -854,9 +969,9 @@ export function presentItem(item, others = []) {
     problems.push(...identityProblems(item, pages, result, selectSchoolTeachers.all(item.school_id)));
     problems.push(...paperReviewProblems(item, pages, result, teacher, selectSchool.get(item.school_id), allPapers()));
   }
-  if (!pages.some((p) => p.section)) problems.push(sorting || unmatched ? '' : 'Put at least one page in Section A, B or C.');
+  if (!pages.some((p) => p.section)) problems.push(sorting || unmatched || item.sort_status === 'needs_teacher' ? '' : 'Put at least one page in Section A, B or C.');
   for (const s of sections) {
-    if (s.pages && !s.paper) problems.push(`Choose the ${s.label} question paper.`);
+    if (item.sort_status !== 'needs_teacher' && s.pages && !s.paper) problems.push(`Choose the ${s.label} question paper.`);
     if (s.existing === 'marking') problems.push(`${teacher.name}’s ${s.label} is being marked. Wait for it to finish.`);
   }
   const bPapers = sections.filter((s) => s.section === 'B' && s.pages && s.paper).map((s) => s.paper.id);
@@ -885,6 +1000,8 @@ export function presentItem(item, others = []) {
     read_by_gemini: result?.read_by_gemini ?? 0,
     sort_status: item.sort_status,
     sort_error: item.sort_error,
+    matching_metrics: result?.matching_metrics ?? null,
+    compared_candidates: result?.candidate_paper_ids?.length ?? null,
     pages: pages.map((p) => ({ id: p.id, src: `/uploads/${p.stored_name}`, position: p.position, section: p.section, questions: p.questions, language: p.language, source_file: item.file_name, source_page: p.position, identity: result?.identity?.pages.find((e) => e.page_id === p.id) ?? null, match: result?.source_pages?.find((e) => e.page_id === p.id) ?? null })),
     sections,
     problems: problems.filter(Boolean),
