@@ -10,6 +10,7 @@ import { api, bulkApi, papersApi, schoolsApi, teachersApi, testsApi } from '../a
 import { loadPdfjs, pagesOf } from '../evidence.js';
 import { paperFacts } from '../paper-picker.js';
 import { chooseMarking } from '../marking-choice.js';
+import { sourceIdentityEvidence } from '../identity-evidence.js';
 
 // Where a page can go. A teacher who teaches two subjects may have sat a
 // Section B paper for each, so Section B can hold a second and third paper.
@@ -499,6 +500,16 @@ export async function renderBulk(root, query = new URLSearchParams()) {
       item.sort_error ? h('p', { class: 'notice' }, item.sort_error) : null,
       item.matching_metrics ? h('details', { class: 'hint' }, h('summary', {}, 'Matching usage'),
         h('p', {}, `${item.matching_metrics.attempts} of ${item.matching_metrics.limits.maxProviderAttempts} permitted provider requests; ${Math.round(item.matching_metrics.elapsedMs / 1000)} seconds elapsed. ${item.matching_metrics.usage.totalTokens === null ? 'Token usage not reported yet.' : `${item.matching_metrics.usage.totalTokens} reported tokens (may exclude attempts without usage data).`} ${item.compared_candidates === null ? '' : `${item.compared_candidates} compatible question papers considered.`}`)) : null,
+      item.pages.some(page => page.identity) ? h('details', { class: 'hint' },
+        h('summary', {}, 'Source identity evidence'),
+        h('p', {}, 'Read-only source observations for operator review. These details are not included in teacher reports.'),
+        item.pages.map(page => {
+          const evidence = sourceIdentityEvidence(page);
+          return h('details', { 'data-source-identity-page': page.position },
+            h('summary', {}, `Source page ${evidence.page}`), h('p', {}, evidence.summary),
+            evidence.guard ? h('p', {}, evidence.guard) : null,
+            evidence.fields.map(field => h('p', {}, `${field.label}: accepted ${field.accepted}; observed ${field.observed}; origin ${field.origin}. ${field.reason}`)));
+        })) : null,
       h(
         'div',
         { class: 'bulk-teacher' },

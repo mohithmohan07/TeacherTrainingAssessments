@@ -213,7 +213,9 @@ for (const [name, request, success] of [['OpenAI', openai, openaiReply], ['Gemin
   test(`${name} bounds retry waiting by the packet deadline`, async (t) => {
     local(t, (_req, res) => json(res, 503, { error: { message: 'synthetic-private-error' } }));
     const started = Date.now();
-    const meter = policy({ deadline: started + 70 });
+    // Allow local HTTP scheduling under the parallel full suite; still much
+    // shorter than the normal provider backoff.
+    const meter = policy({ deadline: started + 500 });
     await assert.rejects(request(meter), (error) => error === meter.rejection);
     assert.ok(Date.now() - started < 1500, 'the normal 2+ second backoff must not outlive the packet deadline');
     assert.equal(received.length, 1);
