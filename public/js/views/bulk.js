@@ -300,7 +300,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
     drawReview();
     try {
       const plan = await bulkApi.matchPlan(school.id, test.id);
-      if (plan.packet_count > 1 && !confirmAction(`Match ${plan.packet_count} PDFs (${plan.source_pages} pages)? About ${plan.nominal_model_calls} model calls are planned before focused rereads, OCR or retries. Each packet stops after ${Math.round(plan.limits.packetTimeoutMs / 60000)} minutes or ${plan.limits.maxProviderAttempts} provider attempts. ${plan.concurrency} packets run at once. Charges depend on actual tokens; no dollar estimate is available. This does not file or grade responses.`)) return;
+      if (plan.packet_count > 1 && !confirmAction(`Match ${plan.packet_count} PDFs (${plan.source_pages} pages)? About ${plan.nominal_model_calls} model calls are planned before focused rereads, independent header checks, OCR or retries. Each packet stops after ${Math.round(plan.limits.packetTimeoutMs / 60000)} minutes or ${plan.limits.maxProviderAttempts} provider attempts. ${plan.concurrency} packets run at once. Charges depend on actual tokens; no dollar estimate is available. This does not file or grade responses.`)) return;
       const result = await bulkApi.match(school.id, test.id, plan.id);
       state.items = result.items;
     } catch (error) {
@@ -508,7 +508,12 @@ export async function renderBulk(root, query = new URLSearchParams()) {
           return h('details', { 'data-source-identity-page': page.position },
             h('summary', {}, `Source page ${evidence.page}`), h('p', {}, evidence.summary),
             evidence.guard ? h('p', {}, evidence.guard) : null,
-            evidence.fields.map(field => h('p', {}, `${field.label}: accepted ${field.accepted}; observed ${field.observed}; origin ${field.origin}. ${field.reason}`)));
+            evidence.crop ? h('div', {}, h('p', {}, `Independent verification crop from this same source image: x=${evidence.crop.x}, y=${evidence.crop.y}, width=${evidence.crop.width}, height=${evidence.crop.height}.`),
+              h('div', { style: `position:relative;overflow:hidden;width:100%;max-width:900px;aspect-ratio:${evidence.crop.width}/${evidence.crop.height}` },
+                h('img', { src: page.src, alt: `Source page ${evidence.page} identity crop`, loading: 'lazy',
+                  style: `position:absolute;max-width:none;width:${100 * evidence.crop.sourceWidth / evidence.crop.width}%;left:${-100 * evidence.crop.x / evidence.crop.width}%;top:${-100 * evidence.crop.y / evidence.crop.height}%` }))) : null,
+            evidence.fields.map(field => h('div', {}, h('p', {}, `${field.label}: accepted ${field.accepted}; observed ${field.observed}; origin ${field.origin}. ${field.reason}`),
+              field.verification ? h('p', {}, `Independent visual check: ${field.verification.status}; field label ${field.verification.label}; adjacent text ${field.verification.adjacent}. ${field.verification.reason}`) : null)));
         })) : null,
       h(
         'div',

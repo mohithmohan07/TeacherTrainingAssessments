@@ -175,3 +175,52 @@ test('certain identity-header context cannot disappear even before a teacher is 
     assert.equal(bankCalls,0);
   }
 });
+
+test('independent source verification corrects the observed 6th misread without overriding true class evidence',async()=>{
+  db.prepare('DELETE FROM teachers WHERE id=3').run();
+  for(const verdict of ['answer_content','uncertain','confirmed','unavailable']) {
+    const id=await packet();let verificationCalls=0,bankCalls=0;
+    await bulk.sortItem(id,{configured:()=>true,verificationConfigured:()=>true,
+      verifyIdentity:async options=>{
+        verificationCalls++;assert.equal(options.observation.grade_written,'6th');assert.equal(options.observation.field_evidence.grade_written.origin,'identity_header');
+        assert.deepEqual(options.bounds,{x:0.45,y:0.01,width:0.4,height:0.08});assert.ok(options.requestPolicy);assert.equal(options.observation.name_written,owner.name);
+        if(verdict==='unavailable') throw Object.assign(new Error('Synthetic unavailable verifier'),{code:'SYNTHETIC_UNAVAILABLE'});
+        return {status:verdict==='uncertain'?'unresolved':'verified',name_verified:true,
+          evidence:{grade:{status:verdict,value:verdict==='confirmed'?'6th':'',label_quote:'CLASS',adjacent_quote:verdict==='answer_content'?'Vc = 60V':'',reason:verdict==='answer_content'?'Voltage notation crosses the border; no independent class is written.':'Independent source observation.'},
+            subject:{status:verdict==='uncertain'?'uncertain':'absent',value:'',label_quote:'SUBJECT',adjacent_quote:'',reason:'No class inference from answers.'}},
+          audit:{provider:'synthetic',name_verified:true}};
+      },request:async request=>{
+        if(request.name==='answer_sheets_sorted') {bankCalls++;return matched();}
+        return {pages:mapping(request).map(({local,original})=>{
+          const seen=observation(local);
+          if(original===15) {seen.grade_written='6th';seen.field_evidence.grade_written={origin:'identity_header',reason:'6th is handwritten in the Class field.'};seen.identity_panel_bounds={x:0.45,y:0.01,width:0.4,height:0.08};}
+          return seen;
+        })};
+      }});
+    const result=bulk.presentItem(bulk.itemFor(id)), clears=['answer_content','uncertain'].includes(verdict);
+    assert.equal(verificationCalls,1);assert.equal(bankCalls,clears?1:0);assert.equal(result.ready,clears,JSON.stringify(result.problems));
+    assert.equal(result.pages[14].identity.grade_written,clears?'':'6th');
+    if(clears) {assert.equal(result.pages[14].identity.teacher_id,1);assert.equal(result.pages[14].identity.field_observations.grade_written,'6th');assert.equal(result.pages[14].identity.context_verification.fields.grade_written.status,verdict);}
+  }
+});
+
+test('independent context clearance cannot disambiguate namesakes or different full names',()=>{
+  const source={name_written:owner.name,name_confidence:'certain',grade_written:'6th',subjects_written:''};
+  assert.equal(bulk.uniqueContextTarget(source,[owner,{...owner,id:7,grade:'Class 6'}],1),null);
+  assert.equal(bulk.uniqueContextTarget({...source,name_written:'Arun'},[owner],1),null);
+  assert.equal(bulk.uniqueContextTarget(source,[owner],2),null);
+  assert.equal(bulk.uniqueContextTarget({...source,name_confidence:'uncertain'},[owner],1),null);
+  assert.equal(bulk.uniqueContextTarget(source,[owner],1).id,1);
+});
+
+test('a later namesake invalidates independent context clearance at readiness and filing',()=>{
+ const verified=db.prepare('SELECT * FROM bulk_items').all().filter(item=>JSON.parse(item.result||'{}').identity?.pages.some(page=>page.context_verification?.status==='verified_unique_name'));
+ const ready=verified.filter(item=>bulk.presentItem(item).ready);
+ assert.ok(ready.length>=2);
+ db.prepare('INSERT INTO teachers(id,school_id,name,grade,subjects) VALUES(9,1,?,?,?)').run(owner.name,'Class 6',owner.subjects);
+ for(const item of ready) {
+  const view=bulk.presentItem(bulk.itemFor(item.id));assert.equal(view.ready,false);assert.match(view.problems.join(' '),/unique-name context check/);
+  assert.equal(bulk.fileReady(1,1,[item.id]).filed.length,0);assert.ok(bulk.itemFor(item.id));
+ }
+ db.prepare('DELETE FROM teachers WHERE id=9').run();
+});

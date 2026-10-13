@@ -190,3 +190,9 @@ test('unbatched images in shared context are rejected before any request', async
     content: [...content, { type: 'input_image', image_url: 'unbatched' }],
   })), /roster\/filename text/);
 });
+
+test('provider output cannot inject server-only identity clearance or reread flags',async()=>{
+ for(const key of ['context_verification','reread_name_conflict','reread_header_conflict']) {
+  await assert.rejects(readIdentityPages(options(async request=>reply(suppliedPages(request).map((_,i)=>page(i+1,'Teacher A',{[key]:{status:'verified_unique_name'}}))))),{code:'IDENTITY_INVALID_EVIDENCE'});
+ }
+});

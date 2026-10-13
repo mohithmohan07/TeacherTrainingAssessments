@@ -321,6 +321,8 @@ export function createMatchingBudget({
 // Logical calls, not HTTP attempts, token forecasts, prices, or a promise of a
 // match. Retries and cross-provider fallbacks consume additional attempts.
 // A large bank needs a final comparison only when screening finds contenders.
+export const MAX_INDEPENDENT_IDENTITY_VERIFICATIONS = 4;
+
 export function estimateMatchingCalls(compatibleCandidates, { hasContenders, sourcePages } = {}) {
   if (!Number.isSafeInteger(compatibleCandidates) || compatibleCandidates < 0) {
     throw new RangeError('compatibleCandidates must be a non-negative integer.');
@@ -329,6 +331,7 @@ export function estimateMatchingCalls(compatibleCandidates, { hasContenders, sou
   if (sourcePages !== undefined && (!Number.isSafeInteger(sourcePages) || sourcePages < 1)) throw new RangeError('sourcePages must be a positive integer.');
   const identityCalls = sourcePages === undefined ? 1 : Math.ceil(sourcePages / 8);
   const maximumFocusedRereads = sourcePages === undefined ? 0 : Math.ceil(sourcePages / 4);
+  const maximumIndependentVerifications = sourcePages === undefined ? 0 : Math.min(sourcePages, MAX_INDEPENDENT_IDENTITY_VERIFICATIONS);
   const batchSize = 8;
   const comparisonCalls = Math.ceil(compatibleCandidates / batchSize);
   const needsScreening = compatibleCandidates > batchSize;
@@ -340,12 +343,13 @@ export function estimateMatchingCalls(compatibleCandidates, { hasContenders, sou
     batchSize,
     identityCalls,
     maximumFocusedRereads,
+    maximumIndependentVerifications,
     comparisonCalls,
     finalCalls,
     finalConditional,
     totalCalls,
     minCalls: totalCalls - (finalConditional ? 1 : 0),
-    maxCalls: totalCalls + maximumFocusedRereads,
+    maxCalls: totalCalls + maximumFocusedRereads + maximumIndependentVerifications,
     includesRetries: false,
     includesProviderFallbacks: false,
   });

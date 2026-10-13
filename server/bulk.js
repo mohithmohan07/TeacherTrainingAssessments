@@ -31,8 +31,9 @@ import { queueTeacherReports, findReport, isOutOfDate } from './reports.js';
 import { jobsAtOnce } from './capacity.js';
 import { keepAwake } from './idle.js';
 import { compareQuestionBank } from './bank-matching.js';
-import { createMatchingBudget, estimateMatchingCalls } from './matching-budget.js';
+import { createMatchingBudget, estimateMatchingCalls, MAX_INDEPENDENT_IDENTITY_VERIFICATIONS } from './matching-budget.js';
 import { readIdentityPages, rereadIdentityPages } from './identity-reading.js';
+import { verifyIdentityHeader } from './identity-verification.js';
 
 /* ------------------------------------------------------------- the rows */
 
@@ -168,7 +169,9 @@ export function inspectIdentity(item, pages, look, teachers) {
       const seen = byNumber.get(index + 1) ?? {};
       const field = (key) => {
         const origin = seen.field_evidence?.[key]?.origin;
-        return origin === 'answer_content' || origin === 'absent' ? '' : String(seen[key] ?? '').trim();
+        const independentlyUnknown = seen.context_verification?.status === 'verified_unique_name' &&
+          ['grade_written', 'subjects_written'].includes(key) && seen.context_verification.fields?.[key]?.status === 'uncertain';
+        return origin === 'answer_content' || origin === 'absent' || independentlyUnknown ? '' : String(seen[key] ?? '').trim();
       };
       const name = field('name_written');
       const grade = field('grade_written');
@@ -182,11 +185,29 @@ export function inspectIdentity(item, pages, look, teachers) {
         teacher_id: resolved?.id ?? null,
         paper_title_written: field('paper_title_written'),
         field_evidence: seen.field_evidence ?? null,
+        identity_panel_bounds: seen.identity_panel_bounds ?? null,
+        context_verification: seen.context_verification ?? null,
         field_observations: Object.fromEntries(['name_written', 'grade_written', 'subjects_written', 'paper_title_written'].map((key) => [key, String(seen[key] ?? '').trim()])),
-        field_review_required: Boolean(seen.reread_name_conflict || seen.reread_header_conflict) || Object.values(seen.field_evidence ?? {}).some((e) => e.origin === 'uncertain'),
+        field_review_required: Boolean(seen.reread_name_conflict || seen.reread_header_conflict) || Object.entries(seen.field_evidence ?? {}).some(([key, e]) => e.origin === 'uncertain' &&
+          !(seen.context_verification?.status === 'verified_unique_name' && ['grade_written', 'subjects_written'].includes(key) && seen.context_verification.fields?.[key]?.status === 'uncertain')),
       };
     }),
   };
+}
+
+// Independent context verification may remove an ungrounded class claim only
+// when full-name identity is unique without using that disputed context.
+export function uniqueContextTarget(source, teachers, selectedTeacherId = null) {
+  if (source.name_confidence !== 'certain' || !source.name_written) return null;
+  const matches = teachers.filter(teacher => identityName(teacher.name) === identityName(source.name_written));
+  if (matches.length !== 1 || (selectedTeacherId && matches[0].id !== selectedTeacherId)) return null;
+  return matches[0];
+}
+
+function conflictingContext(teacher, source) {
+  return !contextFits(teacher, source.grade_written, source.subjects_written) ||
+    Boolean(source.subjects_written && !subjectKeys(source.subjects_written).size && teacher.subjects &&
+      !String(teacher.subjects).split(/[,;/|]/).some(subject => identityName(subject) === identityName(source.subjects_written)));
 }
 
 export function identityProblems(item, pages, result, teachers) {
@@ -203,6 +224,10 @@ export function identityProblems(item, pages, result, teachers) {
   const selected = teachers.find((t) => t.id === item.teacher_id);
   for (const source of evidence) {
     if (!selected) continue;
+    if (source.context_verification?.status === 'verified_unique_name' &&
+        uniqueContextTarget(source, teachers, item.teacher_id)?.id !== source.context_verification.verified_teacher_id) {
+      problems.push(`Source page ${source.source_page} relied on a unique-name context check that no longer matches the current roster. Verify its identity again before filing.`);
+    }
     if (source.name_confidence === 'certain' && definiteNameConflict(selected.name, source.name_written)) {
       problems.push(`Source page ${source.source_page} clearly names “${source.name_written}”, not ${selected.name}. Correct the teacher or exclude that page; manual selection cannot override a conflicting name.`);
     }
@@ -463,7 +488,7 @@ setImmediate(pump);
 
 const LOOK_INSTRUCTIONS = `You are helping file a teacher's answers to a teacher training assessment. You are given every page of one PDF of answer sheets, scanned, usually handwritten, and the list of teachers at the school.
 
-1. Inspect EVERY page independently for teacher identity. One PDF may mistakenly contain two teachers. Never carry a teacher name onto an unnamed page. For each page, copy name_written, grade_written, subjects_written and paper_title_written exactly from explicit identity/header fields, or "" if absent. Do not use names in questions or answers as teacher names. paper_title_written is only an explicitly printed/written administered question-paper title, section heading or filename, never your inferred subject. Copy values only from actual identity/document header fields. Equations or answer notes near a blank Class/Subject box are answer content, not class/subject metadata. A report title, classroom example or assessment heading written within an answer is answer content, not this administered paper’s title. For every copied field, provide field_evidence with its visual origin and a short reason. Use identity_header for Name/Class/Subject fields, document_heading for the administered paper heading, answer_content for text belonging to an answer, absent when truly absent, and uncertain when its role cannot be established. Copy a generic heading faithfully; the later question comparison decides whether it names a unique master. A descriptive heading is not itself a version identifier. Give teacher_id only when the full name, initials and any written class/subject identify exactly one listed teacher; otherwise 0. Use name_confidence "certain", "uncertain" or "none". Never resolve namesakes by guessing. The top-level name_written/teacher_id summarize only when the named pages agree; otherwise use "" and 0. A filename is a clue, not authority over page evidence.
+1. Inspect EVERY page independently for teacher identity. One PDF may mistakenly contain two teachers. Never carry a teacher name onto an unnamed page. For each page, copy name_written, grade_written, subjects_written and paper_title_written exactly from explicit identity/header fields, or "" if absent. Do not use names in questions or answers as teacher names. paper_title_written is only an explicitly printed/written administered question-paper title, section heading or filename, never your inferred subject. Copy values only from actual identity/document header fields. Equations or answer notes near a blank Class/Subject box are answer content, not class/subject metadata. A report title, classroom example or assessment heading written within an answer is answer content, not this administered paper’s title. Also locate the complete visible Name/Class/Subject identity panel as identity_panel_bounds using normalized x,y,width,height relative to this original image; include the whole labelled panel, not just a value. Return null when no reliable panel can be located. Do not infer coordinates from a template or another page. For every copied field, provide field_evidence with its visual origin and a short reason. Use identity_header for Name/Class/Subject fields, document_heading for the administered paper heading, answer_content for text belonging to an answer, absent when truly absent, and uncertain when its role cannot be established. Copy a generic heading faithfully; the later question comparison decides whether it names a unique master. A descriptive heading is not itself a version identifier. Give teacher_id only when the full name, initials and any written class/subject identify exactly one listed teacher; otherwise 0. Use name_confidence "certain", "uncertain" or "none". Never resolve namesakes by guessing. The top-level name_written/teacher_id summarize only when the named pages agree; otherwise use "" and 0. A filename is a clue, not authority over page evidence.
 
 Return exactly one entry for each supplied image, using the local page numbers in the supplied batch map. Do not return observations for images outside this batch.
 
@@ -481,7 +506,7 @@ const LOOK_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['page', 'language', 'languages', 'name_written', 'teacher_id', 'grade_written', 'subjects_written', 'name_confidence', 'paper_title_written', 'field_evidence'],
+        required: ['page', 'language', 'languages', 'name_written', 'teacher_id', 'grade_written', 'subjects_written', 'name_confidence', 'paper_title_written', 'field_evidence', 'identity_panel_bounds'],
         properties: {
           page: { type: 'integer' },
           name_written: { type: 'string' },
@@ -490,6 +515,8 @@ const LOOK_SCHEMA = {
           subjects_written: { type: 'string' },
           name_confidence: { type: 'string', enum: ['certain', 'uncertain', 'none'] },
           paper_title_written: { type: 'string' },
+          identity_panel_bounds: { anyOf: [{ type: 'null' }, { type: 'object', additionalProperties: false, required: ['x', 'y', 'width', 'height'],
+            properties: Object.fromEntries(['x', 'y', 'width', 'height'].map(key => [key, { type: 'number', minimum: 0, maximum: 1 }])) }] },
           field_evidence: { type: 'object', additionalProperties: false, required: ['name_written', 'grade_written', 'subjects_written', 'paper_title_written'],
             properties: Object.fromEntries(['name_written', 'grade_written', 'subjects_written', 'paper_title_written'].map((key) => [key, {
               type: 'object', additionalProperties: false, required: ['origin', 'reason'], properties: {
@@ -587,7 +614,8 @@ export function candidatePapers(teacher, school, papers, authoritativeIds = []) 
 const pagesOf = (count) => `${count} page${count === 1 ? '' : 's'}`;
 
 
-export async function sortItem(id, { request = requestJson, configured = openaiConfigured, read = readAnswers } = {}) {
+export async function sortItem(id, { request = requestJson, configured = openaiConfigured, read = readAnswers,
+  verifyIdentity = verifyIdentityHeader, verificationConfigured = geminiConfigured } = {}) {
   let item = selectItem.get(id);
   if (!item) return;
   setStatus.run('running', null, id);
@@ -601,7 +629,7 @@ export async function sortItem(id, { request = requestJson, configured = openaiC
   if (unreadable.length) throw friendly('Some pages are in a picture format OpenAI cannot read. Remove this PDF and upload it again.');
 
   const school = selectSchool.get(item.school_id);
-  const teachers = selectSchoolTeachers.all(item.school_id);
+  let teachers = selectSchoolTeachers.all(item.school_id);
   const files = pages.map((page) => ({ ...page, original_name: `${item.file_name} page ${page.position}` }));
 
   // 1. Whose answers, and the language of each page.
@@ -665,6 +693,51 @@ export async function sortItem(id, { request = requestJson, configured = openaiC
     });
   }
 
+  // One independent visual adjudication per conflicting page, at most four
+  // pages per packet. A unique certain full name is mandatory; roster context
+  // is never sent as an expected answer to the independent vision provider.
+  const verificationAudit = [];
+  const contextSources = inspectIdentity(item, pages, look, teachers).pages;
+  let verifiedPages = 0;
+  for (const [index, source] of contextSources.entries()) {
+    const target = uniqueContextTarget(source, teachers, item.teacher_id);
+    if (!target || !conflictingContext(target, source)) continue;
+    const raw = look.pages.find(page => page.page === index + 1);
+    if (!verificationConfigured() || !raw?.identity_panel_bounds || verifiedPages >= MAX_INDEPENDENT_IDENTITY_VERIFICATIONS) {
+      verificationAudit.push({ page: index + 1, status: 'unavailable', reason: !verificationConfigured() ? 'independent_provider_unavailable' : !raw?.identity_panel_bounds ? 'panel_not_located' : 'packet_verification_limit' });
+      continue;
+    }
+    verifiedPages += 1;
+    try {
+      const verified = await verifyIdentity({ buffer: await fs.readFile(path.join(UPLOADS_DIR, files[index].stored_name)),
+        mimeType: files[index].mime_type, bounds: raw.identity_panel_bounds, observation: raw, requestPolicy });
+      verificationAudit.push({ page: index + 1, ...verified.audit, status: verified.status });
+      if (!['verified', 'unresolved'].includes(verified.status) || !verified.name_verified) continue;
+      const currentItem = selectItem.get(id);
+      if (!currentItem) return;
+      if (uniqueContextTarget(source, selectSchoolTeachers.all(item.school_id), currentItem.teacher_id)?.id !== target.id) {
+        verificationAudit.push({ page: index + 1, status: 'unavailable', reason: 'identity_context_changed' });
+        continue;
+      }
+      const fields = { grade_written: verified.evidence.grade, subjects_written: verified.evidence.subject };
+      const originalFields = Object.fromEntries(Object.keys(fields).map(key => [key, { value: raw[key], evidence: raw.field_evidence?.[key] ?? null }]));
+      const adjusted = { ...raw, field_evidence: { ...raw.field_evidence } };
+      for (const [key, evidence] of Object.entries(fields)) {
+        // An unreadable/uncertain class is unknown, not a blank or a guessed
+        // expected class. It cannot disambiguate namesakes (eligibility above).
+        adjusted[key] = evidence.status === 'confirmed' ? evidence.value : raw[key];
+        adjusted.field_evidence[key] = { origin: evidence.status === 'confirmed' ? 'identity_header' : evidence.status,
+          reason: evidence.reason };
+      }
+      adjusted.context_verification = { status: 'verified_unique_name', verified_teacher_id: target.id, fields, original_fields: originalFields, audit: verified.audit };
+      look.pages = look.pages.map(page => page === raw ? adjusted : page);
+    } catch (error) {
+      if (['MATCHING_BUDGET_EXHAUSTED', 'MATCHING_BUDGET_PERSISTENCE_FAILED'].includes(error.code)) throw error;
+      verificationAudit.push({ page: index + 1, status: 'unavailable', reason: error.code || 'independent_verification_failed' });
+    }
+  }
+
+  teachers = selectSchoolTeachers.all(item.school_id);
   const written = String(look.name_written ?? '').trim();
   item = selectItem.get(id);
   if (!item) return;
@@ -690,6 +763,7 @@ export async function sortItem(id, { request = requestJson, configured = openaiC
     sheet_teacher_id: fromSheet?.id ?? null,
     identity,
     identity_reading: look.audit ?? null,
+    identity_verifications: verificationAudit,
     paper_confirmations: previous.paper_confirmations ?? {},
     page_confirmations: previous.page_confirmations ?? {},
     source_pages: previous.source_pages ?? [],

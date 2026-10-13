@@ -19,3 +19,16 @@ test('diagnostics are allowlisted and are not imported by report code',()=>{
  for(const filename of ['server/reports.js','server/report-html.js'].filter(f=>fs.existsSync(f))) assert.ok(!fs.readFileSync(filename,'utf8').includes('identity-evidence'));
  const bulk=fs.readFileSync('public/js/views/bulk.js','utf8');assert.match(bulk,/sourceIdentityEvidence/);assert.ok(!bulk.includes('innerHTML = evidence'));
 });
+
+test('independent crop view exposes only valid coordinates from the same stored source',()=>{
+ const page={position:15,identity:{context_verification:{audit:{source_width:1000,source_height:1500,pixel_bounds:{x:200,y:0,width:700,height:300},buffer:'PRIVATE_BYTES'},fields:{grade_written:{status:'answer_content',label_quote:'CLASS',adjacent_quote:'Vc = 60V',reason:'Crossing notation.'}}}}};
+ const view=sourceIdentityEvidence(page);
+ assert.deepEqual(view.crop,{sourceWidth:1000,sourceHeight:1500,x:200,y:0,width:700,height:300});assert.equal(view.fields[1].verification.adjacent,'Vc = 60V');assert.ok(!JSON.stringify(view).includes('PRIVATE_BYTES'));
+ page.identity.context_verification.audit.pixel_bounds.width=2000;
+ assert.equal(sourceIdentityEvidence(page).crop,null);
+});
+
+test('independently uncertain context is unknown rather than a recorded blank',()=>{
+ const view=sourceIdentityEvidence({identity:{grade_written:'',context_verification:{fields:{grade_written:{status:'uncertain'}}}}});
+ assert.equal(view.fields[1].accepted,'Unknown (not established)');
+});

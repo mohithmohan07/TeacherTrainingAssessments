@@ -20,7 +20,7 @@ function invalid(detail) {
   return error;
 }
 
-function validatePages(result, count) {
+function validatePages(result, count, { provider = false } = {}) {
   if (!result || !Array.isArray(result.pages) || result.pages.length !== count) throw invalid('every supplied page must have exactly one observation');
   const seen = new Set();
   for (const page of result.pages) {
@@ -28,6 +28,9 @@ function validatePages(result, count) {
       throw invalid('page numbers must be unique local integers from 1 through the batch page count');
     }
     seen.add(page.page);
+    if (provider && Object.keys(page).some(key => ![...fields, 'page', 'teacher_id', 'name_confidence', 'language', 'languages', 'field_evidence', 'identity_panel_bounds'].includes(key))) {
+      throw invalid(`page ${page.page} contains an unexpected or server-only property`);
+    }
     if (!fields.every((key) => typeof page[key] === 'string') || !Number.isSafeInteger(page.teacher_id) || page.teacher_id < 0 ||
         !confidences.has(page.name_confidence) || !languages.has(page.language) ||
         !Array.isArray(page.languages) || !page.languages.every((language) => typeof language === 'string')) throw invalid(`page ${page.page} is malformed`);
@@ -80,7 +83,7 @@ async function readBatches({ files, request, instructions = '', schema, content 
       }, ...(phase === 'focused' ? [{ type: 'input_text', text: `PRIOR OCR TO VERIFY (not authoritative): ${JSON.stringify(priorPages.filter(page => originals.includes(page.page)).map(page => ({ original_page: page.page, ...Object.fromEntries(fields.map(key => [key, page[key]])) })))}. If prior text actually belongs to an answer, report that field origin as answer_content and explain; do not silently replace genuine identity/header contradictions with roster values.` }] : []), ...inputs],
       schema, name, task, retry, requestPolicy, timeoutMs, maxRetries,
     });
-    const pages = validatePages(result, originals.length);
+    const pages = validatePages(result, originals.length, { provider: true });
     observations.push(...pages.map((page) => ({ ...structuredClone(page), page: originals[page.page - 1] })));
     batches.push({ phase, original_pages: originals, local_to_original: map });
   }
