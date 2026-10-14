@@ -395,3 +395,20 @@ test('audit is bounded and excludes images, prompts, crop adapter extras and sha
   assert.notEqual(result.audit.evidence.grade.reason, raw.grade.reason);
   assert.equal(result.audit.evidence.grade.status, 'answer_content');
 });
+
+test('an independently located board entry is retained as board evidence without inventing a subject',async()=>{
+  const response=reply({subject:field('board_metadata',{label_quote:'Subject',adjacent_quote:'CBSE',reason:'The printed Subject box contains a board identifier; no taught-subject header is visible elsewhere.'})});
+  const result=await verifyIdentityHeader(options(response,{observation:observation({subjects_written:'CBSE'}),generate:async request=>{
+    assert.match(request.prompt,/education-board identifier is not a taught subject/);return response;
+  }}));
+  assert.equal(result.corrections.subjects_written,'');
+  assert.equal(result.evidence.subject.status,'board_metadata');assert.equal(result.evidence.subject.adjacent_quote,'CBSE');
+  await assert.rejects(verifyIdentityHeader(options(reply({subject:field('board_metadata',{adjacent_quote:''})}))),/lacks adjacent/);
+});
+
+test('a genuine handwritten taught subject is confirmed independently of a board in a printed box',async()=>{
+  const response=reply({subject:field('confirmed',{value:'Science',label_quote:'Subject-handling',adjacent_quote:'CBSE',reason:'The explicit handwritten header Subject-handling: Science is below the identity panel; CBSE in the printed Subject box is separately board metadata.'})});
+  const result=await verifyIdentityHeader(options(response,{observation:observation({subjects_written:'CBSE'})}));
+  assert.equal(result.corrections.subjects_written,'Science');
+  assert.equal(result.evidence.subject.label_quote,'Subject-handling');
+});

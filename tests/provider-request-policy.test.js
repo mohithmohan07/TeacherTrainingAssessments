@@ -119,6 +119,21 @@ test('OpenAI HTTP retries count separately and retain usage on error responses',
   checkPrivate(meter.events);
 });
 
+test('OpenAI timeout text and marker use the admitted ninety-second cap rather than the requested timeout', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => { throw new DOMException('Synthetic timeout.', 'TimeoutError'); });
+  const meter = policy({ timeoutMs: 90000 });
+  await assert.rejects(openai(meter, { timeoutMs: 120000 }), error => {
+    assert.equal(error.code, 'OPENAI_REQUEST_TIMEOUT');
+    assert.equal(error.timeoutMs, 90000);
+    assert.equal(error.passing, true);
+    assert.match(error.userMessage, /90-second request limit/);
+    assert.doesNotMatch(error.userMessage, /five minutes|120-second/);
+    return true;
+  });
+  assert.equal(meter.events.length, 1);
+  checkPrivate(meter.events);
+});
+
 test('Gemini meters retries and current-to-legacy format fallback as separate attempts', async (t) => {
   local(t, (_req, res, count) => json(res, count === 1 ? 503 : count === 2 ? 400 : 200, count === 1
     ? { error: { message: 'synthetic-private-error' }, usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 0, totalTokenCount: 3 } }
@@ -177,7 +192,16 @@ for (const [name, request, success] of [['OpenAI', openai, openaiReply], ['Gemin
   test(`${name} obeys the policy timeout and does not retry an aborted fetch`, async (t) => {
     local(t, () => {});
     const meter = policy({ timeoutMs: 40 });
-    await assert.rejects(request(meter), /too long|more than five minutes/);
+    await assert.rejects(request(meter), error => {
+      assert.match(error.message, /too long/);
+      if (name === 'OpenAI') {
+        assert.equal(error.code, 'OPENAI_REQUEST_TIMEOUT');
+        assert.equal(error.timeoutMs, 40);
+        assert.match(error.message, /40-millisecond request limit/);
+        assert.doesNotMatch(error.message, /five minutes/);
+      }
+      return true;
+    });
     assert.equal(received.length, 1);
     assert.equal(meter.events.length, 1);
     assert.deepEqual(meter.events[0].finishes[0], { status: 'timeout', error: 'timeout' });
@@ -187,7 +211,15 @@ for (const [name, request, success] of [['OpenAI', openai, openaiReply], ['Gemin
   test(`${name} also bounds response-body reading by the admitted timeout`, async (t) => {
     local(t, (_req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.write('{'); });
     const meter = policy({ timeoutMs: 40 });
-    await assert.rejects(request(meter), /too long/);
+    await assert.rejects(request(meter), error => {
+      assert.match(error.message, /too long/);
+      if (name === 'OpenAI') {
+        assert.equal(error.code, 'OPENAI_REQUEST_TIMEOUT');
+        assert.equal(error.timeoutMs, 40);
+        assert.match(error.message, /40-millisecond request limit/);
+      }
+      return true;
+    });
     assert.equal(received.length, 1);
     assert.equal(meter.events.length, 1);
     assert.deepEqual(meter.events[0].finishes[0], { status: 'timeout', usage: undefined, error: 'timeout' });

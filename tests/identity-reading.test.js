@@ -205,3 +205,8 @@ test('finalization provider boundary rejects server-only authority while retaini
     assert.throws(() => validateProviderIdentity({pages:[{...page(1),[key]:true}]}), /server-only/);
   }
 });
+
+
+test('finalization provider cannot forge an independent-only board field origin',()=>{
+  assert.throws(()=>validateProviderIdentity({pages:[page(1,'Maya Desai',{field_evidence:evidence({subjects_written:{origin:'board_metadata'}})})]}),/independent-only/);
+});

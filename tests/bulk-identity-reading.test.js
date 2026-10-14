@@ -296,3 +296,38 @@ test('a corrected named anchor is refreshed before checking an earlier unnamed c
   const result=bulk.presentItem(bulk.itemFor(id));assert.equal(result.ready,true,JSON.stringify(result.problems));
   assert.equal(result.pages[14].identity.teacher_id,null);
 });
+
+
+test('uncertain context on a unique named page receives independent verification even without a contradictory value',async()=>{
+  const id=await packet();let calls=0;
+  await bulk.sortItem(id,{configured:()=>true,verificationConfigured:()=>true,
+    verifyIdentity:async options=>{calls++;assert.equal(options.mode,'named_identity');return {status:'verified',name_verified:true,fields_verified:true,evidence:{
+      grade:{status:'absent',value:'',reason:'No class written.'},subject:{status:'absent',value:'',reason:'An isolated mark is not a written subject.'}},audit:{provider:'synthetic'}};},
+    request:async request=>request.name==='answer_sheets_sorted'?matched():{pages:mapping(request).map(({local,original})=>{
+      const seen=observation(local);if(original===15){seen.field_evidence.subjects_written={origin:'uncertain',reason:'Isolated mark in an otherwise blank subject field.'};seen.identity_panel_bounds={x:0.45,y:0.01,width:0.4,height:0.08};}return seen;
+    })}});
+  const result=bulk.presentItem(bulk.itemFor(id));assert.equal(calls,1);assert.equal(result.ready,true,JSON.stringify(result.problems));
+  assert.equal(result.pages[14].identity.field_review_required,false);
+});
+
+test('board-only subject metadata can be distinguished but genuine independently confirmed subject conflicts still block',async()=>{
+  for(const verdict of ['board_metadata','confirmed']){
+    const id=await packet();
+    await bulk.sortItem(id,{configured:()=>true,verificationConfigured:()=>true,
+      verifyIdentity:async()=>({status:'verified',name_verified:true,fields_verified:true,evidence:{
+        grade:{status:'absent',value:'',reason:'Empty class.'},subject:{status:verdict,value:verdict==='confirmed'?'Chemistry':'',label_quote:'Subject',adjacent_quote:'CBSE',reason:'Independent semantic role and visible label check.'}},audit:{provider:'synthetic'}}),
+      request:async request=>request.name==='answer_sheets_sorted'?matched():{pages:mapping(request).map(({local,original})=>{
+        const seen=observation(local);if(original===15){seen.subjects_written='CBSE';seen.field_evidence.subjects_written=origin('identity_header');seen.identity_panel_bounds={x:0.45,y:0.01,width:0.4,height:0.08};}return seen;
+      })}});
+    const result=bulk.presentItem(bulk.itemFor(id));assert.equal(result.ready,verdict==='board_metadata',JSON.stringify(result.problems));
+    assert.equal(result.pages[14].identity.subjects_written,verdict==='board_metadata'?'':'Chemistry');
+    assert.equal(result.pages[14].identity.field_observations.subjects_written,verdict==='board_metadata'?'CBSE':'Chemistry');
+  }
+});
+
+
+test('board field clearance requires independent context evidence and cannot erase a name',()=>{
+  const raw=observation(1,{subjects_written:'Chemistry'});raw.field_evidence.subjects_written=origin('board_metadata');raw.field_evidence.name_written=origin('board_metadata');
+  const checked=bulk.inspectIdentity({file_name:'synthetic.pdf'},[{id:1,position:1}],{pages:[raw]},[owner]).pages[0];
+  assert.equal(checked.subjects_written,'Chemistry');assert.equal(checked.name_written,owner.name);assert.equal(checked.teacher_id,null);
+});

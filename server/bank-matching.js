@@ -96,9 +96,10 @@ export async function compareQuestionBank({
   const batchCount = Math.ceil(candidates.length / BANK_COMPARISON_BATCH_SIZE);
   const considered = [];
   const findings = [];
+  let recoverySplitCount = 0;
   let expectedPageCount = answerPageCount;
 
-  const compare = async (papers, phase, batchIndex, observations = []) => {
+  const compare = async (papers, phase, batchIndex, observations = [], recoveryPart = null) => {
     const suppliedIds = new Set(papers.map((paper) => Number(paper.id)));
     const phaseInstructions = phase === 'screening'
       ? `This is screening batch ${batchIndex + 1} of ${batchCount}, not the whole compatible question bank. Inspect EVERY supplied PDF against every answer image. A match within this subset is only provisional, never globally unique. Include every plausible supplied paper ID, even a low-confidence possibility, in papers, page paper_id, or alternatives so it remains available for final disambiguation. Do not prefer or discard a paper because of its position, metadata rank, or priority. If none matches, retain the pages as unresolved with paper_id 0 and has_answers true unless genuinely blank.`
@@ -115,7 +116,7 @@ export async function compareQuestionBank({
       }));
       const result = await request({
         ...requestOptions,
-        instructions: `${instructions ?? ''}\n\nQUESTION BANK COMPARISON: ${phaseInstructions}\nOnly return paper IDs supplied in this call, or paper_id 0 for unresolved evidence. Other IDs mentioned in source titles, confirmations or earlier observations are context only when their PDFs are absent. Do not mistake an absent confirmed master in a screening subset for evidence supporting a different master.`,
+        instructions: `${instructions ?? ''}\n\nQUESTION BANK COMPARISON: ${phaseInstructions}${recoveryPart === null ? '' : `\nThis is timeout-recovery subset ${recoveryPart} of 2 for that screening batch. The other subset must also be inspected before the bank comparison can finish.`}\nOnly return paper IDs supplied in this call, or paper_id 0 for unresolved evidence. Other IDs mentioned in source titles, confirmations or earlier observations are context only when their PDFs are absent. Do not mistake an absent confirmed master in a screening subset for evidence supporting a different master.`,
         content: [
           { type: 'input_text', text: `SUPPLIED QUESTION PAPER IDS: ${JSON.stringify([...suppliedIds])}. Compatible bank size: ${candidates.length}. Comparison phase: ${phase}.` },
           ...inputs.flat(),
@@ -131,7 +132,7 @@ export async function compareQuestionBank({
       expectedPageCount ??= result.pages.length;
       return result;
     } catch (cause) {
-      throw comparisonError(`Question-bank ${phase === 'screening' ? `batch ${batchIndex + 1} of ${batchCount}` : 'final comparison'} failed. The full bank comparison is incomplete; no match was accepted. ${cause.userMessage ?? cause.message}`, 'QUESTION_BANK_COMPARISON_FAILED', {
+      throw comparisonError(`Question-bank ${phase === 'screening' ? `batch ${batchIndex + 1} of ${batchCount}${recoveryPart === null ? '' : ` (recovery subset ${recoveryPart} of 2)`}` : 'final comparison'} failed. The full bank comparison is incomplete; no match was accepted. ${cause.userMessage ?? cause.message}`, 'QUESTION_BANK_COMPARISON_FAILED', {
         considered_candidate_ids: [...considered], failed_candidate_ids: [...suppliedIds],
       }, cause);
     }
@@ -140,7 +141,8 @@ export async function compareQuestionBank({
   const finish = (result, finalists, finalCompared) => ({
     ...result,
     considered_candidate_ids: [...ids],
-    bank_comparison: { complete: true, batch_count: batchCount, finalist_ids: finalists, final_compared: finalCompared },
+    bank_comparison: { complete: true, batch_count: batchCount, screening_leaf_count: findings.length,
+      recovery_split_count: recoverySplitCount, finalist_ids: finalists, final_compared: finalCompared },
   });
 
   if (batchCount === 1) {
@@ -149,12 +151,27 @@ export async function compareQuestionBank({
   }
 
   const contenders = new Set();
-  for (let index = 0; index < batchCount; index += 1) {
-    const batch = candidates.slice(index * BANK_COMPARISON_BATCH_SIZE, (index + 1) * BANK_COMPARISON_BATCH_SIZE);
-    const result = await compare(batch, 'screening', index);
+  const retain = (batch, result) => {
     considered.push(...batch.map((paper) => Number(paper.id)));
     findings.push(result);
     for (const id of contenderIds(result)) contenders.add(id);
+  };
+  for (let index = 0; index < batchCount; index += 1) {
+    const batch = candidates.slice(index * BANK_COMPARISON_BATCH_SIZE, (index + 1) * BANK_COMPARISON_BATCH_SIZE);
+    try {
+      retain(batch, await compare(batch, 'screening', index));
+    } catch (error) {
+      // One bisection, only after a typed transport timeout and only with a
+      // shared packet budget. Keep every answer image and every full master.
+      // A child failure aborts: there is no recursion or partial-bank winner.
+      if (typeof requestOptions.requestPolicy?.beginAttempt !== 'function' || batch.length < 2 ||
+          error.cause?.code !== 'OPENAI_REQUEST_TIMEOUT') throw error;
+      recoverySplitCount += 1;
+      const middle = Math.ceil(batch.length / 2);
+      for (const [part, subset] of [batch.slice(0, middle), batch.slice(middle)].entries()) {
+        retain(subset, await compare(subset, 'screening', index, [], part + 1));
+      }
+    }
   }
 
   if (!contenders.size) {

@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { BANK_COMPARISON_BATCH_SIZE, BANK_COMPARISON_FINALIST_LIMIT, compareQuestionBank } from '../server/bank-matching.js';
+import { createMatchingBudget } from '../server/matching-budget.js';
 
 // Synthetic bytes and injected requests only: no credentials, provider calls,
 // application database, or production source files are used by these tests.
@@ -268,4 +269,202 @@ test('final comparison cannot turn previously observed writing into a disposable
   assert.equal(result.pages[0].section, 'none');
   assert.equal(result.pages[0].paper_id, 0);
   assert.deepEqual(result.blank_conflict_pages, [1]);
+});
+
+const requestTimeout = () => Object.assign(new Error('Synthetic request timed out.'), { code: 'OPENAI_REQUEST_TIMEOUT' });
+function metered(handler, limits = {}) {
+  const requestPolicy = createMatchingBudget({ ...limits });
+  const request = async (options) => {
+    assert.equal(options.requestPolicy, requestPolicy);
+    const attempt = requestPolicy.beginAttempt({ provider: 'openai', model: 'synthetic', timeoutMs: 90000 });
+    try {
+      const result = await handler(options);
+      attempt.finish({ status: 'success' });
+      return result;
+    } catch (error) {
+      attempt.finish({ status: error.code === 'OPENAI_REQUEST_TIMEOUT' ? 'timeout' : 'error', error });
+      throw error;
+    }
+  };
+  return { request, requestPolicy };
+}
+
+test('a timed-out eight-paper screening batch splits once, preserving earlier leads and every original answer image', async () => {
+  const calls = [];
+  const images = Array.from({ length: 17 }, (_, i) => ({ ...answerInput, image_url: `data:image/png;base64,${Buffer.from(`original source ${i + 1}`).toString('base64')}` }));
+  const originalContent = [{ type: 'input_text', text: 'Original teacher context.' }, ...images];
+  const transport = metered(async (request) => {
+    const ids = suppliedIds(request);
+    calls.push(ids);
+    for (const original of originalContent) assert.ok(request.content.includes(original));
+    let result;
+    if (calls.length === 1) result = matched(2, [7]);
+    else if (calls.length === 2) throw requestTimeout();
+    else if (calls.length === 3) {
+      assert.match(request.instructions, /timeout-recovery subset 1 of 2/);
+      result = matched(11);
+    } else if (calls.length === 4) {
+      assert.match(request.instructions, /timeout-recovery subset 2 of 2/);
+      result = matched(13, [16]);
+    } else if (calls.length === 5) result = unresolved();
+    else {
+      assert.deepEqual(ids, [2, 7, 11, 13, 16]);
+      assert.match(request.instructions, /This is the final comparison/);
+      result = matched(13, [16]);
+    }
+    return { ...result, pages: images.map((_, i) => ({ ...result.pages[0], page: i + 1 })) };
+  });
+  const result = await compareQuestionBank(options(17, transport.request, { requestPolicy: transport.requestPolicy, content: originalContent }));
+  assert.deepEqual(calls.map(ids => ids.length), [8, 8, 4, 4, 1, 5]);
+  assert.equal(transport.requestPolicy.snapshot().attempts, 6);
+  assert.deepEqual(result.considered_candidate_ids, candidates.slice(0, 17).map(p => p.id));
+  assert.deepEqual(result.papers[0].alternatives, [16]);
+  assert.equal(result.bank_comparison.recovery_split_count, 1);
+  assert.equal(result.bank_comparison.screening_leaf_count, 4);
+  assert.equal(result.bank_comparison.complete, true);
+});
+
+test('the five-paper last batch of a twenty-one-paper bank splits into three and two without dropping a late contender', async () => {
+  const calls = [];
+  const bank = [...candidates, { ...candidates[0], id: 21 }];
+  const transport = metered(async (request) => {
+    const ids = suppliedIds(request);
+    calls.push(ids);
+    if (calls.length === 3) throw requestTimeout();
+    return ids.includes(21) ? matched(21) : unresolved();
+  });
+  const result = await compareQuestionBank(options(20, transport.request, {
+    requestPolicy: transport.requestPolicy, candidates: bank,
+    paperInputs: async paper => [{ type: 'input_file', filename: `paper-${paper.id}.pdf`, file_data: `data:application/pdf;base64,${fullPdf(paper.id).toString('base64')}` }],
+  }));
+  assert.deepEqual(calls, [[1,2,3,4,5,6,7,8], [9,10,11,12,13,14,15,16], [17,18,19,20,21], [17,18,19], [20,21], [21]]);
+  assert.deepEqual(result.considered_candidate_ids, bank.map(p => p.id));
+  assert.equal(result.pages[0].paper_id, 21);
+  assert.equal(transport.requestPolicy.snapshot().attempts, 6);
+});
+
+test('a timed-out recovery child aborts without recursion or accepting its sibling', async () => {
+  const calls = [];
+  const transport = metered(async (request) => {
+    const ids = suppliedIds(request);
+    calls.push(ids);
+    if (calls.length !== 2) throw requestTimeout();
+    return matched(1);
+  });
+  await assert.rejects(compareQuestionBank(options(9, transport.request, { requestPolicy: transport.requestPolicy })), error => {
+    assert.match(error.message, /recovery subset 2 of 2/);
+    assert.match(error.message, /incomplete; no match was accepted/);
+    assert.deepEqual(error.considered_candidate_ids, [1, 2, 3, 4]);
+    assert.deepEqual(error.failed_candidate_ids, [5, 6, 7, 8]);
+    return true;
+  });
+  assert.deepEqual(calls.map(ids => ids.length), [8, 4, 4]);
+  assert.equal(transport.requestPolicy.snapshot().attempts, 3);
+});
+
+test('screening recovery cannot split a final comparison or promote provisional evidence when it times out', async () => {
+  const calls = [];
+  const transport = metered(async (request) => {
+    calls.push(suppliedIds(request));
+    if (calls.length === 1 || calls.length === 5) throw requestTimeout();
+    return matched(suppliedIds(request)[0]);
+  });
+  await assert.rejects(compareQuestionBank(options(9, transport.request, { requestPolicy: transport.requestPolicy })), /final comparison failed/);
+  assert.deepEqual(calls.map(ids => ids.length), [8, 4, 4, 1, 3]);
+});
+
+test('a small-bank final timeout and a singleton screening timeout are never split', async () => {
+  for (const count of [7, 9]) {
+    let calls = 0;
+    const transport = metered(async () => {
+      calls += 1;
+      if (count === 7 || calls === 2) throw requestTimeout();
+      return matched(1);
+    });
+    await assert.rejects(compareQuestionBank(options(count, transport.request, { requestPolicy: transport.requestPolicy })), /incomplete; no match was accepted/);
+    assert.equal(calls, count === 7 ? 1 : 2);
+  }
+});
+
+test('recovery is unavailable without a shared packet policy', async () => {
+  let calls = 0;
+  await assert.rejects(compareQuestionBank(options(9, async () => { calls += 1; throw requestTimeout(); })), /incomplete/);
+  assert.equal(calls, 1);
+});
+
+test('budget, persistence, ordinary provider and malformed-evidence failures never trigger screening recovery', async () => {
+  for (const code of ['MATCHING_BUDGET_EXHAUSTED', 'MATCHING_BUDGET_PERSISTENCE_FAILED', 'HTTP_503', null]) {
+    let calls = 0;
+    const transport = metered(async () => {
+      calls += 1;
+      if (code) throw Object.assign(new Error('Synthetic timeout-like text must not control recovery.'), { code });
+      return { pages: [], papers: [] };
+    });
+    await assert.rejects(compareQuestionBank(options(9, transport.request, { requestPolicy: transport.requestPolicy })), /incomplete/);
+    assert.equal(calls, 1);
+  }
+});
+
+test('every recovery request consumes the existing shared attempt budget and exhaustion stops before another provider call', async () => {
+  let calls = 0;
+  const transport = metered(async () => {
+    calls += 1;
+    if (calls === 1) throw requestTimeout();
+    return matched(1);
+  }, { maxProviderAttempts: 2 });
+  await assert.rejects(compareQuestionBank(options(9, transport.request, { requestPolicy: transport.requestPolicy })), error => {
+    assert.equal(error.cause.code, 'MATCHING_BUDGET_EXHAUSTED');
+    assert.deepEqual(error.considered_candidate_ids, [1, 2, 3, 4]);
+    return true;
+  });
+  assert.equal(calls, 2);
+  assert.equal(transport.requestPolicy.snapshot().attempts, 2);
+});
+
+test('a deadline exhausted by the original timeout admits no recovery provider call', async () => {
+  let now = 0, calls = 0;
+  const transport = metered(async () => {
+    calls += 1;
+    now = 100;
+    throw requestTimeout();
+  }, { packetTimeoutMs: 100, requestTimeoutMs: 90, clock: () => now });
+  await assert.rejects(compareQuestionBank(options(9, transport.request, { requestPolicy: transport.requestPolicy })), error => {
+    assert.equal(error.cause.code, 'MATCHING_BUDGET_EXHAUSTED');
+    assert.equal(error.cause.reason, 'packet_deadline');
+    return true;
+  });
+  assert.equal(calls, 1);
+  assert.equal(transport.requestPolicy.snapshot().attempts, 1);
+});
+
+test('too many contenders after a split still fail the joint-finalist limit without dropping any paper', async () => {
+  const calls = [];
+  const transport = metered(async (request) => {
+    const ids = suppliedIds(request);
+    calls.push(ids);
+    if (calls.length === 1) throw requestTimeout();
+    return matched(ids[0], ids.slice(1));
+  });
+  await assert.rejects(compareQuestionBank(options(20, transport.request, { requestPolicy: transport.requestPolicy })), error => {
+    assert.equal(error.code, 'QUESTION_BANK_FINALIST_LIMIT');
+    assert.deepEqual(error.considered_candidate_ids, candidates.map(p => p.id));
+    assert.deepEqual(error.finalist_ids, candidates.map(p => p.id));
+    return true;
+  });
+  assert.deepEqual(calls.map(ids => ids.length), [8, 4, 4, 8, 4]);
+});
+
+test('writing seen by a recovery child cannot become a blank in the final comparison', async () => {
+  let calls = 0;
+  const transport = metered(async () => {
+    calls += 1;
+    if (calls === 1) throw requestTimeout();
+    if (calls === 2) return matched(1);
+    return unresolved({ has_answers: false });
+  });
+  const result = await compareQuestionBank(options(9, transport.request, { requestPolicy: transport.requestPolicy }));
+  assert.equal(calls, 5);
+  assert.deepEqual(result.blank_conflict_pages, [1]);
+  assert.equal(result.pages[0].has_answers, true);
+  assert.equal(result.pages[0].paper_id, 0);
 });

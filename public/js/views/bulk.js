@@ -500,7 +500,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
       ),
       item.sort_error ? h('p', { class: 'notice' }, item.sort_error) : null,
       item.matching_metrics ? h('details', { class: 'hint' }, h('summary', {}, 'Matching usage'),
-        h('p', {}, `${item.matching_metrics.attempts} of ${item.matching_metrics.limits.maxProviderAttempts} permitted provider requests; ${Math.round(item.matching_metrics.elapsedMs / 1000)} seconds elapsed. ${item.matching_metrics.usage.totalTokens === null ? 'Token usage not reported yet.' : `${item.matching_metrics.usage.totalTokens} reported tokens (may exclude attempts without usage data).`} ${item.compared_candidates === null ? '' : `${item.compared_candidates} compatible question papers considered.`}`)) : null,
+        h('p', {}, `${item.matching_metrics.attempts} of ${item.matching_metrics.limits.maxProviderAttempts} permitted provider requests; ${Math.round(item.matching_metrics.elapsedMs / 1000)} seconds elapsed. ${item.matching_metrics.usage.totalTokens === null ? 'Token usage not reported yet.' : `${item.matching_metrics.usage.totalTokens} reported tokens (may exclude attempts without usage data).`} ${item.compared_candidates === null ? '' : `${item.compared_candidates} compatible question papers available; comparison coverage is shown below.`}`)) : null,
       item.pages.some(page => page.identity) ? h('details', { class: 'hint' },
         h('summary', {}, 'Source identity evidence'),
         h('p', {}, 'Read-only source observations for operator review. These details are not included in teacher reports.'),

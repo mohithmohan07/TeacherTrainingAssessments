@@ -57,6 +57,9 @@ export function validateProviderIdentity(result) {
     if (!page || Object.keys(page).some(key => ![...fields, 'page', 'teacher_id', 'name_confidence', 'language', 'languages', 'field_evidence', 'identity_panel_bounds'].includes(key))) {
       throw invalid('provider identity contains an unexpected or server-only property');
     }
+    if (page.field_evidence && Object.values(page.field_evidence).some(field => !origins.has(field?.origin))) {
+      throw invalid('provider identity contains an unexpected or independent-only field origin');
+    }
   }
   return result;
 }

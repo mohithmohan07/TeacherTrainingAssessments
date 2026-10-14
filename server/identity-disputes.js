@@ -9,7 +9,7 @@ const contextFields = ['grade_written', 'subjects_written'];
 const kinds = new Set(['context_change', 'name_weakened', 'name_changed', 'resolved_identity_changed', 'master_changed']);
 const origins = new Set(['identity_header', 'document_heading', 'answer_content', 'absent', 'uncertain']);
 const confidences = new Set(['certain', 'uncertain', 'none']);
-const verificationStatuses = new Set(['confirmed', 'absent', 'answer_content', 'uncertain']);
+const verificationStatuses = new Set(['confirmed', 'absent', 'answer_content', 'board_metadata', 'uncertain']);
 const legacyFlags = ['reread_name_conflict', 'reread_header_conflict', 'identity_conflict',
   'reread_disputes_unclassified', 'reread_disputes_truncated'];
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);

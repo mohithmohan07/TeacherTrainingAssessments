@@ -172,7 +172,9 @@ export function inspectIdentity(item, pages, look, teachers) {
         const origin = seen.field_evidence?.[key]?.origin;
         const independentlyUnknown = seen.context_verification?.status === 'verified_unique_name' &&
           ['grade_written', 'subjects_written'].includes(key) && seen.context_verification.fields?.[key]?.status === 'uncertain';
-        return origin === 'answer_content' || origin === 'absent' || independentlyUnknown ? '' : String(seen[key] ?? '').trim();
+        const independentlyBoard = ['verified_unique_name', 'verified_unnamed_fields'].includes(seen.context_verification?.status) &&
+          ['grade_written', 'subjects_written'].includes(key) && seen.context_verification.fields?.[key]?.status === 'board_metadata';
+        return origin === 'answer_content' || origin === 'absent' || (origin === 'board_metadata' && independentlyBoard) || independentlyUnknown ? '' : String(seen[key] ?? '').trim();
       };
       const name = field('name_written');
       const grade = field('grade_written');
@@ -218,7 +220,8 @@ export function unnamedContextTarget(source, packetSources, teachers, selectedTe
 }
 
 function contextDisputed(source) {
-  return (source.reread_disputes ?? []).some(dispute => !dispute.resolved &&
+  return ['grade_written', 'subjects_written'].some(key => source.field_evidence?.[key]?.origin === 'uncertain') ||
+    (source.reread_disputes ?? []).some(dispute => !dispute.resolved &&
     (dispute.kind === 'context_change' || (dispute.kind === 'resolved_identity_changed' && dispute.context_only)));
 }
 
