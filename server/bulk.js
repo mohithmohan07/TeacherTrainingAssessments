@@ -32,8 +32,9 @@ import { jobsAtOnce } from './capacity.js';
 import { keepAwake } from './idle.js';
 import { compareQuestionBank } from './bank-matching.js';
 import { createMatchingBudget, estimateMatchingCalls, MAX_INDEPENDENT_IDENTITY_VERIFICATIONS } from './matching-budget.js';
-import { readIdentityPages, rereadIdentityPages } from './identity-reading.js';
+import { readIdentityPages, rereadIdentityPages, validateProviderIdentity } from './identity-reading.js';
 import { verifyIdentityHeader } from './identity-verification.js';
+import { mergeIdentityObservations, resolveContextDisputes, hasBlockingIdentityDisputes } from './identity-disputes.js';
 
 /* ------------------------------------------------------------- the rows */
 
@@ -188,7 +189,8 @@ export function inspectIdentity(item, pages, look, teachers) {
         identity_panel_bounds: seen.identity_panel_bounds ?? null,
         context_verification: seen.context_verification ?? null,
         field_observations: Object.fromEntries(['name_written', 'grade_written', 'subjects_written', 'paper_title_written'].map((key) => [key, String(seen[key] ?? '').trim()])),
-        field_review_required: Boolean(seen.reread_name_conflict || seen.reread_header_conflict) || Object.entries(seen.field_evidence ?? {}).some(([key, e]) => e.origin === 'uncertain' &&
+        reread_disputes: seen.reread_disputes ?? [],
+        field_review_required: hasBlockingIdentityDisputes(seen) || Object.entries(seen.field_evidence ?? {}).some(([key, e]) => e.origin === 'uncertain' &&
           !(seen.context_verification?.status === 'verified_unique_name' && ['grade_written', 'subjects_written'].includes(key) && seen.context_verification.fields?.[key]?.status === 'uncertain')),
       };
     }),
@@ -202,6 +204,22 @@ export function uniqueContextTarget(source, teachers, selectedTeacherId = null) 
   const matches = teachers.filter(teacher => identityName(teacher.name) === identityName(source.name_written));
   if (matches.length !== 1 || (selectedTeacherId && matches[0].id !== selectedTeacherId)) return null;
   return matches[0];
+}
+
+// This gate permits checking metadata on an unnamed continuation, never
+// assigning it a name. Mixed or ambiguous packet identities remain blocked.
+export function unnamedContextTarget(source, packetSources, teachers, selectedTeacherId) {
+  if (!selectedTeacherId || source.name_written !== '' || source.name_confidence !== 'none') return null;
+  const named = packetSources.filter(page => page.name_written);
+  if (!named.length || named.some(page => page.field_review_required || hasBlockingIdentityDisputes(page) ||
+      uniqueContextTarget(page, teachers, selectedTeacherId)?.id !== selectedTeacherId)) return null;
+  if (packetSources.some(page => !page.name_written && page.name_confidence !== 'none')) return null;
+  return teachers.find(teacher => teacher.id === selectedTeacherId) ?? null;
+}
+
+function contextDisputed(source) {
+  return (source.reread_disputes ?? []).some(dispute => !dispute.resolved &&
+    (dispute.kind === 'context_change' || (dispute.kind === 'resolved_identity_changed' && dispute.context_only)));
 }
 
 function conflictingContext(teacher, source) {
@@ -227,6 +245,10 @@ export function identityProblems(item, pages, result, teachers) {
     if (source.context_verification?.status === 'verified_unique_name' &&
         uniqueContextTarget(source, teachers, item.teacher_id)?.id !== source.context_verification.verified_teacher_id) {
       problems.push(`Source page ${source.source_page} relied on a unique-name context check that no longer matches the current roster. Verify its identity again before filing.`);
+    }
+    if (source.context_verification?.status === 'verified_unnamed_fields' &&
+        unnamedContextTarget(source, evidence, teachers, item.teacher_id)?.id !== source.context_verification.verified_teacher_id) {
+      problems.push(`Source page ${source.source_page} relied on an unnamed-page metadata check whose packet identity no longer matches. Verify it again before filing.`);
     }
     if (source.name_confidence === 'certain' && definiteNameConflict(selected.name, source.name_written)) {
       problems.push(`Source page ${source.source_page} clearly names “${source.name_written}”, not ${selected.name}. Correct the teacher or exclude that page; manual selection cannot override a conflicting name.`);
@@ -488,7 +510,7 @@ setImmediate(pump);
 
 const LOOK_INSTRUCTIONS = `You are helping file a teacher's answers to a teacher training assessment. You are given every page of one PDF of answer sheets, scanned, usually handwritten, and the list of teachers at the school.
 
-1. Inspect EVERY page independently for teacher identity. One PDF may mistakenly contain two teachers. Never carry a teacher name onto an unnamed page. For each page, copy name_written, grade_written, subjects_written and paper_title_written exactly from explicit identity/header fields, or "" if absent. Do not use names in questions or answers as teacher names. paper_title_written is only an explicitly printed/written administered question-paper title, section heading or filename, never your inferred subject. Copy values only from actual identity/document header fields. Equations or answer notes near a blank Class/Subject box are answer content, not class/subject metadata. A report title, classroom example or assessment heading written within an answer is answer content, not this administered paper’s title. Also locate the complete visible Name/Class/Subject identity panel as identity_panel_bounds using normalized x,y,width,height relative to this original image; include the whole labelled panel, not just a value. Return null when no reliable panel can be located. Do not infer coordinates from a template or another page. For every copied field, provide field_evidence with its visual origin and a short reason. Use identity_header for Name/Class/Subject fields, document_heading for the administered paper heading, answer_content for text belonging to an answer, absent when truly absent, and uncertain when its role cannot be established. Copy a generic heading faithfully; the later question comparison decides whether it names a unique master. A descriptive heading is not itself a version identifier. Give teacher_id only when the full name, initials and any written class/subject identify exactly one listed teacher; otherwise 0. Use name_confidence "certain", "uncertain" or "none". Never resolve namesakes by guessing. The top-level name_written/teacher_id summarize only when the named pages agree; otherwise use "" and 0. A filename is a clue, not authority over page evidence.
+1. Inspect EVERY page independently for teacher identity. One PDF may mistakenly contain two teachers. Never carry a teacher name onto an unnamed page. For each page, copy name_written, grade_written, subjects_written and paper_title_written exactly from explicit identity/header fields, or "" if absent. Do not use names in questions or answers as teacher names. paper_title_written is only an explicitly printed/written administered question-paper title, section heading or filename, never your inferred subject. Copy values only from actual identity/document header fields, including explicitly labelled handwritten header metadata outside the printed boxes. A blank printed Subject box does not erase a separately labelled handwritten Subject-handling value. Equations or answer notes near a blank Class/Subject box are answer content, not class/subject metadata. A report title, classroom example or assessment heading written within an answer is answer content, not this administered paper’s title. Also locate the complete visible Name/Class/Subject identity panel as identity_panel_bounds using normalized x,y,width,height relative to this original image; include the whole labelled panel, not just a value. Return null when no reliable panel can be located. Do not infer coordinates from a template or another page. For every copied field, provide field_evidence with its visual origin and a short reason. Use identity_header for Name/Class/Subject fields, document_heading for the administered paper heading, answer_content for text belonging to an answer, absent when truly absent, and uncertain when its role cannot be established. Copy a generic heading faithfully; the later question comparison decides whether it names a unique master. A descriptive heading is not itself a version identifier. Give teacher_id only when the full name, initials and any written class/subject identify exactly one listed teacher; otherwise 0. Use name_confidence "certain", "uncertain" or "none". Never resolve namesakes by guessing. The top-level name_written/teacher_id summarize only when the named pages agree; otherwise use "" and 0. A filename is a clue, not authority over page evidence.
 
 Return exactly one entry for each supplied image, using the local page numbers in the supplied batch map. Do not return observations for images outside this batch.
 
@@ -662,33 +684,9 @@ export async function sortItem(id, { request = requestJson, configured = openaiC
         // not erase a clearly different named teacher seen on that page.
         const first = inspectIdentity(item, [{ id: 1, position: 1 }], { pages: [{ ...old, page: 1 }] }, teachers).pages[0];
         const next = inspectIdentity(item, [{ id: 1, position: 1 }], { pages: [{ ...fresh, page: 1 }] }, teachers).pages[0];
-        for (const key of ['grade_written', 'subjects_written']) {
-          if (old.field_evidence?.[key]?.origin === 'identity_header' && String(old[key]).trim() &&
-              identityName(first[key]) !== identityName(next[key]) && fresh.field_evidence?.[key]?.origin !== 'answer_content') {
-            fresh = { ...fresh, [key]: old[key], field_evidence: { ...fresh.field_evidence, [key]: old.field_evidence[key] }, reread_name_conflict: true };
-          }
-        }
-        const firstMaster = namedMaster(first.paper_title_written, library).paper;
-        if (firstMaster && fresh.field_evidence?.paper_title_written?.origin !== 'answer_content' &&
-            namedMaster(next.paper_title_written, library).paper?.id !== firstMaster.id) {
-          fresh = { ...fresh, paper_title_written: old.paper_title_written,
-            field_evidence: { ...fresh.field_evidence, paper_title_written: old.field_evidence?.paper_title_written },
-            reread_header_conflict: true };
-        }
-        if (first.teacher_id && next.teacher_id !== first.teacher_id && first.name_confidence === 'certain') {
-          return { ...fresh, name_written: old.name_written, teacher_id: old.teacher_id, name_confidence: old.name_confidence,
-            grade_written: old.grade_written, subjects_written: old.subjects_written,
-            field_evidence: { ...fresh.field_evidence, name_written: old.field_evidence?.name_written,
-              grade_written: old.field_evidence?.grade_written, subjects_written: old.field_evidence?.subjects_written },
-            reread_name_conflict: true };
-        }
-        if (first.name_confidence === 'certain' && first.name_written &&
-            (!next.name_written || next.name_confidence !== 'certain' || identityName(first.name_written) !== identityName(next.name_written))) {
-          return { ...fresh, name_written: old.name_written, teacher_id: old.teacher_id, name_confidence: old.name_confidence,
-            field_evidence: { ...fresh.field_evidence, name_written: old.field_evidence?.name_written },
-            reread_name_conflict: true };
-        }
-        return fresh;
+        return mergeIdentityObservations({ old, fresh, first, next,
+          firstMasterId: namedMaster(first.paper_title_written, library).paper?.id ?? null,
+          nextMasterId: namedMaster(next.paper_title_written, library).paper?.id ?? null });
       },
     });
   }
@@ -699,9 +697,11 @@ export async function sortItem(id, { request = requestJson, configured = openaiC
   const verificationAudit = [];
   const contextSources = inspectIdentity(item, pages, look, teachers).pages;
   let verifiedPages = 0;
-  for (const [index, source] of contextSources.entries()) {
-    const target = uniqueContextTarget(source, teachers, item.teacher_id);
-    if (!target || !conflictingContext(target, source)) continue;
+  for (const [index, source] of [...contextSources.entries()].sort((a, b) => Number(Boolean(b[1].name_written)) - Number(Boolean(a[1].name_written)))) {
+    const namedTarget = uniqueContextTarget(source, teachers, item.teacher_id);
+    const target = namedTarget ?? unnamedContextTarget(source, inspectIdentity(item, pages, look, teachers).pages, teachers, item.teacher_id);
+    const mode = namedTarget ? 'named_identity' : 'unnamed_fields';
+    if (!target || (!conflictingContext(target, source) && !contextDisputed(source))) continue;
     const raw = look.pages.find(page => page.page === index + 1);
     if (!verificationConfigured() || !raw?.identity_panel_bounds || verifiedPages >= MAX_INDEPENDENT_IDENTITY_VERIFICATIONS) {
       verificationAudit.push({ page: index + 1, status: 'unavailable', reason: !verificationConfigured() ? 'independent_provider_unavailable' : !raw?.identity_panel_bounds ? 'panel_not_located' : 'packet_verification_limit' });
@@ -710,18 +710,22 @@ export async function sortItem(id, { request = requestJson, configured = openaiC
     verifiedPages += 1;
     try {
       const verified = await verifyIdentity({ buffer: await fs.readFile(path.join(UPLOADS_DIR, files[index].stored_name)),
-        mimeType: files[index].mime_type, bounds: raw.identity_panel_bounds, observation: raw, requestPolicy });
+        mimeType: files[index].mime_type, bounds: raw.identity_panel_bounds, observation: raw, mode, requestPolicy });
       verificationAudit.push({ page: index + 1, ...verified.audit, status: verified.status });
-      if (!['verified', 'unresolved'].includes(verified.status) || !verified.name_verified) continue;
+      if (mode === 'unnamed_fields' ? verified.status !== 'verified' || !verified.fields_verified :
+          !['verified', 'unresolved'].includes(verified.status) || !verified.name_verified) continue;
       const currentItem = selectItem.get(id);
       if (!currentItem) return;
-      if (uniqueContextTarget(source, selectSchoolTeachers.all(item.school_id), currentItem.teacher_id)?.id !== target.id) {
+      const currentTeachers = selectSchoolTeachers.all(item.school_id);
+      const currentTarget = mode === 'named_identity' ? uniqueContextTarget(source, currentTeachers, currentItem.teacher_id) :
+        unnamedContextTarget(source, inspectIdentity(currentItem, pages, look, currentTeachers).pages, currentTeachers, currentItem.teacher_id);
+      if (currentTarget?.id !== target.id) {
         verificationAudit.push({ page: index + 1, status: 'unavailable', reason: 'identity_context_changed' });
         continue;
       }
       const fields = { grade_written: verified.evidence.grade, subjects_written: verified.evidence.subject };
       const originalFields = Object.fromEntries(Object.keys(fields).map(key => [key, { value: raw[key], evidence: raw.field_evidence?.[key] ?? null }]));
-      const adjusted = { ...raw, field_evidence: { ...raw.field_evidence } };
+      let adjusted = { ...raw, field_evidence: { ...raw.field_evidence } };
       for (const [key, evidence] of Object.entries(fields)) {
         // An unreadable/uncertain class is unknown, not a blank or a guessed
         // expected class. It cannot disambiguate namesakes (eligibility above).
@@ -729,7 +733,8 @@ export async function sortItem(id, { request = requestJson, configured = openaiC
         adjusted.field_evidence[key] = { origin: evidence.status === 'confirmed' ? 'identity_header' : evidence.status,
           reason: evidence.reason };
       }
-      adjusted.context_verification = { status: 'verified_unique_name', verified_teacher_id: target.id, fields, original_fields: originalFields, audit: verified.audit };
+      adjusted = resolveContextDisputes(adjusted, fields, { uniqueNameVerified: mode === 'named_identity' });
+      adjusted.context_verification = { status: mode === 'named_identity' ? 'verified_unique_name' : 'verified_unnamed_fields', verified_teacher_id: target.id, fields, original_fields: originalFields, audit: verified.audit };
       look.pages = look.pages.map(page => page === raw ? adjusted : page);
     } catch (error) {
       if (['MATCHING_BUDGET_EXHAUSTED', 'MATCHING_BUDGET_PERSISTENCE_FAILED'].includes(error.code)) throw error;
@@ -908,6 +913,8 @@ export function buildSortPlan(teacher, school, library, pages, sorted, result, {
     const questions = (found.questions ?? []).map((q) => String(q).trim()).filter(Boolean);
     sourcePages.push({ page_id: page.id, source_page: page.position, section, group, paper_id: paperId,
       has_answers: found.has_answers !== false, supplied_blank: Boolean(suppliedBlank), questions, confidence: summary?.confidence ?? null,
+      summary_count: said.length, matched_question_labels: summary?.matched_question_labels ?? null,
+      alternatives: summary?.alternatives ?? null,
       reason: String(summary?.reason ?? ''), header_evidence: found.header_evidence ?? null,
       source_heading: identity?.paper_title_written ?? '', issues });
     assignments.push({ id: page.id, section: group, questions: questions.join(', ') });
@@ -1076,6 +1083,7 @@ export function presentItem(item, others = []) {
     sort_error: item.sort_error,
     matching_metrics: result?.matching_metrics ?? null,
     compared_candidates: result?.candidate_paper_ids?.length ?? null,
+    bank_comparison: result?.bank_comparison ?? null,
     pages: pages.map((p) => ({ id: p.id, src: `/uploads/${p.stored_name}`, position: p.position, section: p.section, questions: p.questions, language: p.language, source_file: item.file_name, source_page: p.position, identity: result?.identity?.pages.find((e) => e.page_id === p.id) ?? null, match: result?.source_pages?.find((e) => e.page_id === p.id) ?? null })),
     sections,
     problems: problems.filter(Boolean),
@@ -1360,11 +1368,21 @@ function saveFinalization(id, state) {
 // selection, filename or model-chosen ID cannot override a definite name.
 export function finalizationOwners(item, pages, identity, teachers, conflicts = []) {
   const conflictSet = new Set(conflicts);
+  const packetSources = identity.pages.filter(source => pages.some(page => page.id === source.page_id))
+    .map(source => conflictSet.has(source.page_id) ? { ...source, field_review_required: true } : source);
   const namedIds = new Set(identity.pages.filter((p) => p.teacher_id).map((p) => p.teacher_id));
   const fromFile = teacherFromFileName(item.file_name, teachers);
   return pages.map((page) => {
     const seen = identity.complete ? identity.pages.find((p) => p.page_id === page.id) : null;
-    if (!seen || conflictSet.has(page.id)) return { page_id: page.id, teacher_id: null, reason_code: 'identity_unresolved' };
+    if (!seen || conflictSet.has(page.id) || seen.field_review_required || hasBlockingIdentityDisputes(seen)) {
+      return { page_id: page.id, teacher_id: null, reason_code: 'identity_unresolved' };
+    }
+    if ((seen.context_verification?.status === 'verified_unique_name' &&
+        uniqueContextTarget(seen, teachers, item.teacher_id)?.id !== seen.context_verification.verified_teacher_id) ||
+        (seen.context_verification?.status === 'verified_unnamed_fields' &&
+        unnamedContextTarget(seen, packetSources, teachers, item.teacher_id)?.id !== seen.context_verification.verified_teacher_id)) {
+      return { page_id: page.id, teacher_id: null, reason_code: 'identity_unresolved' };
+    }
     let teacher = teachers.find((t) => t.id === seen.teacher_id);
     if (!teacher && item.matched_by === 'you') teacher = teachers.find((t) => t.id === item.teacher_id);
     if (!teacher && !seen.name_written && fromFile && (!namedIds.size || (namedIds.size === 1 && namedIds.has(fromFile.id)))) teacher = fromFile;
@@ -1413,6 +1431,14 @@ export async function finalizeBulkItem(id, { request = requestJson, configured =
   const { pages, teachers, school } = source;
   const availablePages = pages.filter((p) => p.sha256 !== 'missing' && OPENAI_IMAGE_TYPES.has(p.mime_type));
   const files = availablePages.map((p) => ({ ...p, original_name: `${item.file_name} - source page ${p.position}` }));
+  // A prior sort is a guard/audit baseline, never a replacement for this
+  // finalization's fresh source read. Reject stale or partial page mappings;
+  // only pages present in the fresh observation can inherit prior evidence.
+  const priorIdentity = original.identity?.complete === true && Array.isArray(original.identity.pages) &&
+    original.identity.pages.length === pages.length &&
+    new Set(original.identity.pages.map(page => page.page_id)).size === pages.length &&
+    pages.every(page => original.identity.pages.some(previous => previous.page_id === page.id &&
+      previous.source_page === page.position && previous.source_file === item.file_name)) ? original.identity : null;
   let identity = work.identity;
   let owners = identity ? finalizationOwners(item, pages, identity, teachers, work.conflicts) : [];
   const readableSources = files.length > 0;
@@ -1428,18 +1454,22 @@ export async function finalizeBulkItem(id, { request = requestJson, configured =
           content: [{ type: 'input_text', text: `TEACHERS: ${JSON.stringify(teachers)}\nSOURCE FILE: ${item.file_name}` }, ...await pageInputs('ANSWER SHEETS', files)],
           name: 'answer_sheets_first_look', schema: LOOK_SCHEMA, maxRetries: 1, timeoutMs: 120000, task: 'read the source identities', retry: 'The submission will retain any unassessable evidence.' });
         unchanged();
-        const observed = retainMasterObservations(identity, inspectIdentity(item, availablePages, look, teachers), source.library);
+        validateProviderIdentity(look, availablePages.length);
+        const previousIdentity = identity?.complete ? identity : priorIdentity ?? identity;
+        const observed = retainMasterObservations(previousIdentity, inspectIdentity(item, availablePages, look, teachers), source.library);
         if (observed.complete) work.languages = availablePages.map((p, i) => ({ page_id: p.id, language: look.pages.find((seen) => seen.page === i + 1)?.language ?? 'mixed', languages: look.pages.find((seen) => seen.page === i + 1)?.languages ?? [] }));
-        work.conflicts = [...new Set([...work.conflicts, ...definiteObservationConflicts(identity, observed, source.library)])];
+        work.conflicts = [...new Set([...work.conflicts, ...definiteObservationConflicts(previousIdentity, observed, source.library)])];
         // Keep certain earlier page observations when the focused reread is
         // less specific; it cannot erase a source-written master or identity.
-        if (identity?.complete && observed.complete) for (const p of observed.pages) {
-          const old = identity.pages.find((s) => s.page_id === p.page_id);
+        if (previousIdentity?.complete && observed.complete) for (const p of observed.pages) {
+          const old = previousIdentity.pages.find((s) => s.page_id === p.page_id);
           if (old?.paper_title_written && !p.paper_title_written) p.paper_title_written = old.paper_title_written;
           if (old?.paper_title_written && p.paper_title_written !== old.paper_title_written) p.previous_paper_title_written = old.paper_title_written;
           if (old?.grade_written && !p.grade_written) p.grade_written = old.grade_written;
           if (old?.subjects_written && !p.subjects_written) p.subjects_written = old.subjects_written;
-          if (old?.name_confidence === 'certain' && p.name_confidence !== 'certain') Object.assign(p, old);
+          if (old?.field_review_required || hasBlockingIdentityDisputes(old) ||
+              old?.context_verification?.status === 'verified_unique_name' || old?.context_verification?.status === 'verified_unnamed_fields') Object.assign(p, old);
+          else if (old?.name_confidence === 'certain' && p.name_confidence !== 'certain') Object.assign(p, old);
         }
         if (!identity?.complete || observed.complete) identity = work.identity = observed;
         owners = finalizationOwners(item, pages, identity, teachers, work.conflicts);

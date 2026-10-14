@@ -3,6 +3,7 @@ import { after, test } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { mergeIdentityObservations } from '../server/identity-disputes.js';
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tta-bulk-finalization-'));
 process.env.DATA_DIR = dataDir;
@@ -512,4 +513,130 @@ test('finalization does not treat punctuation changes in a generic heading as a 
   }));
   assert.equal(looks, 2);
   assert.equal(outcome.filed.length, 1);
+});
+
+test('finalization ownership cannot bypass unresolved source-field or reread guards with manual selection', () => {
+  const item = { teacher_id: 1, matched_by: 'you', file_name: 'Anita Rao.pdf' };
+  const pages = [{ id: 901, position: 1 }];
+  const base = bulk.inspectIdentity(item, pages, look([lookPage(1)]), teachers);
+  assert.equal(bulk.finalizationOwners(item, pages, base, teachers)[0].teacher_id, 1);
+  for (const guard of [
+    { field_review_required: true },
+    { reread_disputes: [{ kind: 'name_changed', resolved: false }] },
+    { reread_disputes: [{ kind: 'master_changed', resolved: false }] },
+    { reread_disputes: [{ kind: 'future_guard', resolved: true }] },
+    { reread_name_conflict: true },
+    { reread_header_conflict: true },
+  ]) {
+    const identity = structuredClone(base);
+    Object.assign(identity.pages[0], guard);
+    assert.deepEqual(bulk.finalizationOwners(item, pages, identity, teachers), [
+      { page_id: 901, teacher_id: null, reason_code: 'identity_unresolved' },
+    ], JSON.stringify(guard));
+  }
+});
+
+test('finalization rechecks unique-name clearance against the current roster and selected teacher', () => {
+  const item = { teacher_id: 1, matched_by: 'you', file_name: 'Anita Rao.pdf' };
+  const pages = [{ id: 902, position: 1 }];
+  const identity = bulk.inspectIdentity(item, pages, look([lookPage(1)]), teachers);
+  identity.pages[0].context_verification = { status: 'verified_unique_name', verified_teacher_id: 1 };
+  assert.equal(bulk.finalizationOwners(item, pages, identity, teachers)[0].teacher_id, 1);
+  const namesakeRoster = [...teachers, { ...teachers[0], id: 91, grade: 'Class 9' }];
+  assert.equal(bulk.finalizationOwners(item, pages, identity, namesakeRoster)[0].teacher_id, null);
+  const renamedRoster = teachers.map(teacher => teacher.id === 1 ? { ...teacher, name: 'Anita D. Rao' } : teacher);
+  assert.equal(bulk.finalizationOwners(item, pages, identity, renamedRoster)[0].teacher_id, null);
+  assert.equal(bulk.finalizationOwners({ ...item, teacher_id: 2 }, pages, identity, teachers)[0].teacher_id, null);
+});
+
+test('finalization unnamed clearance requires a current, included and undisputed named packet anchor', () => {
+  const item = { teacher_id: 1, matched_by: 'you', file_name: 'Anita Rao.pdf' };
+  const pages = [{ id: 903, position: 1 }, { id: 904, position: 2 }];
+  const identity = bulk.inspectIdentity(item, pages, look([lookPage(1), lookPage(2, null)]), teachers);
+  identity.pages[1].context_verification = { status: 'verified_unnamed_fields', verified_teacher_id: 1 };
+  const owner = (sources = identity, roster = teachers, currentPages = pages, conflicts = []) =>
+    bulk.finalizationOwners(item, currentPages, sources, roster, conflicts).find(page => page.page_id === 904)?.teacher_id;
+  assert.equal(owner(), 1);
+  assert.equal(owner(identity, [...teachers, { ...teachers[0], id: 91 }]), null);
+  assert.equal(owner(identity, teachers, [pages[1]]), null, 'an omitted anchor cannot justify an unnamed page');
+  assert.equal(owner(identity, teachers, pages, [903]), null, 'a conflicting anchor cannot justify an unnamed page');
+  for (const extra of [{ field_review_required: true }, { name_confidence: 'uncertain' },
+    { reread_disputes: [{ kind: 'name_changed', resolved: false }] }]) {
+    const guarded = structuredClone(identity);
+    Object.assign(guarded.pages[0], extra);
+    assert.equal(owner(guarded), null, JSON.stringify(extra));
+  }
+  const mixed = structuredClone(identity);
+  mixed.pages[0] = { ...mixed.pages[0], name_written: teachers[1].name, teacher_id: 2 };
+  assert.equal(owner(mixed), null);
+  assert.equal(bulk.finalizationOwners({ ...item, teacher_id: 2 }, pages, identity, teachers)[1].teacher_id, null);
+});
+
+test('fresh finalization retains prior sort disputes and both readings despite a certain same-name reread', async () => {
+  const f = fixture(1);
+  db.prepare("UPDATE bulk_items SET teacher_id=1, matched_by='you' WHERE id=?").run(f.id);
+  const item = bulk.itemFor(f.id);
+  const fieldEvidence = Object.fromEntries(['name_written', 'grade_written', 'subjects_written', 'paper_title_written']
+    .map(key => [key, { origin: key === 'paper_title_written' ? 'absent' : 'identity_header', reason: 'Synthetic located source field.' }]));
+  const old = lookPage(1, teachers[0], { field_evidence: fieldEvidence });
+  const fresh = lookPage(1, teachers[1], { field_evidence: fieldEvidence });
+  const first = bulk.inspectIdentity(item, f.pages, look([old]), teachers).pages[0];
+  const next = bulk.inspectIdentity(item, f.pages, look([fresh]), teachers).pages[0];
+  const merged = mergeIdentityObservations({ old, fresh, first, next });
+  const identity = bulk.inspectIdentity(item, f.pages, look([merged]), teachers);
+  assert.equal(identity.pages[0].field_review_required, true);
+  db.prepare('UPDATE bulk_items SET result=? WHERE id=?').run(JSON.stringify({ identity }), f.id);
+  let reads = 0;
+  const outcome = await bulk.finalizeBulkItem(f.id, options(async request => {
+    assert.equal(request.name, 'answer_sheets_first_look', 'guarded identities must not reach master matching');
+    reads += 1;
+    return look([old]);
+  }));
+  assert.equal(reads, 2, 'prior evidence must not skip fresh source reads');
+  assert.equal(outcome.pages[0].teacher_id, null);
+  assert.equal(outcome.pages[0].state, 'unassigned');
+  assert.equal(outcome.filed.length, 0);
+  const retained = JSON.parse(bulk.itemFor(f.id).result).finalization.identity.pages[0];
+  assert.equal(retained.field_review_required, true);
+  const dispute = retained.reread_disputes.find(entry => entry.kind === 'name_changed');
+  assert.equal(dispute.original.name_written.value, teachers[0].name);
+  assert.equal(dispute.attempted.name_written.value, teachers[1].name);
+});
+
+test('finalization does not accept partial or stale prior source maps in place of fresh identity evidence', async () => {
+  for (const stale of ['page_id', 'source_page', 'source_file', 'incomplete']) {
+    const f = fixture(1), item = bulk.itemFor(f.id);
+    const identity = bulk.inspectIdentity(item, f.pages, look([lookPage(1)]), teachers);
+    identity.pages[0].field_review_required = true;
+    if (stale === 'page_id') identity.pages[0].page_id = -1;
+    if (stale === 'source_page') identity.pages[0].source_page = 200;
+    if (stale === 'source_file') identity.pages[0].source_file = 'A different source.pdf';
+    if (stale === 'incomplete') identity.complete = false;
+    db.prepare('UPDATE bulk_items SET result=? WHERE id=?').run(JSON.stringify({ identity }), f.id);
+    let reads = 0;
+    const outcome = await bulk.finalizeBulkItem(f.id, options(async request => {
+      if (request.name === 'answer_sheets_first_look') { reads += 1; return look([lookPage(1)]); }
+      return sorted([sortPage(1)]);
+    }));
+    assert.equal(reads, 1, stale);
+    assert.equal(outcome.pages[0].teacher_id, 1, stale);
+    assert.equal(outcome.filed.length, 1, stale);
+  }
+});
+
+test('prior complete identity never assigns a missing source page or supplies its name as an unnamed anchor', async () => {
+  const f = fixture(2);
+  db.prepare("UPDATE bulk_items SET teacher_id=1, matched_by='you' WHERE id=?").run(f.id);
+  const item = bulk.itemFor(f.id);
+  const identity = bulk.inspectIdentity(item, f.pages, look([lookPage(1), lookPage(2, null)]), teachers);
+  identity.pages[1].context_verification = { status: 'verified_unnamed_fields', verified_teacher_id: 1 };
+  db.prepare('UPDATE bulk_items SET result=? WHERE id=?').run(JSON.stringify({ identity }), f.id);
+  fs.unlinkSync(path.join(UPLOADS_DIR, f.pages[0].stored_name));
+  const outcome = await bulk.finalizeBulkItem(f.id, options(async request => {
+    assert.equal(request.name, 'answer_sheets_first_look');
+    return look([lookPage(1, null)]);
+  }));
+  assert.deepEqual(outcome.pages.map(page => page.teacher_id), [null, null]);
+  assert.deepEqual(outcome.pages.map(page => page.state), ['unassigned', 'unassigned']);
+  assert.equal(outcome.filed.length, 0);
 });

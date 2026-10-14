@@ -11,6 +11,7 @@ import { loadPdfjs, pagesOf } from '../evidence.js';
 import { paperFacts } from '../paper-picker.js';
 import { chooseMarking } from '../marking-choice.js';
 import { sourceIdentityEvidence } from '../identity-evidence.js';
+import { questionMatchEvidenceDrawer } from '../matching-evidence.js';
 
 // Where a page can go. A teacher who teaches two subjects may have sat a
 // Section B paper for each, so Section B can hold a second and third paper.
@@ -507,7 +508,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
           const evidence = sourceIdentityEvidence(page);
           return h('details', { 'data-source-identity-page': page.position },
             h('summary', {}, `Source page ${evidence.page}`), h('p', {}, evidence.summary),
-            evidence.guard ? h('p', {}, evidence.guard) : null,
+            evidence.guard ? h('p', { style: 'white-space:pre-line' }, evidence.guard) : null,
             evidence.crop ? h('div', {}, h('p', {}, `Independent verification crop from this same source image: x=${evidence.crop.x}, y=${evidence.crop.y}, width=${evidence.crop.width}, height=${evidence.crop.height}.`),
               h('div', { style: `position:relative;overflow:hidden;width:100%;max-width:900px;aspect-ratio:${evidence.crop.width}/${evidence.crop.height}` },
                 h('img', { src: page.src, alt: `Source page ${evidence.page} identity crop`, loading: 'lazy',
@@ -515,6 +516,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
             evidence.fields.map(field => h('div', {}, h('p', {}, `${field.label}: accepted ${field.accepted}; observed ${field.observed}; origin ${field.origin}. ${field.reason}`),
               field.verification ? h('p', {}, `Independent visual check: ${field.verification.status}; field label ${field.verification.label}; adjacent text ${field.verification.adjacent}. ${field.verification.reason}`) : null)));
         })) : null,
+      questionMatchEvidenceDrawer(item.pages, item.bank_comparison),
       h(
         'div',
         { class: 'bulk-teacher' },

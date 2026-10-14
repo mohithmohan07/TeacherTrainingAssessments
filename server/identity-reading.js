@@ -9,7 +9,7 @@ const origins = new Set(['identity_header', 'document_heading', 'answer_content'
 const confidences = new Set(['certain', 'uncertain', 'none']);
 const languages = new Set(['english', 'other', 'mixed']);
 
-const INDEPENDENT_INSTRUCTIONS = `Inspect each supplied page independently. The supplied roster and filename are context only: never copy a target teacher's identity from them, and never inherit an identity from another page or batch. Copy only text actually visible in that page's identity fields or administered document heading. A blank boxed Name/Class/Subject field remains blank even when an equation, formula, voltage, answer note or other handwriting is nearby. A report title, classroom example, question heading or heading within an answer is answer content, not the administered question-paper title. Use field_evidence to distinguish these visual roles; mark uncertain roles as uncertain rather than guessing. Return exactly one observation for every supplied image. Number observations with the LOCAL page numbers 1 through this batch's page count; the caller will restore original page numbers using the explicit map. Do not return observations for pages outside this batch.`;
+const INDEPENDENT_INSTRUCTIONS = `Inspect each supplied page independently. The supplied roster and filename are context only: never copy a target teacher's identity from them, and never inherit an identity from another page or batch. Copy only text actually visible in that page's identity fields or administered document heading. Explicit handwritten header labels outside printed boxes (such as Subject-handling) are also identity fields; preserve their visible values. A blank boxed Name/Class/Subject field remains blank even when an equation, formula, voltage, answer note or other handwriting is nearby. A report title, classroom example, question heading or heading within an answer is answer content, not the administered question-paper title. Use field_evidence to distinguish these visual roles; mark uncertain roles as uncertain rather than guessing. Return exactly one observation for every supplied image. Number observations with the LOCAL page numbers 1 through this batch's page count; the caller will restore original page numbers using the explicit map. Do not return observations for pages outside this batch.`;
 
 const FOCUSED_INSTRUCTIONS = `FOCUSED IDENTITY REREAD: Read only the flagged source images supplied in this batch, once each. Inspect the actual boxed or labelled identity fields closely and distinguish their contents from adjacent answer-body text. In particular, equations such as Vc = 60V are not Class metadata, and report/assessment titles written inside an answer are not the administered paper's title. Do not try to make a page agree with a roster, filename, expected teacher, previous page or other source page. Preserve a genuinely different clearly written teacher name. If the field's role or handwriting remains uncertain, report that uncertainty faithfully.`;
 
@@ -48,6 +48,17 @@ function validatePages(result, count, { provider = false } = {}) {
     }
   }
   return result.pages;
+}
+
+export function validateProviderIdentity(result) {
+  // Finalization retains partial contradictory observations, so reject forged
+  // server-only authority without discarding partial source evidence.
+  for (const page of result?.pages ?? []) {
+    if (!page || Object.keys(page).some(key => ![...fields, 'page', 'teacher_id', 'name_confidence', 'language', 'languages', 'field_evidence', 'identity_panel_bounds'].includes(key))) {
+      throw invalid('provider identity contains an unexpected or server-only property');
+    }
+  }
+  return result;
 }
 
 async function storedPageInputs(files) {

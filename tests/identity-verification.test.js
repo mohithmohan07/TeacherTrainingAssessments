@@ -21,13 +21,18 @@ const reply = (extra = {}) => ({ name_written: 'Maya Desai', name_confidence: 'c
 }), subject: field('absent', { label_quote: 'Subject', reason: 'The printed Subject label and its blank writing area are visible below Class.' }), ...extra });
 const options = (response = reply(), extra = {}) => ({ buffer: Buffer.from(source), mimeType: 'image/jpeg', bounds: { ...bounds },
   observation: observation(), crop, generate: async () => structuredClone(response), ...extra });
+const unnamedReply = (extra = {}) => reply({ name_written: '', name_confidence: 'none', ...extra });
+const unnamedOptions = (response = unnamedReply(), extra = {}) => options(response, { mode: 'unnamed_fields',
+  observation: observation({ name_written: '', name_confidence: 'none', grade_written: '1', teacher_id: null }), ...extra });
 
 test('independent evidence corrects a false class from an answer crossing the panel edge', async () => {
   const input = options();
   const before = structuredClone(input.observation);
   const result = await verifyIdentityHeader(input);
   assert.equal(result.status, 'verified');
+  assert.equal(result.mode, 'named_identity');
   assert.equal(result.name_verified, true);
+  assert.equal(result.fields_verified, true);
   assert.deepEqual(result.corrections, { grade_written: '' });
   assert.equal(result.evidence.grade.status, 'answer_content');
   assert.equal(result.evidence.grade.adjacent_quote, 'Vc = 60V');
@@ -52,6 +57,127 @@ test('confirmed new values are copied exactly without roster substitution', asyn
   const result = await verifyIdentityHeader(options(reply({ grade: field('confirmed', { value: 'Class VII' }),
     subject: field('confirmed', { value: 'Environmental Studies', label_quote: 'Subject' }) })));
   assert.deepEqual(result.corrections, { grade_written: 'Class VII', subjects_written: 'Environmental Studies' });
+});
+
+test('a genuine handwritten header subject outside a blank printed box is preserved', async () => {
+  const response = reply({ subject: field('confirmed', { value: 'English', label_quote: 'SUBJECT-HANDLING',
+    reason: 'The explicit handwritten SUBJECT-HANDLING label at the top left has English immediately after it. The printed Subject box at the upper right is blank; the handwritten label and value are header metadata, separate from the answers below.' }) });
+  const result = await verifyIdentityHeader(options(response, { generate: async (request) => {
+    assert.match(request.prompt, /explicit handwritten HEADER metadata labels/);
+    assert.match(request.prompt, /outside the printed boxes/);
+    assert.match(request.prompt, /Do not prioritize an empty printed box over genuine handwritten header metadata/);
+    assert.match(request.prompt, /If genuine header entries disagree.*use uncertain/);
+    assert.match(request.prompt, /semantic and physical continuity/);
+    return response;
+  } }));
+  assert.equal(result.evidence.subject.status, 'confirmed');
+  assert.equal(result.evidence.subject.label_quote, 'SUBJECT-HANDLING');
+  assert.equal(result.corrections.subjects_written, 'English');
+});
+
+for (const status of ['absent', 'answer_content']) test(`unnamed fields can clear a class only with conclusive ${status} evidence`, async () => {
+  const input = unnamedOptions(unnamedReply({ grade: status === 'absent' ? field('absent') : reply().grade }));
+  const before = structuredClone(input.observation);
+  const result = await verifyIdentityHeader(input);
+  assert.equal(result.mode, 'unnamed_fields');
+  assert.equal(result.status, 'verified');
+  assert.equal(result.name_verified, false);
+  assert.equal(result.fields_verified, true);
+  assert.deepEqual(result.corrections, { grade_written: '' });
+  assert.equal(result.evidence.name_written, '');
+  assert.equal(result.evidence.name_confidence, 'none');
+  assert.equal(result.audit.name_check, 'same_empty_name');
+  assert.equal(result.audit.mode, 'unnamed_fields');
+  assert.equal(result.audit.name_verified, false);
+  assert.equal(result.audit.fields_verified, true);
+  assert.deepEqual(input.observation, before);
+  assert.equal(input.observation.teacher_id, null);
+  assert.equal(Object.hasOwn(result, 'teacher_id'), false);
+  assert.equal(Object.hasOwn(result.corrections, 'name_written'), false);
+  assert.equal(Object.hasOwn(result.corrections, 'teacher_id'), false);
+});
+
+test('unnamed fields preserve a genuine confirmed class instead of clearing its conflict', async () => {
+  const result = await verifyIdentityHeader(unnamedOptions(unnamedReply({ grade: field('confirmed', { value: '1',
+    reason: 'The printed Class label is visible at the upper right, with a clearly written 1 in its associated writing area.' }) })));
+  assert.equal(result.status, 'verified');
+  assert.equal(result.fields_verified, true);
+  assert.equal(result.name_verified, false);
+  assert.equal(result.evidence.grade.status, 'confirmed');
+  assert.equal(result.evidence.grade.value, '1');
+  assert.deepEqual(result.corrections, {});
+});
+
+for (const reason of ['The Class value is covered and unreadable.', 'A faint vertical mark may be writing or bleed-through; its role cannot be established.']) {
+  test(`unnamed fields remain unresolved: ${reason}`, async () => {
+    const result = await verifyIdentityHeader(unnamedOptions(unnamedReply({ grade: field('uncertain', { reason }) }), {
+      observation: observation({ name_written: '', name_confidence: 'none', grade_written: '1', subjects_written: 'Physics', teacher_id: null }),
+    }));
+    assert.equal(result.status, 'unresolved');
+    assert.equal(result.name_verified, false);
+    assert.equal(result.fields_verified, false);
+    assert.deepEqual(result.corrections, {});
+    assert.ok(Object.values(result.audit.fields).every((decision) => !decision.applicable && !decision.changed));
+  });
+}
+
+test('an uncertain subject cannot authorize unnamed class clearance either', async () => {
+  const result = await verifyIdentityHeader(unnamedOptions(unnamedReply({ subject: field('uncertain', {
+    label_quote: '', reason: 'The possible handwritten subject heading is cut off.',
+  }) })));
+  assert.equal(result.status, 'unresolved');
+  assert.equal(result.fields_verified, false);
+  assert.deepEqual(result.corrections, {});
+});
+
+for (const [description, observed, verified] of [
+  ['a name newly appears', {}, { name_written: 'Nisha Mehta', name_confidence: 'certain' }],
+  ['a possible name appears', {}, { name_written: 'Nisha', name_confidence: 'uncertain' }],
+  ['independent name region is unreadable', {}, { name_confidence: 'uncertain' }],
+  ['original name is uncertain', { name_confidence: 'uncertain' }, {}],
+  ['original name is present', { name_written: 'Maya Desai', name_confidence: 'certain' }, {}],
+  ['both observations name the same person', { name_written: 'Maya Desai', name_confidence: 'certain' }, { name_written: 'Maya Desai', name_confidence: 'certain' }],
+  ['original name is whitespace', { name_written: ' ' }, {}],
+  ['independent name is whitespace', {}, { name_written: ' ' }],
+]) test(`unnamed mode fails closed when ${description}`, async () => {
+  const input = unnamedOptions(unnamedReply(verified));
+  Object.assign(input.observation, observed);
+  const result = await verifyIdentityHeader(input);
+  assert.equal(result.status, 'unresolved');
+  assert.equal(result.name_verified, false);
+  assert.equal(result.fields_verified, false);
+  assert.deepEqual(result.corrections, {});
+  assert.ok(Object.values(result.audit.fields).every((decision) => !decision.applicable));
+});
+
+test('unnamed mode keeps the source, bounds and owner-free observation immutable', async () => {
+  const input = unnamedOptions();
+  const before = structuredClone(input.observation);
+  input.crop = async (request) => {
+    request.buffer.fill(0);
+    request.bounds.x = 0.9;
+    return crop();
+  };
+  input.generate = async (request) => {
+    assert.equal(request.parts[1].inlineData.data, source.toString('base64'));
+    assert.equal(request.maxRetries, 0);
+    const sent = JSON.stringify(request);
+    assert.ok(!sent.includes('teacher_id'));
+    assert.ok(!sent.includes('unnamed_fields')); // The model is not primed to omit a name.
+    return unnamedReply();
+  };
+  assert.equal((await verifyIdentityHeader(input)).fields_verified, true);
+  assert.deepEqual(input.buffer, source);
+  assert.deepEqual(input.bounds, bounds);
+  assert.deepEqual(input.observation, before);
+});
+
+test('unknown verification modes fail before crop or provider use', async () => {
+  for (const mode of ['unnamed', '', null, 1]) {
+    await assert.rejects(verifyIdentityHeader(options(undefined, { mode,
+      crop: async () => assert.fail('crop must not run'), generate: async () => assert.fail('provider must not run'),
+    })), /verification mode/);
+  }
 });
 
 test('one bounded call uses the shared policy, full image and contextual crop, without prior OCR or roster context', async () => {
@@ -153,14 +279,14 @@ test('an uncertain grade does not authorize erasing it alongside a conclusive su
   assert.equal(result.evidence.grade.status, 'uncertain');
 });
 
-for (const [description, corrupt] of [
+for (const mode of ['named_identity', 'unnamed_fields']) for (const [description, corrupt] of [
   ['null result', () => null],
   ['array result', () => []],
   ['missing field', (raw) => { delete raw.subject; return raw; }],
   ['extra root field', (raw) => ({ ...raw, teacher_id: 100 })],
   ['unknown confidence', (raw) => ({ ...raw, name_confidence: 'probably' })],
-  ['empty certain name', (raw) => ({ ...raw, name_written: ' ' })],
-  ['written name with no confidence', (raw) => ({ ...raw, name_confidence: 'none' })],
+  ['empty certain name', (raw) => ({ ...raw, name_written: ' ', name_confidence: 'certain' })],
+  ['written name with no confidence', (raw) => ({ ...raw, name_written: 'Maya Desai', name_confidence: 'none' })],
   ['overlong name', (raw) => ({ ...raw, name_written: 'a'.repeat(301) })],
   ['unknown status', (raw) => ({ ...raw, grade: field('clear') })],
   ['array evidence', (raw) => ({ ...raw, grade: [] })],
@@ -179,20 +305,25 @@ for (const [description, corrupt] of [
   ['empty reason', (raw) => ({ ...raw, grade: { ...raw.grade, reason: ' ' } })],
   ['overlong quote', (raw) => ({ ...raw, grade: { ...raw.grade, label_quote: 'x'.repeat(301) } })],
   ['overlong reason', (raw) => ({ ...raw, grade: { ...raw.grade, reason: 'x'.repeat(1201) } })],
-]) test(`${description} fails closed before returning corrections`, async () => {
+]) test(`${description} fails closed before returning corrections in ${mode} mode`, async () => {
   let calls = 0;
-  const input = options(undefined, { generate: async () => { calls += 1; return corrupt(reply()); } });
+  const makeOptions = mode === 'unnamed_fields' ? unnamedOptions : options;
+  const input = makeOptions(undefined, { generate: async () => {
+    calls += 1;
+    return corrupt(mode === 'unnamed_fields' ? unnamedReply() : reply());
+  } });
   const before = structuredClone(input.observation);
   await assert.rejects(verifyIdentityHeader(input), { code: 'IDENTITY_VERIFICATION_INVALID_EVIDENCE' });
   assert.equal(calls, 1);
   assert.deepEqual(input.observation, before);
 });
 
-test('provider failures and packet-budget failures propagate unchanged without retries', async () => {
+for (const mode of ['named_identity', 'unnamed_fields']) test(`${mode} provider failures and packet-budget failures propagate unchanged without retries`, async () => {
   for (const code of ['SYNTHETIC_PROVIDER_FAILURE', 'MATCHING_BUDGET_EXHAUSTED', 'MATCHING_BUDGET_PERSISTENCE_FAILED']) {
     const failure = Object.assign(new Error('Synthetic failure.'), { code });
     let calls = 0;
-    const input = options(undefined, { generate: async () => { calls += 1; throw failure; } });
+    const makeOptions = mode === 'unnamed_fields' ? unnamedOptions : options;
+    const input = makeOptions(undefined, { generate: async () => { calls += 1; throw failure; } });
     const before = structuredClone(input.observation);
     await assert.rejects(verifyIdentityHeader(input), (error) => error === failure);
     assert.equal(calls, 1);
@@ -200,17 +331,18 @@ test('provider failures and packet-budget failures propagate unchanged without r
   }
 });
 
-test('the same finite packet budget admits the first verification and rejects the next attempt', async () => {
+for (const mode of ['named_identity', 'unnamed_fields']) test(`${mode} uses the same finite packet budget and rejects the next attempt`, async () => {
   const requestPolicy = createMatchingBudget({ maxProviderAttempts: 1 });
   let calls = 0, admitted = 0;
-  const input = options(undefined, { requestPolicy, generate: async (request) => {
+  const makeOptions = mode === 'unnamed_fields' ? unnamedOptions : options;
+  const input = makeOptions(undefined, { requestPolicy, generate: async (request) => {
     calls += 1;
     const attempt = request.requestPolicy.beginAttempt({ provider: 'gemini', model: 'synthetic-model', task: request.task, timeoutMs: request.timeoutMs });
     admitted += 1;
     attempt.finish({ status: 'success', usage: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 } });
-    return reply();
+    return mode === 'unnamed_fields' ? unnamedReply() : reply();
   } });
-  assert.equal((await verifyIdentityHeader(input)).name_verified, true);
+  assert.equal((await verifyIdentityHeader(input)).fields_verified, true);
   await assert.rejects(verifyIdentityHeader(input), { code: 'MATCHING_BUDGET_EXHAUSTED' });
   assert.equal(calls, 2);
   assert.equal(admitted, 1);

@@ -224,3 +224,75 @@ test('a later namesake invalidates independent context clearance at readiness an
  }
  db.prepare('DELETE FROM teachers WHERE id=9').run();
 });
+
+test('independent verification retires compatible context reread disputes without a stale flag', async()=>{
+  const id=await packet();let calls=0;
+  await bulk.sortItem(id,{configured:()=>true,verificationConfigured:()=>true,
+    verifyIdentity:async()=>{calls++;return {status:'verified',name_verified:true,evidence:{
+      grade:{status:'confirmed',value:owner.grade,reason:'Explicit handwritten class header.'},
+      subject:{status:'absent',value:'',reason:'No subject label value.'}},audit:{provider:'synthetic'}};},
+    request:async request=>request.name==='answer_sheets_sorted'?matched():{pages:mapping(request).map(({local,original})=>{
+      const seen=observation(local);
+      if(original===15){seen.identity_panel_bounds={x:0.45,y:0.01,width:0.4,height:0.08};
+        if(request.name==='answer_sheets_first_look'){seen.grade_written=owner.grade;seen.field_evidence.grade_written=origin('identity_header');seen.paper_title_written='Communication skills';seen.field_evidence.paper_title_written=origin('document_heading');}}
+      return seen;
+    })}});
+  const result=bulk.presentItem(bulk.itemFor(id));
+  assert.equal(calls,1);assert.equal(result.ready,true,JSON.stringify(result.problems));
+  const identity=result.pages[14].identity;
+  assert.equal(identity.field_review_required,false);
+  assert.ok(identity.reread_disputes.some(d=>d.kind==='context_change'&&d.resolved));
+  assert.equal(identity.reread_disputes[0].original.grade_written.value,owner.grade);
+  assert.equal(identity.reread_disputes[0].attempted.grade_written.value,'');
+});
+
+test('unnamed continuation field verification clears only conclusive false metadata and never assigns its name',async()=>{
+  for(const verdict of ['absent','confirmed','uncertain']){
+    const id=await packet();let calls=0;
+    await bulk.sortItem(id,{configured:()=>true,verificationConfigured:()=>true,
+      verifyIdentity:async options=>{calls++;assert.equal(options.mode,'unnamed_fields');assert.equal(options.observation.name_written,'');return {
+        status:verdict==='uncertain'?'unresolved':'verified',name_verified:false,fields_verified:verdict!=='uncertain',
+        evidence:{grade:{status:verdict,value:verdict==='confirmed'?'1':'',reason:'Independent field inspection.'},subject:{status:'absent',value:'',reason:'Empty subject.'}},audit:{provider:'synthetic'}};},
+      request:async request=>request.name==='answer_sheets_sorted'?matched():{pages:mapping(request).map(({local,original})=>{
+        const seen=observation(local);if(original===15){seen.name_written='';seen.name_confidence='none';seen.teacher_id=0;seen.field_evidence.name_written=origin('absent');seen.grade_written='1';seen.field_evidence.grade_written=origin('identity_header');seen.identity_panel_bounds={x:0.45,y:0.01,width:0.4,height:0.08};}return seen;
+      })}});
+    const result=bulk.presentItem(bulk.itemFor(id));assert.equal(calls,1);assert.equal(result.ready,verdict==='absent',JSON.stringify(result.problems));
+    assert.equal(result.pages[14].identity.name_written,'');assert.equal(result.pages[14].identity.teacher_id,null);
+    if(verdict==='absent'){
+      db.prepare('INSERT INTO teachers(id,school_id,name,grade,subjects) VALUES(9,1,?,?,?)').run(owner.name,'Class 1',owner.subjects);
+      const changed=bulk.presentItem(bulk.itemFor(id));assert.equal(changed.ready,false);assert.match(changed.problems.join(' '),/unnamed-page metadata check/);
+      db.prepare('DELETE FROM teachers WHERE id=9').run();
+      const rawItem=bulk.itemFor(id), saved=JSON.parse(rawItem.result);
+      const activeOnly=bulk.presentItem(rawItem).pages.map(page=>({id:page.id,section:page.position===15?'B':null}));
+      assert.match(bulk.identityProblems(rawItem,activeOnly,saved,[owner]).join(' '),/unnamed-page metadata check/);
+    }
+  }
+});
+
+test('unnamed continuation eligibility rejects mixed, ambiguous and namesake packet anchors',()=>{
+  const blank={name_written:'',name_confidence:'none'}, anchor={name_written:owner.name,name_confidence:'certain'};
+  assert.equal(bulk.unnamedContextTarget(blank,[blank,anchor],[owner],1)?.id,1);
+  for(const pages of [[blank],[blank,{...anchor,field_review_required:true}],[blank,{...anchor,name_confidence:'uncertain'}],[blank,anchor,{name_written:'Beena Shah',name_confidence:'certain'}],[blank,anchor,{...blank,name_confidence:'uncertain'}]])
+    assert.equal(bulk.unnamedContextTarget(blank,pages,[owner],1),null);
+  assert.equal(bulk.unnamedContextTarget(blank,[blank,anchor],[owner,{...owner,id:9}],1),null);
+  assert.equal(bulk.unnamedContextTarget(blank,[blank,anchor],[owner],null),null);
+});
+
+test('a corrected named anchor is refreshed before checking an earlier unnamed continuation',async()=>{
+  const id=await packet(), modes=[];
+  await bulk.sortItem(id,{configured:()=>true,verificationConfigured:()=>true,
+    verifyIdentity:async options=>{modes.push(options.mode);return {status:'verified',name_verified:options.mode==='named_identity',fields_verified:true,evidence:{
+      grade:{status:options.mode==='named_identity'?'confirmed':'absent',value:options.mode==='named_identity'?owner.grade:'',reason:'Visible source header verification.'},
+      subject:{status:'absent',value:'',reason:'Empty subject.'}},audit:{provider:'synthetic'}};},
+    request:async request=>request.name==='answer_sheets_sorted'?matched():{pages:mapping(request).map(({local,original})=>{
+      const seen=observation(local,{name_written:'',name_confidence:'none',teacher_id:0});seen.field_evidence.name_written=origin('absent');
+      if(original===15||original===16)seen.identity_panel_bounds={x:0.45,y:0.01,width:0.4,height:0.08};
+      if(original===15){seen.grade_written='1';seen.field_evidence.grade_written=origin('identity_header');}
+      if(original===16){seen.name_written=owner.name;seen.name_confidence='certain';seen.teacher_id=1;seen.field_evidence.name_written=origin('identity_header');
+        if(request.name==='answer_sheets_first_look'){seen.paper_title_written='Communication skills';seen.field_evidence.paper_title_written=origin('document_heading');seen.grade_written=owner.grade;seen.field_evidence.grade_written=origin('identity_header');}}
+      return seen;
+    })}});
+  assert.deepEqual(modes,['named_identity','unnamed_fields']);
+  const result=bulk.presentItem(bulk.itemFor(id));assert.equal(result.ready,true,JSON.stringify(result.problems));
+  assert.equal(result.pages[14].identity.teacher_id,null);
+});

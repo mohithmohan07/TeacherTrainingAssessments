@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { IDENTITY_BATCH_SIZE, IDENTITY_REREAD_BATCH_SIZE, readIdentityPages, rereadIdentityPages } from '../server/identity-reading.js';
+import { IDENTITY_BATCH_SIZE, IDENTITY_REREAD_BATCH_SIZE, readIdentityPages, rereadIdentityPages, validateProviderIdentity } from '../server/identity-reading.js';
 
 // Synthetic, injected scans and requests only. No provider, database or live
 // assessment files are loaded by this test suite.
@@ -195,4 +195,13 @@ test('provider output cannot inject server-only identity clearance or reread fla
  for(const key of ['context_verification','reread_name_conflict','reread_header_conflict']) {
   await assert.rejects(readIdentityPages(options(async request=>reply(suppliedPages(request).map((_,i)=>page(i+1,'Teacher A',{[key]:{status:'verified_unique_name'}}))))),{code:'IDENTITY_INVALID_EVIDENCE'});
  }
+});
+
+
+test('finalization provider boundary rejects server-only authority while retaining partial contradictory observations', () => {
+  const partial = { pages: [page(2, 'Another Teacher')] };
+  assert.equal(validateProviderIdentity(partial), partial);
+  for (const key of ['context_verification', 'reread_disputes', 'field_review_required', 'reread_name_conflict']) {
+    assert.throws(() => validateProviderIdentity({pages:[{...page(1),[key]:true}]}), /server-only/);
+  }
 });
