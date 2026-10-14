@@ -56,21 +56,21 @@ function local(t, handler) {
   });
 }
 
-function policy({ limit = Infinity, timeoutMs = 1000, deadline, pauseMs = 5 } = {}) {
+function policy({ limit = Infinity, timeoutMs = 1000, deadline, pauseMs = 5, now = Date.now } = {}) {
   const events = [];
   const rejection = Object.assign(new Error('Synthetic packet budget exhausted.'), { code: 'MATCHING_BUDGET_EXHAUSTED', reason: deadline ? 'packet_deadline' : 'provider_attempts', passing: false });
   let checks = 0;
   return {
     events, rejection,
     get checks() { return checks; },
-    remainingMs: () => deadline ? Math.max(0, deadline - Date.now()) : pauseMs,
+    remainingMs: () => deadline ? Math.max(0, deadline - now()) : pauseMs,
     beginAttempt(info) {
       checks += 1;
-      if (events.length >= limit || (deadline && Date.now() >= deadline)) throw rejection;
+      if (events.length >= limit || (deadline && now() >= deadline)) throw rejection;
       const event = { begin: info, finishes: [] };
       events.push(event);
       return {
-        timeoutMs: Math.min(info.timeoutMs, timeoutMs, deadline ? Math.max(1, deadline - Date.now()) : Infinity),
+        timeoutMs: Math.min(info.timeoutMs, timeoutMs, deadline ? Math.max(1, deadline - now()) : Infinity),
         finish(result) {
           assert.equal(event.finishes.length, 0, 'each admitted attempt must finish exactly once');
           event.finishes.push(result);
@@ -213,9 +213,17 @@ for (const [name, request, success] of [['OpenAI', openai, openaiReply], ['Gemin
   test(`${name} bounds retry waiting by the packet deadline`, async (t) => {
     local(t, (_req, res) => json(res, 503, { error: { message: 'synthetic-private-error' } }));
     const started = Date.now();
-    // Allow local HTTP scheduling under the parallel full suite; still much
-    // shorter than the normal provider backoff.
-    const meter = policy({ deadline: started + 500 });
+    // Advance only the packet clock when the synthetic response finishes.
+    // A loaded CI runner must not turn this retry-wait test into an unrelated
+    // 500ms transport-timeout race. The actual bounded wait still runs.
+    let clock = started;
+    const deadline = started + 5000;
+    const meter = policy({ deadline, timeoutMs: 5000, now: () => clock });
+    const begin = meter.beginAttempt.bind(meter);
+    meter.beginAttempt = info => {
+      const attempt = begin(info);
+      return { ...attempt, finish(result) { attempt.finish(result); clock = deadline; } };
+    };
     await assert.rejects(request(meter), (error) => error === meter.rejection);
     assert.ok(Date.now() - started < 1500, 'the normal 2+ second backoff must not outlive the packet deadline');
     assert.equal(received.length, 1);
