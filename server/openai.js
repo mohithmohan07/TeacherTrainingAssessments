@@ -71,7 +71,7 @@ function tokenUsage(raw) {
 
 const busy = (res, payload) =>
   (res.status === 429 && ![payload?.error?.code, payload?.error?.type].includes('insufficient_quota')) ||
-  [500, 502, 503, 504].includes(res.status);
+  [500, 502, 503, 504, 520].includes(res.status);
 
 // The wait OpenAI asks for, in a header or in its message ("Please try again
 // in 12.5s"), or one that doubles each time if that is longer, up to a

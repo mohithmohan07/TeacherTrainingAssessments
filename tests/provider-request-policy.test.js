@@ -309,3 +309,35 @@ test('readAnswers does not downgrade a typed budget failure into an unreadable p
   await assert.rejects(readAnswers([file], ['Hindi'], { includeDetails: true, requestPolicy: meter }), (error) => error === meter.rejection);
   assert.equal(received.length, 0);
 });
+
+test('OpenAI HTTP 520 retries the identical batch once and meters both attempts', async (t) => {
+  local(t, (_req, res, count) => {
+    if (count === 1) { res.writeHead(520, { 'content-type': 'text/html' }); res.end('Synthetic upstream failure'); }
+    else json(res, 200, openaiReply({ total_tokens: 7 }));
+  });
+  const meter = policy();
+  assert.deepEqual(await openai(meter), { ok: true });
+  assert.equal(received.length, 2);
+  assert.deepEqual(received[0].body, received[1].body);
+  assert.deepEqual(meter.events.map(event => event.finishes[0].status), [520, 200]);
+  checkPrivate(meter.events);
+});
+
+test('OpenAI repeated HTTP 520 exhausts the existing one retry without extra requests', async (t) => {
+  local(t, (_req, res) => json(res, 520, {}));
+  const meter = policy();
+  await assert.rejects(openai(meter), error => error.passing === true && /HTTP 520/.test(error.message));
+  assert.equal(received.length, 2);
+  assert.deepEqual(meter.events.map(event => event.finishes[0].status), [520, 520]);
+  checkPrivate(meter.events);
+});
+
+for (const exhausted of ['attempts', 'deadline']) test(`OpenAI HTTP 520 cannot retry past shared ${exhausted}`, async (t) => {
+  let now = 1;
+  local(t, (_req, res) => { now = 101; json(res, 520, {}); });
+  const meter = policy(exhausted === 'attempts' ? { limit: 1 } : { deadline: 100, now: () => now });
+  await assert.rejects(openai(meter), error => error === meter.rejection);
+  assert.equal(received.length, 1);
+  assert.equal(meter.checks, 2);
+  checkPrivate(meter.events);
+});
