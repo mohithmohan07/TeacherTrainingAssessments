@@ -400,12 +400,15 @@ const selectByChecksum = db.prepare('SELECT * FROM papers WHERE checksum = ?');
 
 // Adds one paper, unless the same file is already in the library. Returns the
 // new row, or null with the existing one when it was already there.
-export function addPaper(labels, { pdf, originalName, preview }) {
+export function addPaper(labels, { pdf, originalName, preview, onStored }) {
   const checksum = checksumOf(pdf);
   const existing = selectByChecksum.get(checksum);
   if (existing) return { paper: existing, added: false };
 
   const storedName = randomName('.pdf');
+  // Register the attempted path before writing so an outer transaction can
+  // clean up a partial file if the disk write itself fails.
+  onStored?.(storedName);
   fs.writeFileSync(path.join(UPLOADS_DIR, storedName), pdf);
   let previewName = null;
   if (preview) {

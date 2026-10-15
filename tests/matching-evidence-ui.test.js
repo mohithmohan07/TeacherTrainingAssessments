@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { bankComparisonEvidence, MATCH_EVIDENCE_LIMITS, questionMatchEvidence, questionMatchEvidenceDrawer } from '../public/js/matching-evidence.js';
+import { bankComparisonEvidence, contentMatchEvidence, identityReviewEvidence, MATCH_EVIDENCE_LIMITS, questionMatchEvidence, questionMatchEvidenceDrawer, sourceMetadataEvidence } from '../public/js/matching-evidence.js';
 import { installReportDom } from './report-dom-helper.js';
 
 // Synthetic evidence only. No provider, database, credentials or production
@@ -21,6 +21,12 @@ const deepFreeze = value => {
   if (value && typeof value === 'object') { Object.values(value).forEach(deepFreeze); Object.freeze(value); }
   return value;
 };
+const contentMatch = (extra = {}) => ({
+  status: 'complete',
+  coverage: { complete: true, candidate_count: 3, completed_candidate_ids: [7, 8, 11], batch_count: 1, final_compared: true, finalist_ids: [7, 8], phase: 'final_comparison' },
+  sections: [{ section: 'B', paper_id: 7, confidence: 'low', reason: 'Two supplied masters share these question labels.', matched_question_labels: ['5A'], alternatives: [8], page_ids: [101] }],
+  ...extra,
+});
 
 test('question match projection shows actual stored evidence without mutating it', () => {
   const page = deepFreeze(sourcePage());
@@ -83,6 +89,32 @@ test('bank projection requires explicit stored status and counts; finalists do n
   assert.deepEqual(bank.finalistIds.values, [7, 17]);
 });
 
+test('indexed all-bank consideration stays distinct from full-PDF screening and finalist verification', () => {
+  const coverage = deepFreeze({ coverage_mode: 'content_first', complete: true, candidate_count: 4,
+    text_screened_ids: [7, 8, 9, 7], full_pdf_screened_ids: [11], full_pdf_verified_ids: [7, 8],
+    ambiguous_equivalent_ids: [7, 8], finalist_ids: [7, 8], final_compared: true, phase: 'indexing' });
+  const bank = bankComparisonEvidence(coverage);
+  assert.equal(bank.completedCandidates, 4);
+  assert.equal(bank.textScreenedCandidates, 3);
+  assert.equal(bank.pdfScreenedCandidates, 1);
+  assert.deepEqual(bank.fullPdfVerifiedIds.values, [7, 8]);
+  assert.deepEqual(bank.ambiguousEquivalentIds.values, [7, 8]);
+  assert.equal(bank.phase, 'indexing');
+  const restore = installReportDom({});
+  try {
+    const drawer = questionMatchEvidenceDrawer([], coverage);
+    assert.match(drawer.textContent, /All-bank coverage: 4 of 4 candidate papers considered/);
+    assert.match(drawer.textContent, /Papers screened using complete text: 3. Papers screened as full PDFs: 1/);
+    assert.match(drawer.textContent, /Text screening is not full-PDF inspection/);
+    assert.match(drawer.textContent, /Full-PDF verified finalist master IDs:78/);
+    assert.match(drawer.textContent, /Content-equivalent master IDs \(ambiguity retained\):78/);
+    assert.doesNotMatch(drawer.textContent, /All-bank[^.]*PDF/);
+  } finally { restore(); }
+  assert.equal(bankComparisonEvidence({ ...coverage, coverage_mode: 'unknown', completed_candidate_ids: undefined }).completedCandidates, null);
+  assert.equal(bankComparisonEvidence({ ...coverage, full_pdf_screened_ids: undefined }).completedCandidates, null);
+  assert.equal(bankComparisonEvidence({ ...coverage, completed_candidate_ids: [7] }).completedCandidates, 1);
+});
+
 test('diagnostics explicitly allowlist fields and reject nested values in visible fields', () => {
   const secret = { provider_prompt: 'PRIVATE PROMPT', api_key: 'PRIVATE KEY', answer_text: 'PRIVATE ANSWER', image_url: 'PRIVATE IMAGE', result: { nested: 'PRIVATE NESTED' } };
   const page = sourcePage({ ...secret, questions: [{ text: 'PRIVATE QUESTION' }], issues: [{ reason: 'PRIVATE ISSUE' }], header_evidence: { status: 'conflict', reason: 'Known conflict', ...secret } });
@@ -92,7 +124,132 @@ test('diagnostics explicitly allowlist fields and reject nested values in visibl
   assert.equal(questionMatchEvidence(page).issues.invalid, 1);
   for (const filename of ['server/reports.js', 'server/report-html.js', 'public/js/views/reports.js'].filter(file => fs.existsSync(file))) assert.ok(!fs.readFileSync(filename, 'utf8').includes('matching-evidence'));
   const bulk = fs.readFileSync('public/js/views/bulk.js', 'utf8');
-  assert.match(bulk, /questionMatchEvidenceDrawer\(item\.pages, item\.bank_comparison\)/);
+  assert.match(bulk, /questionMatchEvidenceDrawer\(item\.pages, item\.bank_comparison, \{ content_match: item\.content_match, identity_review: item\.identity_review \}\)/);
+});
+
+test('content completion and identity review are projected independently without confirming a match', () => {
+  const content = deepFreeze(contentMatch());
+  const before = JSON.stringify(content);
+  const view = contentMatchEvidence(content);
+  assert.equal(view.status, 'Complete');
+  assert.equal(view.coverage.complete, true);
+  assert.equal(view.coverage.completedCandidates, 3);
+  assert.equal(view.sections.values[0].proposedMaster, '7');
+  assert.equal(view.sections.values[0].confidence, 'low');
+  assert.deepEqual(view.sections.values[0].alternatives.values, [8]);
+  assert.deepEqual(view.sections.values[0].pageIds.values, [101]);
+  assert.deepEqual(view.sections.values[0].matchedQuestionLabels.values, ['5A']);
+  assert.equal(identityReviewEvidence({ status: 'needs_review', problems: ['The written name is unresolved.'] }).status, 'Needs review');
+  assert.equal(identityReviewEvidence({ status: 'verified', problems: [] }).status, 'Verified');
+  assert.equal(JSON.stringify(content), before);
+});
+
+test('missing, unknown and malformed new statuses never infer completion or verification', () => {
+  for (const value of [undefined, null, [], 'complete']) {
+    assert.equal(contentMatchEvidence(value).available, false);
+    assert.equal(identityReviewEvidence(value).available, false);
+  }
+  assert.equal(contentMatchEvidence({ status: 'accepted', coverage: { complete: true } }).status, 'Not recorded');
+  assert.equal(identityReviewEvidence({ status: 'complete', problems: [] }).status, 'Not recorded');
+  assert.equal(contentMatchEvidence({ status: 'running' }).status, 'Running');
+  assert.equal(contentMatchEvidence({ status: 'failed' }).status, 'Failed');
+  assert.equal(contentMatchEvidence({ status: 'not_started' }).status, 'Not started');
+  const malformed = contentMatchEvidence({ sections: [null, [], { section: {}, paper_id: '7', confidence: 'certain', page_ids: ['101'] }] });
+  assert.equal(malformed.sections.invalid, 2);
+  assert.equal(malformed.sections.values[0].section, 'Not recorded');
+  assert.equal(malformed.sections.values[0].proposedMaster, 'Not recorded');
+  assert.equal(malformed.sections.values[0].confidence, 'Not recorded');
+  assert.equal(malformed.sections.values[0].pageIds.invalid, 1);
+  assert.equal(contentMatchEvidence(contentMatch({ sections: [{ paper_id: null }] })).sections.values[0].proposedMaster, 'None proposed');
+});
+
+test('source metadata preserves recorded, observed and earlier values without accepting nested payloads', () => {
+  const page = deepFreeze({ position: 15, source_file: 'Original scan.pdf', identity: {
+    name_written: 'Synthetic Teacher', grade_written: '', field_observations: { grade_written: 'Class 6' },
+    context_verification: { original_fields: { grade_written: { value: 'Class 7', provider_prompt: 'PRIVATE PROMPT' } } },
+    provider_prompt: 'PRIVATE PROMPT', answer_text: 'PRIVATE ANSWER', api_key: 'PRIVATE KEY',
+  } });
+  const before = JSON.stringify(page);
+  const view = sourceMetadataEvidence(page);
+  assert.equal(view.page, 15);
+  assert.equal(view.sourceFile, 'Original scan.pdf');
+  assert.deepEqual(view.fields[1], { label: 'Class', recorded: '(blank)', observed: 'Class 6', original: 'Class 7' });
+  assert.equal(sourceMetadataEvidence({ identity: [] }).available, false);
+  assert.equal(sourceMetadataEvidence({ identity: { name_written: { text: 'PRIVATE NESTED' } } }).fields[0].recorded, 'Not recorded');
+  assert.doesNotMatch(JSON.stringify(view), /PRIVATE/);
+  assert.equal(JSON.stringify(page), before);
+});
+
+test('content and identity diagnostics are allowlisted and bounded', () => {
+  const secret = { provider_prompt: 'PRIVATE PROMPT', api_key: 'PRIVATE KEY', answer_text: 'PRIVATE ANSWER', nested: { text: 'PRIVATE NESTED' } };
+  const content = contentMatchEvidence(contentMatch({ ...secret, error: 'e'.repeat(10000), sections: Array.from({ length: 10000 }, () => ({ ...secret, section: 's'.repeat(10000), paper_id: null, reason: 'r'.repeat(10000), alternatives: [8, '9'], page_ids: [101, {}], matched_question_labels: [{ text: 'PRIVATE QUESTION' }] })) }));
+  const identity = identityReviewEvidence({ ...secret, status: 'needs_review', problems: ['p'.repeat(10000), { reason: 'PRIVATE ISSUE' }] });
+  assert.equal(content.sections.values.length, MATCH_EVIDENCE_LIMITS.sections);
+  assert.equal(content.sections.omitted, 10000 - MATCH_EVIDENCE_LIMITS.sections);
+  assert.equal(content.sections.values[0].section.length, MATCH_EVIDENCE_LIMITS.label + '… [truncated]'.length);
+  assert.equal(content.error.length, MATCH_EVIDENCE_LIMITS.text + '… [truncated]'.length);
+  assert.equal(identity.problems.invalid, 1);
+  assert.equal(identity.problems.values[0].length, MATCH_EVIDENCE_LIMITS.text + '… [truncated]'.length);
+  assert.doesNotMatch(JSON.stringify([content, identity]), /PRIVATE/);
+});
+
+test('drawer distinctly displays completed content with unresolved identity, alternatives and retained metadata', () => {
+  const restore = installReportDom({});
+  try {
+    const pages = deepFreeze([{ ...sourcePage(), source_file: 'Original scan.pdf', identity: { name_written: 'Uncertain Name', grade_written: '', field_observations: { grade_written: 'Class 6' }, context_verification: { original_fields: { grade_written: { value: 'Class 7' } } } } }]);
+    const options = deepFreeze({ content_match: contentMatch(), identity_review: { status: 'needs_review', problems: ['The written name is unresolved.'] } });
+    const before = JSON.stringify([pages, options]);
+    const drawer = questionMatchEvidenceDrawer(pages, null, options);
+    assert.match(drawer.querySelector('summary').textContent, /Content Match: Complete · Identity Review: Needs review/);
+    const [content, identity] = drawer.querySelectorAll('section');
+    assert.equal(content.getAttribute('data-content-match'), '');
+    assert.match(content.textContent, /All-bank coverage: 3 of 3 candidate papers/);
+    assert.match(content.textContent, /Section B: proposed master 7/);
+    assert.match(content.textContent, /Alternative master IDs:8/);
+    assert.doesNotMatch(content.textContent, /Content section findings: None recorded/);
+    assert.match(content.textContent, /does not mean every section has a unique master/);
+    assert.equal(identity.getAttribute('data-identity-review'), '');
+    assert.match(identity.textContent, /The written name is unresolved/);
+    assert.match(identity.textContent, /does not clear identity conflicts or authorize filing/);
+    assert.match(identity.textContent, /original file: Original scan.pdf/);
+    assert.match(identity.textContent, /Class: recorded \(blank\); observed Class 6; before independent check Class 7/);
+    assert.equal(JSON.stringify([pages, options]), before);
+  } finally { restore(); }
+});
+
+test('running, failed, not-started and partial coverage remain explicit without forced masters', () => {
+  const restore = installReportDom({});
+  try {
+    for (const [status, label] of [['running', 'Running'], ['failed', 'Failed'], ['not_started', 'Not started']]) {
+      const drawer = questionMatchEvidenceDrawer([], null, { content_match: contentMatch({ status, error: status === 'failed' ? 'Comparison interrupted.' : undefined, coverage: { complete: false, candidate_count: 3, completed_candidate_ids: [7] }, sections: [{ section: 'B', paper_id: null, alternatives: [7, 8] }] }), identity_review: { status: 'verified', problems: [] } });
+      assert.ok(drawer.textContent.includes(`Content Match: ${label}`));
+      assert.match(drawer.textContent, /Identity Review: Verified/);
+      assert.match(drawer.textContent, /All-bank coverage: 1 of 3/);
+      assert.match(drawer.textContent, /proposed master None proposed/);
+      assert.match(drawer.textContent, /cannot confirm a new match/);
+      if (status === 'failed') assert.match(drawer.textContent, /Content matching error: Comparison interrupted/);
+    }
+    const unknown = questionMatchEvidenceDrawer([], null, { content_match: contentMatch({ status: 'future_status' }) });
+    assert.match(unknown.textContent, /Content Match: Not recorded/);
+    assert.match(unknown.textContent, /Identity Review: Not recorded/);
+  } finally { restore(); }
+});
+
+test('new status sections safely escape every text field, make no requests, and display truncation', () => {
+  const restore = installReportDom({});
+  try {
+    globalThis.fetch = () => { throw new Error('Read-only diagnostics must make no requests'); };
+    const injected = '<img src="/private-image" onerror="alert(1)"><script>alert(2)</script>';
+    const drawer = questionMatchEvidenceDrawer([{ position: 1, source_file: injected, identity: { name_written: injected, field_observations: { grade_written: injected }, context_verification: { original_fields: { grade_written: { value: injected } } } } }], null, {
+      content_match: contentMatch({ error: injected, sections: Array.from({ length: MATCH_EVIDENCE_LIMITS.sections + 2 }, () => ({ section: injected, reason: injected, matched_question_labels: [injected] })) }),
+      identity_review: { status: 'needs_review', problems: [injected] },
+    });
+    assert.match(drawer.outerHTML, /&lt;img/);
+    assert.match(drawer.textContent, /2 more recorded entries not displayed \(display limit\)/);
+    for (const tag of ['img', 'script', 'iframe', 'a', 'button', 'input', 'form']) assert.equal(drawer.querySelectorAll(tag).length, 0);
+    const source = fs.readFileSync('public/js/matching-evidence.js', 'utf8');
+    assert.doesNotMatch(source, /innerHTML|\bhtml\s*:|\bfetch\s*\(/);
+  } finally { restore(); }
 });
 
 test('strings and lists are bounded with explicit truncation notices', () => {
@@ -162,13 +319,15 @@ test('local Chromium drawer opens, closes and reopens without writes, navigation
     const requests = [];
     page.on('request', request => requests.push({ method: request.method(), url: request.url() }));
     await page.goto(`http://127.0.0.1:${server.address().port}/fixture`);
-    await page.evaluate(async pages => {
+    await page.evaluate(async ({ pages, options }) => {
       const { questionMatchEvidenceDrawer } = await import('/js/matching-evidence.js');
       window.fixturePages = pages;
-      window.fixtureBefore = JSON.stringify(pages);
-      document.querySelector('#fixture').append(questionMatchEvidenceDrawer(pages, { complete: true, batch_count: 3, final_compared: true, finalist_ids: [7, 17] }));
+      window.fixtureOptions = options;
+      window.fixtureBefore = JSON.stringify([pages, options]);
+      document.querySelector('#fixture').append(questionMatchEvidenceDrawer(pages, { complete: true, batch_count: 3, final_compared: true, finalist_ids: [7, 17] }, options));
       window.fetch = () => { throw new Error('Unexpected request from diagnostics'); };
-    }, [sourcePage({ source_heading: '<img src="/private-image" onerror="window.injected=true">', reason: 'q'.repeat(900) }), { position: 16 }]);
+    }, { pages: [{ ...sourcePage({ source_heading: '<img src="/private-image" onerror="window.injected=true">', reason: 'q'.repeat(900) }), source_file: 'Original scan.pdf', identity: { name_written: '<img src="/private-image" onerror="window.injected=true">', field_observations: { grade_written: 'Class 6' } } }, { position: 16 }],
+      options: { content_match: contentMatch(), identity_review: { status: 'needs_review', problems: ['The written name is unresolved.'] } } });
     const url = page.url();
     const historyLength = await page.evaluate(() => history.length);
     for (const width of [1100, 390]) {
@@ -178,14 +337,21 @@ test('local Chromium drawer opens, closes and reopens without writes, navigation
         assert.equal(await page.$eval('[data-question-match-evidence]', element => element.open), true);
         await page.click('[data-question-match-page="15"] > summary');
         assert.equal(await page.$eval('[data-question-match-page="15"]', element => element.open), true);
+        await page.click('[data-content-match-section="1"] > summary');
+        await page.click('[data-identity-review] details > summary');
         const state = await page.evaluate(() => ({
           text: document.querySelector('#fixture').innerText,
-          unchanged: window.fixtureBefore === JSON.stringify(window.fixturePages),
+          unchanged: window.fixtureBefore === JSON.stringify([window.fixturePages, window.fixtureOptions]),
           injected: Boolean(window.injected), forbidden: document.querySelectorAll('#fixture img, #fixture script, #fixture button, #fixture input, #fixture iframe').length,
           overflows: document.documentElement.scrollWidth > window.innerWidth,
         }));
         assert.match(state.text, /Proposed master ID: 7/);
         assert.match(state.text, /Header status: descriptive/);
+        assert.match(state.text, /Content Match: Complete/);
+        assert.match(state.text, /Identity Review: Needs review/);
+        assert.match(state.text, /The written name is unresolved/);
+        assert.match(state.text, /Two supplied masters share these question labels/);
+        assert.match(state.text, /original file: Original scan.pdf/);
         assert.equal(state.unchanged, true);
         assert.equal(state.injected, false);
         assert.equal(state.forbidden, 0);
@@ -194,6 +360,8 @@ test('local Chromium drawer opens, closes and reopens without writes, navigation
           fs.mkdirSync(process.env.MATCHING_UI_QA_DIR, { recursive: true });
           await page.screenshot({ path: path.join(process.env.MATCHING_UI_QA_DIR, `matching-evidence-${width}.png`), fullPage: true });
         }
+        await page.click('[data-identity-review] details > summary');
+        await page.click('[data-content-match-section="1"] > summary');
         await page.click('[data-question-match-page="15"] > summary');
         await page.click('[data-question-match-evidence] > summary');
         assert.equal(await page.$eval('[data-question-match-evidence]', element => element.open), false);
@@ -207,4 +375,17 @@ test('local Chromium drawer opens, closes and reopens without writes, navigation
     await new Promise(resolve => server.close(resolve));
     fs.rmSync(temp, { recursive: true, force: true });
   }
+});
+
+test('confirmed bank UI displays source count, distinct PDFs, manifest hash and folder link', async () => {
+  const { confirmedBankSummary } = await import('../public/js/views/bulk.js');
+  const restore=installReportDom({});
+  try {
+    const bank={source_file_count:78,canonical_pdf_count:65,id:'a'.repeat(64),source_root:'https://drive.google.com/drive/folders/confirmed'};
+    const card=confirmedBankSummary(bank);
+    assert.match(card.textContent,/78 source files · 65 distinct PDFs/);
+    assert.ok(card.textContent.includes(bank.id));
+    assert.equal(card.querySelector('a').getAttribute('href'),bank.source_root);
+    assert.match(confirmedBankSummary(null).textContent,/No confirmed source folder selected/);
+  } finally {restore();}
 });

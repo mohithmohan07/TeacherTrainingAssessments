@@ -87,11 +87,11 @@ test('a certain different teacher cannot be erased by the focused reread',async(
   assert.doesNotMatch(result.problems.join(' '),/incomplete page map|no Section/);
 });
 
-test('matching preview is read-only and includes batched identity cost',()=>{
+test('content matching preview is read-only and excludes separate identity calls',()=>{
   const before=db.prepare('SELECT * FROM bulk_items').all();
   const plan=bulk.matchingPlan(1,1);
   assert.deepEqual(db.prepare('SELECT * FROM bulk_items').all(),before);
-  for(const packet of plan.packets) assert.equal(packet.calls.identityCalls,3);
+  for(const packet of plan.packets) assert.equal(packet.calls.identityCalls,0);
 });
 
 test('a focused reread cannot erase a disambiguating namesake class',async()=>{
