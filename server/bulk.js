@@ -417,6 +417,7 @@ export function choosePapers(item, papers, profileConfirmations = {}) {
   if (['waiting', 'running'].includes(item.sort_status)) return 'Wait for matching to finish before choosing papers.';
   const chosen = parse(item.papers, {});
   const result = parse(item.result, {});
+  if (result.bank_comparison?.profile_fallback && result.bank_comparison.complete !== true) return 'The wider question-bank comparison is incomplete. No new paper confirmation can be accepted from partial coverage.';
   const teacher = item.teacher_id ? selectTeacher.get(item.teacher_id) : null;
   const school = selectSchool.get(item.school_id);
   const confirmations = { ...(result.paper_confirmations ?? {}) };
@@ -887,7 +888,36 @@ export async function sortItem(id, { request = requestJson, configured = openaiC
     pages: Object.fromEntries(pages.map(page => [page.id, fileBasis(page).sha256])),
     papers: Object.fromEntries(library.map(paper => [paper.id, { sha256: fileBasis(paper).sha256, metadata: digest(paper) }])),
   };
+  const originalBasis = result.matching_source_basis;
+  const assertSourcesUnchanged = () => {
+    const currentTeacher = selectTeacher.get(item.teacher_id), currentSchool = selectSchool.get(item.school_id);
+    const currentPapers = allPapers();
+    const sourceMap = sourcePages => sourcePages.map(page => ({ id: page.id, stored_name: page.stored_name, position: page.position, mime_type: page.mime_type }));
+    if (selectItem.get(id)?.teacher_id !== teacher.id || digest(sourceMap(selectPages.all(id))) !== digest(sourceMap(pages)) ||
+        originalBasis.teacher !== digest(currentTeacher) || originalBasis.school !== digest(currentSchool) ||
+        pages.some(page => originalBasis.pages[page.id] !== fileBasis(page).sha256) ||
+        currentPapers.length !== library.length || currentPapers.some(paper =>
+          originalBasis.papers[paper.id]?.sha256 !== fileBasis(paper).sha256 || originalBasis.papers[paper.id]?.metadata !== digest(paper))) {
+      throw friendly('The original sources, teacher profile or question bank changed during matching. No wider comparison was accepted.');
+    }
+  };
   const sorted = await compareWithProfileFallback({
+    assertSourcesUnchanged,
+    onPrimaryComplete: comparison => {
+      result.matching_metrics = requestPolicy.snapshot();
+      result.bank_comparison = comparison.bank_comparison;
+      result.candidate_paper_ids = comparison.considered_candidate_ids;
+      saveSort(id, teacher, school, library, pages, comparison, result);
+      setStatus.run('running', null, id);
+    },
+    onProgress: progress => {
+      const current = selectItem.get(id);
+      if (!current) throw friendly('This submission was removed while matching.');
+      const latest = parse(current.result, {});
+      latest.bank_comparison = progress;
+      latest.candidate_paper_ids = progress.candidate_ids ?? latest.candidate_paper_ids;
+      setResult.run(JSON.stringify(latest), id);
+    },
     needsFallback: comparison => buildSortPlan(teacher, school, library, pages, comparison,
       { ...result, candidate_paper_ids: comparison.considered_candidate_ids }).sourcePages.some(page => page.has_answers && page.issues.length),
     candidates, fallbackCandidates: [...candidates, ...library.filter(paper =>
@@ -1029,6 +1059,7 @@ export const saveSort = db.transaction((id, teacher, school, library, pages, sor
 function paperReviewProblems(item, pages, result, teacher, school, library) {
   const chosen = parse(item.papers, {});
   const problems = [];
+  if (result?.bank_comparison?.profile_fallback && result.bank_comparison.complete !== true) problems.push('The wider question-bank comparison is incomplete. Retained primary matches are provisional until required coverage finishes.');
   if (item.sort_status === 'needs_teacher') return ['Matching stopped during identity verification. The question-paper comparison has not run yet.'];
   for (const page of pages) {
     const source = result?.source_pages?.find((p) => p.page_id === page.id);

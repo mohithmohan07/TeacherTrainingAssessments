@@ -524,3 +524,72 @@ test('caller acceptance check triggers wider discovery for high but ungrounded s
   await compareWithProfileFallback({ ...options(1, transport.request, { requestPolicy: transport.requestPolicy }), fallbackCandidates: candidates.slice(0, 2), needsFallback: result => !result.papers[0].matched_question_labels.length });
   assert.equal(calls, 2);
 });
+
+test('parallel screening is capped at two, covers every full master and waits before final comparison', async () => {
+  let active = 0, peak = 0; const calls = [];
+  const transport = metered(async request => {
+    const ids = suppliedIds(request); calls.push(ids);
+    assert.ok(request.content.includes(answerInput));
+    active++; peak = Math.max(peak, active);
+    await new Promise(resolve => setTimeout(resolve, 12)); active--;
+    return matched(ids.includes(17) ? 17 : ids[0]);
+  });
+  const result = await compareQuestionBank(options(20, transport.request, { requestPolicy: transport.requestPolicy, screeningConcurrency: 2 }));
+  assert.equal(peak, 2); assert.equal(active, 0);
+  assert.deepEqual(calls.slice(0, 3).flat().sort((a,b) => a-b), candidates.map(p => p.id));
+  assert.deepEqual(calls.at(-1), [1,9,17]);
+  assert.equal(result.pages[0].paper_id, 17);
+  assert.equal(transport.requestPolicy.snapshot().attempts, 4);
+});
+
+for (const cancellationThrows of [false, true]) test(`parallel failure drains started requests before rejection, cancellation error=${cancellationThrows}`, async () => {
+  let calls = 0, secondSettled = false, admitSecond;
+  const secondStarted = new Promise(resolve => { admitSecond = resolve; });
+  const transport = metered(async request => {
+    calls++;
+    if (calls === 1) { await secondStarted; throw new Error('Synthetic fatal batch failure'); }
+    admitSecond(); await new Promise(resolve => setTimeout(resolve, 30));
+    secondSettled = true; return matched(suppliedIds(request)[0]);
+  });
+  const policy = cancellationThrows ? { ...transport.requestPolicy, cancel() { transport.requestPolicy.cancel(); throw new Error('Synthetic cancellation persistence failure'); } } : transport.requestPolicy;
+  const request = cancellationThrows ? args => transport.request({ ...args, requestPolicy: transport.requestPolicy }) : transport.request;
+  await assert.rejects(compareQuestionBank(options(20, request, { requestPolicy: policy, screeningConcurrency: 2 })), /Synthetic/);
+  assert.equal(secondSettled, true); assert.equal(calls, 2);
+  assert.equal(transport.requestPolicy.snapshot().activeAttempts, 0);
+});
+
+test('same-run reuse retains all initial screening contenders, including a rejected final alternative', async () => {
+  let calls = 0, assertions = 0; const supplied = [], primary = [];
+  const transport = metered(async request => {
+    calls++; const ids = suppliedIds(request); supplied.push(ids);
+    assert.ok(request.content.includes(answerInput));
+    if (calls === 1) return matched(2, [3]);
+    if (calls === 2) return unresolved();
+    if (calls === 3) return matched(2); // 3 lost only in final comparison, not screening.
+    assert.deepEqual(ids, [2,3,10]); return matched(10);
+  });
+  const result = await compareWithProfileFallback({ ...options(9, transport.request, { requestPolicy: transport.requestPolicy }), fallbackCandidates: candidates.slice(0,10), needsFallback: () => true,
+    assertSourcesUnchanged: () => { assertions++; }, onPrimaryComplete: result => primary.push(structuredClone(result)) });
+  assert.equal(assertions, 2); assert.equal(primary.length, 1);
+  assert.deepEqual(result.considered_candidate_ids, candidates.slice(0,10).map(p => p.id));
+  assert.deepEqual(result.bank_comparison.finalist_ids, [2,3,10]);
+  assert.equal(result.pages[0].paper_id, 0); // Conflicting prior clear master cannot be silently replaced.
+});
+
+test('failed wider comparison preserves completed primary diagnostics but never accepts partial coverage', async () => {
+  let calls = 0; const saved = [], progress = [];
+  const transport = metered(async () => { calls++; if (calls === 1) return unresolved(); throw new Error('Synthetic wider failure'); });
+  await assert.rejects(compareWithProfileFallback({ ...options(1, transport.request, { requestPolicy: transport.requestPolicy }), fallbackCandidates: candidates.slice(0,2),
+    assertSourcesUnchanged() {}, onPrimaryComplete: result => saved.push(structuredClone(result)), onProgress: state => progress.push(structuredClone(state)) }), /Synthetic wider failure/);
+  assert.equal(saved.length, 1); assert.equal(saved[0].bank_comparison.complete, true);
+  const last = progress.at(-1); assert.equal(last.complete, false); assert.equal(last.profile_fallback, true);
+  assert.equal(last.candidate_count, 2); assert.deepEqual(last.completed_candidate_ids, [1]);
+});
+
+test('parallel screening rejects a budget without cancellation before provider work', async () => {
+  let calls = 0;
+  await assert.rejects(compareQuestionBank(options(20, async () => { calls++; return unresolved(); }, {
+    screeningConcurrency: 2, requestPolicy: { beginAttempt() {} },
+  })), /shared cancellable request budget/);
+  assert.equal(calls, 0);
+});

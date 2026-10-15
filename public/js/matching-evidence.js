@@ -64,6 +64,9 @@ export function bankComparisonEvidence(summary) {
     batchCount: count(summary.batch_count),
     finalistIds: ids(summary.finalist_ids),
     finalCompared: flag(summary.final_compared),
+    phase: ['screening', 'final_comparison', 'profile_fallback'].includes(summary.phase) ? summary.phase : null,
+    completedCandidates: Array.isArray(summary.completed_candidate_ids) ? new Set(summary.completed_candidate_ids.filter(positiveId)).size : null,
+    reusedCandidates: count(summary.reused_candidate_count),
   };
 }
 
@@ -89,7 +92,8 @@ export function questionMatchEvidenceDrawer(pages, bankSummary) {
     h('p', {}, 'Read-only stored matching evidence for operator review. Proposed IDs and confidence are recorded findings, not confirmation of the administered master. These details are not included in teacher reports.'),
     bank.available ? h('details', {},
       h('summary', {}, 'Question bank comparison'),
-      h('p', {}, `Full comparison recorded complete: ${shownFlag(bank.complete)}. Compared candidate count: ${bank.candidateCount ?? NOT_RECORDED}. Recorded batch count: ${bank.batchCount ?? NOT_RECORDED}. Final comparison performed: ${shownFlag(bank.finalCompared)}.`),
+      h('p', {}, `Full comparison recorded complete: ${shownFlag(bank.complete)}. Candidate count: ${bank.candidateCount ?? NOT_RECORDED}. Recorded batch count: ${bank.batchCount ?? NOT_RECORDED}. Final comparison performed: ${shownFlag(bank.finalCompared)}.`),
+      bank.phase ? h('p', {}, `Last recorded phase: ${bank.phase}. Completed candidate coverage: ${bank.completedCandidates ?? NOT_RECORDED}. Reused same-run candidate coverage: ${bank.reusedCandidates ?? 0}. Incomplete coverage is diagnostic only; it cannot confirm a new match.`) : null,
       listView('Finalist master IDs', bank.finalistIds)) : h('p', {}, 'Question bank comparison: Not recorded.'),
     sourcePages.slice(0, MATCH_EVIDENCE_LIMITS.pages).map((page, index) => {
       const evidence = questionMatchEvidence(page);

@@ -590,3 +590,12 @@ for (const kind of ['missing_source', 'missing_master', 'alternative', 'duplicat
   assert.equal(view(id).ready, false);
   assert.ok(bulk.itemFor(id)); // Confirmation never files or removes a submission.
 });
+
+test('incomplete wider comparison blocks filing even with prior manual confirmations', () => {
+  const { id } = seedReady({ extra: { paper_confirmations: { B: 1 }, bank_comparison: { profile_fallback: true, complete: false, candidate_count: 120, completed_candidate_ids: [1] } } });
+  assert.equal(view(id).ready, false);
+  assert.match(view(id).problems.join(' '), /wider question-bank comparison is incomplete/);
+  assert.match(bulk.choosePapers(bulk.itemFor(id), { B: 1 }), /partial coverage/);
+  assert.equal(bulk.fileReady(1, 1, [id]).filed.length, 0);
+  assert.ok(bulk.itemFor(id));
+});

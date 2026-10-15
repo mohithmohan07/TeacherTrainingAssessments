@@ -10,20 +10,34 @@ export const BANK_COMPARISON_FINALIST_LIMIT = 16;
 // Profile metadata orders discovery; it cannot prove which paper was sat.
 // A successful but unresolved profile-bank pass gets one wider full-bank pass
 // using the SAME request policy. Acceptance/confirmation remains the caller's.
-export async function compareWithProfileFallback({ candidates, fallbackCandidates, needsFallback, ...options }) {
-  const first = candidates.length ? await compareQuestionBank({ ...options, candidates }) : null;
+export async function compareWithProfileFallback({ candidates, fallbackCandidates, needsFallback,
+  assertSourcesUnchanged, onPrimaryComplete, onProgress, ...options }) {
+  const first = candidates.length ? await compareQuestionBank({ ...options, candidates, onProgress }) : null;
   const unresolved = !first || (needsFallback ? needsFallback(first) : first.pages.some(page => page.has_answers && (!page.paper_id ||
     !first.papers.some(paper => paper.paper_id === page.paper_id && paper.section === page.section &&
       paper.confidence === 'high' && paper.reason.trim() && !paper.alternatives.length))));
   const ids = new Set(candidates.map(paper => Number(paper.id)));
   if (!unresolved || !fallbackCandidates?.some(paper => !ids.has(Number(paper.id)))) return first;
   if (typeof options.requestPolicy?.beginAttempt !== 'function') throw new Error('Cross-profile discovery requires the shared packet request budget.');
-  const wider = await compareQuestionBank({ ...options, candidates: fallbackCandidates,
-    instructions: `${options.instructions ?? ''}\nPROFILE FALLBACK: The initial profile-compatible bank left responses unresolved. Teaching class/subject are discovery hints, not proof of the administered paper. Compare actual response content with every supplied full master. A cross-profile match will require separate operator review. Do not infer missing answers; partial response coverage is valid. Preserve explicit source-paper identifiers and genuine contradictions.` });
+  assertSourcesUnchanged?.();
+  if (first) onPrimaryComplete?.(first);
+  // finalist_ids includes EVERY initial screening contender, not only final
+  // winners. Only byte-bound, complete coverage from this call is reusable.
+  const priorContenders = new Set(first?.bank_comparison?.finalist_ids ?? []);
+  const reusable = first?.bank_comparison?.complete === true && typeof assertSourcesUnchanged === 'function';
+  const relevant = fallbackCandidates.filter(paper => !reusable || !ids.has(Number(paper.id)) || priorContenders.has(Number(paper.id)));
+  if (!relevant.length) return first;
+  const combinedIds = [...new Set([...ids, ...relevant.map(paper => Number(paper.id))])];
+  const progress = state => onProgress?.({ ...state, complete: false, phase: 'profile_fallback', profile_fallback: true,
+    candidate_count: combinedIds.length, candidate_ids: combinedIds, initial_candidate_count: candidates.length,
+    reused_candidate_count: reusable ? candidates.length : 0,
+    completed_candidate_ids: [...new Set([...(reusable ? [...ids] : []), ...(state.completed_candidate_ids ?? [])])] });
+  const wider = await compareQuestionBank({ ...options, candidates: relevant, screeningConcurrency: 2, onProgress: progress,
+    instructions: `${options.instructions ?? ''}\nPROFILE FALLBACK: The initial profile-compatible bank left responses unresolved. Teaching class/subject are discovery hints, not proof of the administered paper. Compare actual responses with every supplied full master and all original answer images. Cross-profile matches need separate operator review. Do not infer missing answers; partial coverage is valid. Preserve explicit source identifiers and genuine contradictions.` });
+  assertSourcesUnchanged?.();
   const pages = wider.pages.map(page => {
     const prior = first?.pages.find(old => old.page === page.page);
-    const priorClear = prior?.paper_id && first.papers.some(paper => paper.paper_id === prior.paper_id &&
-      paper.section === prior.section && paper.confidence === 'high' && !paper.alternatives.length);
+    const priorClear = prior?.paper_id && first.papers.some(paper => paper.paper_id === prior.paper_id && paper.section === prior.section && paper.confidence === 'high' && !paper.alternatives.length);
     if (prior?.header_evidence?.status === 'conflict' || (prior?.has_answers && !page.has_answers) ||
         (priorClear && page.paper_id && (page.paper_id !== prior.paper_id || page.section !== prior.section))) {
       return { ...page, section: 'none', paper_id: 0, questions: [], has_answers: true,
@@ -31,7 +45,9 @@ export async function compareWithProfileFallback({ candidates, fallbackCandidate
     }
     return page;
   });
-  return { ...wider, pages, bank_comparison: { ...wider.bank_comparison, profile_fallback: true, initial_candidate_count: candidates.length } };
+  return { ...wider, pages, considered_candidate_ids: combinedIds,
+    bank_comparison: { ...wider.bank_comparison, candidate_count: combinedIds.length,
+      profile_fallback: true, initial_candidate_count: candidates.length, reused_candidate_count: reusable ? candidates.length : 0 } };
 }
 
 const sections = new Set(['A', 'B', 'C']);
@@ -107,7 +123,7 @@ function contenderIds(result) {
 export async function compareQuestionBank({
   candidates, request, instructions, content, schema, paperInputs, uploadsDir,
   answerPageCount = Array.isArray(content) ? (content.filter((entry) => entry.type === 'input_image').length || null) : null,
-  ...requestOptions
+  screeningConcurrency = 1, onProgress, ...requestOptions
 }) {
   if (!Array.isArray(candidates) || !candidates.length || typeof request !== 'function' || !Array.isArray(content)) {
     throw new TypeError('Question-bank comparison requires candidates, a request function and answer content.');
@@ -125,6 +141,12 @@ export async function compareQuestionBank({
   const findings = [];
   let recoverySplitCount = 0;
   let expectedPageCount = answerPageCount;
+  const concurrency = Math.max(1, Math.min(2, Math.floor(screeningConcurrency) || 1));
+  if (concurrency > 1 && (typeof requestOptions.requestPolicy?.beginAttempt !== 'function' ||
+      typeof requestOptions.requestPolicy?.cancel !== 'function')) throw new Error('Parallel screening requires a shared cancellable request budget.');
+  const progress = phase => onProgress?.({ complete: false, phase, candidate_count: ids.length, candidate_ids: ids,
+    completed_candidate_ids: [...considered], batch_count: batchCount, screening_concurrency: concurrency });
+  progress('screening');
 
   const compare = async (papers, phase, batchIndex, observations = [], recoveryPart = null) => {
     const suppliedIds = new Set(papers.map((paper) => Number(paper.id)));
@@ -182,8 +204,9 @@ export async function compareQuestionBank({
     considered.push(...batch.map((paper) => Number(paper.id)));
     findings.push(result);
     for (const id of contenderIds(result)) contenders.add(id);
+    progress('screening');
   };
-  for (let index = 0; index < batchCount; index += 1) {
+  const runBatch = async index => {
     const batch = candidates.slice(index * BANK_COMPARISON_BATCH_SIZE, (index + 1) * BANK_COMPARISON_BATCH_SIZE);
     try {
       retain(batch, await compare(batch, 'screening', index));
@@ -199,7 +222,23 @@ export async function compareQuestionBank({
         retain(subset, await compare(subset, 'screening', index, [], part + 1));
       }
     }
-  }
+  };
+  let nextBatch = 0, failure = null;
+  const worker = async () => {
+    while (!failure && nextBatch < batchCount) {
+      const index = nextBatch++;
+      try { await runBatch(index); }
+      catch (error) {
+        failure ??= error;
+        if (concurrency > 1) {
+          try { requestOptions.requestPolicy?.cancel?.(); }
+          catch (cancelError) { failure = cancelError; }
+        }
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, batchCount) }, worker));
+  if (failure) throw failure;
 
   if (!contenders.size) {
     // No batch proposed a paper. Keep answer content unresolved. A blank is
@@ -220,6 +259,7 @@ export async function compareQuestionBank({
   }
   // Even one surviving contender is rechecked after the entire bank has been
   // searched. A batch's local high-confidence finding is never returned as-is.
+  progress('final_comparison');
   const result = await compare(finalists, 'final', batchCount, findings);
   // A later comparison cannot erase writing observed in any earlier batch.
   // Keep contradictory blank claims unresolved, never silently discard a page.
