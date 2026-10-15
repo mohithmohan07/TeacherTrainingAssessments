@@ -89,7 +89,7 @@ export function questionMatchEvidenceDrawer(pages, bankSummary) {
     h('p', {}, 'Read-only stored matching evidence for operator review. Proposed IDs and confidence are recorded findings, not confirmation of the administered master. These details are not included in teacher reports.'),
     bank.available ? h('details', {},
       h('summary', {}, 'Question bank comparison'),
-      h('p', {}, `Full comparison recorded complete: ${shownFlag(bank.complete)}. Compatible candidate count: ${bank.candidateCount ?? NOT_RECORDED}. Recorded batch count: ${bank.batchCount ?? NOT_RECORDED}. Final comparison performed: ${shownFlag(bank.finalCompared)}.`),
+      h('p', {}, `Full comparison recorded complete: ${shownFlag(bank.complete)}. Compared candidate count: ${bank.candidateCount ?? NOT_RECORDED}. Recorded batch count: ${bank.batchCount ?? NOT_RECORDED}. Final comparison performed: ${shownFlag(bank.finalCompared)}.`),
       listView('Finalist master IDs', bank.finalistIds)) : h('p', {}, 'Question bank comparison: Not recorded.'),
     sourcePages.slice(0, MATCH_EVIDENCE_LIMITS.pages).map((page, index) => {
       const evidence = questionMatchEvidence(page);

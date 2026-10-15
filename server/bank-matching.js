@@ -7,6 +7,33 @@ import path from 'node:path';
 export const BANK_COMPARISON_BATCH_SIZE = 8;
 export const BANK_COMPARISON_FINALIST_LIMIT = 16;
 
+// Profile metadata orders discovery; it cannot prove which paper was sat.
+// A successful but unresolved profile-bank pass gets one wider full-bank pass
+// using the SAME request policy. Acceptance/confirmation remains the caller's.
+export async function compareWithProfileFallback({ candidates, fallbackCandidates, needsFallback, ...options }) {
+  const first = candidates.length ? await compareQuestionBank({ ...options, candidates }) : null;
+  const unresolved = !first || (needsFallback ? needsFallback(first) : first.pages.some(page => page.has_answers && (!page.paper_id ||
+    !first.papers.some(paper => paper.paper_id === page.paper_id && paper.section === page.section &&
+      paper.confidence === 'high' && paper.reason.trim() && !paper.alternatives.length))));
+  const ids = new Set(candidates.map(paper => Number(paper.id)));
+  if (!unresolved || !fallbackCandidates?.some(paper => !ids.has(Number(paper.id)))) return first;
+  if (typeof options.requestPolicy?.beginAttempt !== 'function') throw new Error('Cross-profile discovery requires the shared packet request budget.');
+  const wider = await compareQuestionBank({ ...options, candidates: fallbackCandidates,
+    instructions: `${options.instructions ?? ''}\nPROFILE FALLBACK: The initial profile-compatible bank left responses unresolved. Teaching class/subject are discovery hints, not proof of the administered paper. Compare actual response content with every supplied full master. A cross-profile match will require separate operator review. Do not infer missing answers; partial response coverage is valid. Preserve explicit source-paper identifiers and genuine contradictions.` });
+  const pages = wider.pages.map(page => {
+    const prior = first?.pages.find(old => old.page === page.page);
+    const priorClear = prior?.paper_id && first.papers.some(paper => paper.paper_id === prior.paper_id &&
+      paper.section === prior.section && paper.confidence === 'high' && !paper.alternatives.length);
+    if (prior?.header_evidence?.status === 'conflict' || (prior?.has_answers && !page.has_answers) ||
+        (priorClear && page.paper_id && (page.paper_id !== prior.paper_id || page.section !== prior.section))) {
+      return { ...page, section: 'none', paper_id: 0, questions: [], has_answers: true,
+        header_evidence: { status: 'unresolved', reason: 'Profile and wider-bank readings disagree about existing answer content or a previously clear master. Review the original sources.' } };
+    }
+    return page;
+  });
+  return { ...wider, pages, bank_comparison: { ...wider.bank_comparison, profile_fallback: true, initial_candidate_count: candidates.length } };
+}
+
 const sections = new Set(['A', 'B', 'C']);
 const confidenceLevels = new Set(['high', 'medium', 'low']);
 const headerStatuses = new Set(['not_present', 'descriptive', 'compatible', 'conflict', 'unresolved']);

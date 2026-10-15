@@ -14,6 +14,7 @@
 // marks anything: only Evaluate does.
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import db, { UPLOADS_DIR } from './db.js';
 import { OPENAI_MODEL, friendly, openaiConfigured, requestJson } from './openai.js';
 import { GEMINI_MODEL, geminiConfigured } from './gemini.js';
@@ -30,7 +31,7 @@ import { digest, fileBasis } from './provenance.js';
 import { queueTeacherReports, findReport, isOutOfDate } from './reports.js';
 import { jobsAtOnce } from './capacity.js';
 import { keepAwake } from './idle.js';
-import { compareQuestionBank } from './bank-matching.js';
+import { compareQuestionBank, compareWithProfileFallback } from './bank-matching.js';
 import { createMatchingBudget, estimateMatchingCalls, MAX_INDEPENDENT_IDENTITY_VERIFICATIONS } from './matching-budget.js';
 import { readIdentityPages, rereadIdentityPages, validateProviderIdentity } from './identity-reading.js';
 import { verifyIdentityHeader } from './identity-verification.js';
@@ -372,7 +373,46 @@ export function chooseTeacher(item, teacherId) {
   return null;
 }
 
-export function choosePapers(item, papers) {
+// Only a complete, unambiguous full-content proposal may receive an explicit
+// profile-mismatch acknowledgement. This does not override person identity,
+// source headings, absent PDFs, or unresolved/contradictory match evidence.
+export function crossProfileReview(item, key, paperId, result = parse(item.result, {})) {
+  if (!Number.isSafeInteger(paperId) || paperId <= 0 || !item.teacher_id) return null;
+  const teacher = selectTeacher.get(item.teacher_id);
+  const school = selectSchool.get(item.school_id);
+  const paper = selectPaper.get(paperId);
+  if (!teacher || !paper || !String(paper.sections).split(',').map(value => value.trim()).includes(sectionOf(key))) return null;
+  const mismatch = paperCompatibilityProblem(paper, teacher, school, sectionOf(key));
+  if (!mismatch || !result.bank_comparison?.complete || !result.bank_comparison?.final_compared ||
+      !(result.bank_comparison.finalist_ids ?? []).includes(paperId) || !(result.candidate_paper_ids ?? []).includes(paperId)) return null;
+  const pages = selectPages.all(item.id).filter(page => page.section === key);
+  const basis = result.matching_source_basis;
+  const paperHash = fileBasis(paper).sha256;
+  if (!basis?.attempt_id || basis.teacher !== digest(teacher) || basis.school !== digest(school) ||
+      paperHash === 'missing' || basis.papers?.[paperId]?.sha256 !== paperHash ||
+      basis.papers?.[paperId]?.metadata !== digest(paper) || pages.some(page => {
+        const hash = fileBasis(page).sha256;
+        return hash === 'missing' || basis.pages?.[page.id] !== hash;
+      })) return null;
+  const evidence = pages.map(page => result.source_pages?.find(source => source.page_id === page.id));
+  if (!pages.length || evidence.some(source => !source || source.group !== key || source.paper_id !== paperId ||
+      source.confidence !== 'high' || source.summary_count !== 1 || !source.reason?.trim() ||
+      !source.matched_question_labels?.length || source.alternatives?.length !== 0 ||
+      !source.questions?.some(label => source.matched_question_labels.map(normalizeQuestionLabel).includes(normalizeQuestionLabel(label))) ||
+      source.issues.some(issue => issue !== mismatch))) return null;
+  const token = digest({ item_id: item.id, teacher, school, paper, pages, evidence, identity: result.identity,
+    candidate_paper_ids: result.candidate_paper_ids, bank_comparison: result.bank_comparison, matching_source_basis: basis });
+  return { paper_id: paperId, token, mismatch, master_url: `/uploads/${encodeURIComponent(paper.stored_name)}`,
+    explanation: `Content points to ${paper.title}. Teacher profile: ${teacher.grade || 'class unknown'}; ${teacher.subjects || 'subject unknown'}. Paper catalogue: ${paper.levels || 'level unknown'}; ${paper.subject || 'subject unknown'}; ${paper.board || 'board unknown'}. Confirm only after reviewing the original responses and full administered master.` };
+}
+
+function acknowledgedProfileReview(item, key, paperId, result) {
+  const review = crossProfileReview(item, key, paperId, result);
+  const saved = result.profile_confirmations?.[key];
+  return Boolean(review && saved?.paper_id === paperId && saved?.token === review.token);
+}
+
+export function choosePapers(item, papers, profileConfirmations = {}) {
   if (isFinalizationLocked(item)) return 'This submission is being finalized or already has a final outcome.';
   if (['waiting', 'running'].includes(item.sort_status)) return 'Wait for matching to finish before choosing papers.';
   const chosen = parse(item.papers, {});
@@ -381,20 +421,26 @@ export function choosePapers(item, papers) {
   const school = selectSchool.get(item.school_id);
   const confirmations = { ...(result.paper_confirmations ?? {}) };
   const reviewRequired = { ...(result.paper_review_required ?? {}) };
+  const profileReviews = { ...(result.profile_confirmations ?? {}) };
   for (const key of GROUPS) {
     if (!(key in (papers ?? {}))) continue;
     const id = Number(papers[key]) || null;
     if (id) {
       const paper = selectPaper.get(id);
       const problem = teacher ? paperCompatibilityProblem(paper, teacher, school, sectionOf(key)) : 'Choose the teacher before the administered paper.';
-      if (problem) return problem;
-    }
+      if (problem) {
+        const review = crossProfileReview(item, key, id, result);
+        if (!review || profileConfirmations[key] !== review.token) return `${problem} A supported cross-profile content match requires explicit review and acknowledgement.`;
+        if (identityProblems(item, selectPages.all(item.id), result, selectSchoolTeachers.all(item.school_id)).length) return 'Resolve source identity conflicts before confirming a cross-profile paper.';
+        profileReviews[key] = { paper_id: id, token: review.token, acknowledged_at: new Date().toISOString(), mismatch: review.mismatch };
+      } else delete profileReviews[key];
+    } else delete profileReviews[key];
     chosen[key] = id;
     confirmations[key] = id;
     delete reviewRequired[key];
   }
   setPapers.run(JSON.stringify(chosen), item.id);
-  setResult.run(JSON.stringify({ ...result, paper_confirmations: confirmations, paper_review_required: reviewRequired }), item.id);
+  setResult.run(JSON.stringify({ ...result, paper_confirmations: confirmations, paper_review_required: reviewRequired, profile_confirmations: profileReviews }), item.id);
   return null;
 }
 
@@ -447,7 +493,7 @@ export function matchingPlan(schoolId, testId, ids = null) {
     nominal_model_calls: packets.reduce((n, p) => n + p.calls.totalCalls, 0),
     maximum_provider_attempts: packets.length * MATCHING_LIMITS.maxProviderAttempts,
     concurrency: MATCHING_AT_ONCE, limits: MATCHING_LIMITS,
-    estimate_note: 'Logical matching calls only; OCR, retries and actual token usage determine charges. No dollar price is estimated.' };
+    estimate_note: 'Base profile-bank calls only. Unresolved packets may receive one wider full-bank pass within the same attempt/deadline cap; focused rereads, OCR and retries also consume that cap. Actual token usage determines charges. No dollar price is estimated.' };
 }
 
 function itemMatchingPolicy(id, initialSnapshot = null) {
@@ -818,7 +864,7 @@ export async function sortItem(id, { request = requestJson, configured = openaiC
   // 3. Which section each page answers, and which paper each section was sat on.
   const authoritativeIds = [...Object.values(result.paper_confirmations), ...identity.pages.map((p) => namedMaster(p.paper_title_written, library).paper?.id)].filter(Boolean);
   const candidates = candidatePapers(teacher, school, library, authoritativeIds);
-  if (!candidates.length) throw friendly(library.length ? 'No library paper is compatible with this teacher’s class, subject and board. Confirm the profile and import the administered master; no paper was substituted.' : 'The paper library has no papers yet. Import the paper pack on the Paper library page, then press Match again.');
+  if (!library.length) throw friendly('The paper library has no papers yet. Import the paper pack on the Paper library page, then press Match again.');
   result.candidate_paper_ids = candidates.map((p) => p.id);
   result.matching_metrics = requestPolicy.snapshot();
   setResult.run(JSON.stringify(result), id);
@@ -835,8 +881,19 @@ export async function sortItem(id, { request = requestJson, configured = openaiC
     })
   );
 
-  const sorted = await compareQuestionBank({
-    candidates, request, answerPageCount: pages.length,
+  result.matching_source_basis = {
+    attempt_id: randomUUID(),
+    teacher: digest(teacher), school: digest(school),
+    pages: Object.fromEntries(pages.map(page => [page.id, fileBasis(page).sha256])),
+    papers: Object.fromEntries(library.map(paper => [paper.id, { sha256: fileBasis(paper).sha256, metadata: digest(paper) }])),
+  };
+  const sorted = await compareWithProfileFallback({
+    needsFallback: comparison => buildSortPlan(teacher, school, library, pages, comparison,
+      { ...result, candidate_paper_ids: comparison.considered_candidate_ids }).sourcePages.some(page => page.has_answers && page.issues.length),
+    candidates, fallbackCandidates: [...candidates, ...library.filter(paper =>
+      !candidates.some(candidate => candidate.id === paper.id) &&
+      PAPER_SECTIONS.some(section => String(paper.sections).split(',').map(value => value.trim()).includes(section)))],
+    request, answerPageCount: pages.length,
     requestPolicy, maxRetries: 1, timeoutMs: MATCHING_LIMITS.requestTimeoutMs,
     instructions: SORT_INSTRUCTIONS,
     content: [
@@ -855,6 +912,7 @@ export async function sortItem(id, { request = requestJson, configured = openaiC
   if (!selectItem.get(id)) return; // removed while it was being sorted
   result.matching_metrics = requestPolicy.snapshot();
   result.bank_comparison = sorted.bank_comparison ?? null;
+  result.candidate_paper_ids = sorted.considered_candidate_ids;
   saveSort(id, teacher, school, library, pages, sorted, result);
 }
 
@@ -956,6 +1014,8 @@ export const saveSort = db.transaction((id, teacher, school, library, pages, sor
   for (const row of plan.assignments) setPageSort.run(row);
   result.source_pages = plan.sourcePages;
   result.paper_sort_complete = plan.complete;
+  // A rematch creates new evidence and always requires a fresh acknowledgement.
+  result.profile_confirmations = {};
   result.sections = plan.sections;
   result.paper_review_required = {};
   for (const [group, confirmed] of Object.entries(result.paper_confirmations ?? {})) {
@@ -980,7 +1040,7 @@ function paperReviewProblems(item, pages, result, teacher, school, library) {
     }
     const paper = library.find((p) => p.id === Number(chosen[page.section]));
     const compatibility = teacher ? paperCompatibilityProblem(paper, teacher, school, sectionOf(page.section)) : null;
-    if (compatibility) problems.push(`Source page ${page.position}: ${compatibility}`);
+    if (compatibility && !acknowledgedProfileReview(item, page.section, paper?.id, result)) problems.push(`Source page ${page.position}: ${compatibility}`);
     const manualPaper = paper && result?.paper_confirmations?.[page.section] === paper.id;
     if (result?.paper_review_required?.[page.section]) problems.push(`Source page ${page.position}: rematching disagreed with the confirmed master. Review these pages and confirm the retained master again.`);
     if ((!source || source.issues.length || result.paper_sort_complete !== true) && !manualPaper) problems.push(`Source page ${page.position}: confirm the administered master before filing.`);
@@ -1021,6 +1081,8 @@ export function presentItem(item, others = []) {
     const paper = chosen[key] ? selectPaper.get(chosen[key]) : null;
     const found = teacher && count ? sittingForPaper(teacher, test, sectionOf(key), paper?.id ?? null, { create: false }) : null;
     const sitting = found ? { ...found, response_count: countResponse.get(found.id).n } : null;
+    const proposedIds = [...new Set((result?.source_pages ?? []).filter(page => page.group === key).map(page => page.paper_id))];
+    const profileReview = proposedIds.length === 1 ? crossProfileReview(item, key, proposedIds[0], result ?? {}) : null;
     return {
       key,
       section: sectionOf(key),
@@ -1031,6 +1093,8 @@ export function presentItem(item, others = []) {
       confidence: result?.sections?.[key]?.confidence ?? null,
       requires_confirmation: Boolean(result?.paper_review_required?.[key]),
       reason: result?.sections?.[key]?.reason ?? '',
+      cross_profile_review: profileReview ? { ...profileReview,
+        acknowledged: acknowledgedProfileReview(item, key, profileReview.paper_id, result) } : null,
       // What filing does to the teacher's sitting for this section.
       existing: sitting
         ? ['evaluated', 'finalized'].includes(sitting.status)
@@ -1161,6 +1225,7 @@ const fileItem = (item, test) => {
           filed_section: section, filed_group: key, administered_paper_id: chosen[key],
           identity_confirmed: item.matched_by === 'you',
           paper_confirmed: result.paper_confirmations?.[key] === chosen[key],
+          profile_confirmation: result.profile_confirmations?.[key] ?? null,
           page_confirmed: Object.hasOwn(result.page_confirmations ?? {}, page.id),
         };
         db.prepare("UPDATE assessment_files SET source_metadata = ? WHERE assessment_id = ? AND stored_name = ? AND kind = 'response'").run(JSON.stringify(source), sitting.id, page.stored_name);
@@ -1420,6 +1485,7 @@ export async function finalizeBulkItem(id, { request = requestJson, configured =
   let item = selectItem.get(id);
   if (!item) return null;
   const original = parse(item.result, {});
+  if (Object.keys(original.profile_confirmations ?? {}).length) throw friendly('This submission has a reviewed cross-profile master. Use the separate reviewed filing workflow; automatic finalization does not support this acknowledgement yet.');
   if (item.sort_status === 'finalized' && original.finalization?.outcome) return original.finalization.outcome;
   if (['waiting', 'running'].includes(item.sort_status)) throw friendly('This submission is already being matched.');
   setStatus.run('finalizing', null, id);
@@ -1762,6 +1828,10 @@ function pumpFinalizations() {
 }
 
 export function queueFinalizations(schoolId, testId, ids = null) {
+  if (selectItems.all(schoolId, testId).some(item => (!ids || ids.includes(item.id)) &&
+      Object.keys(parse(item.result, {}).profile_confirmations ?? {}).length)) {
+    throw friendly('A submission has a reviewed cross-profile master. Use the separate reviewed filing workflow; automatic finalization does not support this acknowledgement yet.');
+  }
   const added = [];
   const batchId = `batch-${schoolId}-${testId}-${Date.now()}-${digest(`${Math.random()}`).slice(0, 12)}`;
   db.transaction(() => {

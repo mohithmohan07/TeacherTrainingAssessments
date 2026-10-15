@@ -26,6 +26,24 @@ const PLACES = [
 const placesFor = (item) => PLACES.filter((p) => p.value !== 'B3' || item.pages.some((page) => page.section === 'B2' || page.section === 'B3'));
 const pageCount = (n) => `${n} page${n === 1 ? '' : 's'}`;
 
+// Isolated for interaction tests; only the explicit button invokes a write.
+export function profileReviewCard(item, section, sorting, change) {
+  const key = section.key;
+  return section.cross_profile_review ? h('div', { class: 'hint' },
+        h('p', {}, section.cross_profile_review.explanation),
+        h('a', { href: section.cross_profile_review.master_url, target: '_blank', rel: 'noopener' }, 'Review full proposed master'),
+        h('p', {}, 'This reviewed exception supports manual matching and filing only. Automatic Finalize assessments is held for submissions with this acknowledgement.'),
+        section.cross_profile_review.acknowledged
+          ? h('p', {}, 'Administered master confirmed after reviewing the profile difference. Original profile and source evidence are unchanged.')
+          : h('button', { class: 'btn btn-sm', type: 'button', disabled: sorting, onclick: async (event) => {
+              const button = event.currentTarget;
+              button.disabled = true;
+              try { await change(item, { papers: { [key]: section.cross_profile_review.paper_id },
+                profile_confirmations: { [key]: section.cross_profile_review.token } }); }
+              finally { if (button.isConnected) button.disabled = false; }
+            } }, 'Confirm administered master despite profile difference')) : null;
+}
+
 /* ------------------------------------------------------ PDFs to pictures */
 
 // About 200 dots per inch across an A4 page: enough to read handwriting,
@@ -301,7 +319,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
     drawReview();
     try {
       const plan = await bulkApi.matchPlan(school.id, test.id);
-      if (plan.packet_count > 1 && !confirmAction(`Match ${plan.packet_count} PDFs (${plan.source_pages} pages)? About ${plan.nominal_model_calls} model calls are planned before focused rereads, independent header checks, OCR or retries. Each packet stops after ${Math.round(plan.limits.packetTimeoutMs / 60000)} minutes or ${plan.limits.maxProviderAttempts} provider attempts. ${plan.concurrency} packets run at once. Charges depend on actual tokens; no dollar estimate is available. This does not file or grade responses.`)) return;
+      if (plan.packet_count > 1 && !confirmAction(`Match ${plan.packet_count} PDFs (${plan.source_pages} pages)? About ${plan.nominal_model_calls} base model calls are planned before focused rereads, independent header checks, OCR or retries. Unresolved packets may receive one wider full-bank comparison within the same cap. Each packet stops after ${Math.round(plan.limits.packetTimeoutMs / 60000)} minutes or ${plan.limits.maxProviderAttempts} provider attempts. ${plan.concurrency} packets run at once. Charges depend on actual tokens; no dollar estimate is available. This does not file or grade responses.`)) return;
       const result = await bulkApi.match(school.id, test.id, plan.id);
       state.items = result.items;
     } catch (error) {
@@ -500,7 +518,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
       ),
       item.sort_error ? h('p', { class: 'notice' }, item.sort_error) : null,
       item.matching_metrics ? h('details', { class: 'hint' }, h('summary', {}, 'Matching usage'),
-        h('p', {}, `${item.matching_metrics.attempts} of ${item.matching_metrics.limits.maxProviderAttempts} permitted provider requests; ${Math.round(item.matching_metrics.elapsedMs / 1000)} seconds elapsed. ${item.matching_metrics.usage.totalTokens === null ? 'Token usage not reported yet.' : `${item.matching_metrics.usage.totalTokens} reported tokens (may exclude attempts without usage data).`} ${item.compared_candidates === null ? '' : `${item.compared_candidates} compatible question papers available; comparison coverage is shown below.`}`)) : null,
+        h('p', {}, `${item.matching_metrics.attempts} of ${item.matching_metrics.limits.maxProviderAttempts} permitted provider requests; ${Math.round(item.matching_metrics.elapsedMs / 1000)} seconds elapsed. ${item.matching_metrics.usage.totalTokens === null ? 'Token usage not reported yet.' : `${item.matching_metrics.usage.totalTokens} reported tokens (may exclude attempts without usage data).`} ${item.compared_candidates === null ? '' : `${item.compared_candidates} question papers available; comparison coverage is shown below.`}`)) : null,
       item.pages.some(page => page.identity) ? h('details', { class: 'hint' },
         h('summary', {}, 'Source identity evidence'),
         h('p', {}, 'Read-only source observations for operator review. These details are not included in teacher reports.'),
@@ -569,6 +587,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
           : item.sort_status === 'new' ? 'Not matched yet' : sorting ? 'Matching…' : 'No pages: not sat'
       ),
       paperSelect,
+      profileReviewCard(item, section, sorting, change),
       section.requires_confirmation && section.paper && pages.length
         ? h('button', { class: 'btn btn-sm', type: 'button', disabled: sorting, onclick: async (event) => {
             const button = event.currentTarget;

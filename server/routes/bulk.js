@@ -52,7 +52,7 @@ router.put('/:id', (req, res) => {
     item = itemFor(item.id);
   }
   if (req.body.papers) {
-    const problem = choosePapers(item, req.body.papers);
+    const problem = choosePapers(item, req.body.papers, req.body.profile_confirmations ?? {});
     if (problem) return res.status(400).json({ error: problem });
   }
   if (Array.isArray(req.body.pages)) {

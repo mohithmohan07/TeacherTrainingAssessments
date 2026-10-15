@@ -501,3 +501,92 @@ test('a regular rematch cannot silently erase an earlier answer page as blank', 
   assert.equal(JSON.parse(bulk.itemFor(id).result).source_pages[1].has_answers, true);
   assert.match(view(id).problems.join(' '), /unresolved/);
 });
+
+const { digest, fileBasis } = await import('../server/provenance.js');
+const { UPLOADS_DIR } = await import('../server/db.js');
+db.prepare('INSERT INTO teachers (id, school_id, name, grade, subjects) VALUES (60,1,?,?,?)').run('Synthetic Science Teacher', 'Middle School', 'Science');
+for (const id of [90, 91]) db.prepare('INSERT INTO papers (id,title,sections,levels,subject,board,language,stored_name,original_name) VALUES (?,?,?,?,?,?,?,?,?)').run(id, `Synthetic Biology ${id}`, 'B', 'secondary', 'Biology', 'CBSE', 'English', `cross-master-${id}.pdf`, `cross-master-${id}.pdf`);
+async function crossFixture({ conflict = false, differentPerson = false } = {}) {
+  const owner = db.prepare('SELECT * FROM teachers WHERE id=60').get();
+  const masters = db.prepare('SELECT * FROM papers WHERE id IN (90,91)').all();
+  for (const master of masters) await fs.writeFile(path.join(UPLOADS_DIR, master.stored_name), `%PDF-1.7 synthetic full biology master ${master.id}`);
+  const id = bulk.addItem(school, { id: 1 }, `${owner.name}.pdf`, [1, 2].map(n => ({ filename: `cross-${Math.random()}-${n}.jpg`, mimetype: 'image/jpeg', size: 20 })));
+  db.prepare("UPDATE bulk_items SET teacher_id=60,sort_status='done',matched_by='file' WHERE id=?").run(id);
+  const pages = pagesFor(id);
+  for (const page of pages) await fs.writeFile(path.join(UPLOADS_DIR, page.stored_name), `synthetic biology response Q2A Q3B ${page.id}`);
+  const item = bulk.itemFor(id);
+  const observations = pages.map((_, i) => pageLook(i + 1, differentPerson ? other : owner));
+  const result = { identity: bulk.inspectIdentity(item, pages, { pages: observations }, [...teachers, owner]), candidate_paper_ids: [90,91], paper_confirmations: {}, notes: [], sections: {},
+    bank_comparison: { complete: true, final_compared: true, finalist_ids: [90], profile_fallback: true },
+    matching_source_basis: { attempt_id: `synthetic-${id}`, teacher: digest(owner), school: digest(db.prepare('SELECT * FROM schools WHERE id=1').get()),
+      pages: Object.fromEntries(pages.map(p => [p.id, fileBasis(p).sha256])),
+      papers: Object.fromEntries(masters.map(p => [p.id, { sha256: fileBasis(p).sha256, metadata: digest(p) }])) } };
+  const sorted = { pages: pages.map((_, i) => sortPage(i + 1, { paper_id: 90, questions: ['2A', '3B'], header_evidence: { status: conflict ? 'conflict' : 'not_present', reason: conflict ? 'Explicit source code differs.' : 'No paper heading.' } })),
+    papers: [summary({ paper_id: 90, reason: 'Food-chain prerequisite and biology learning responses match Q2A and Q3B.', matched_question_labels: ['2A','3B'] })] };
+  bulk.saveSort(id, owner, school, masters, pages, sorted, result);
+  return { id, pages, owner, masters, result, sorted };
+}
+
+test('Science middle-school response discovers Biology secondary master but needs explicit evidence-bound acknowledgement', async () => {
+  const { id, owner, masters } = await crossFixture();
+  assert.equal(bulk.candidatePapers(owner, school, masters).length, 0);
+  const before = view(id);
+  assert.equal(before.ready, false);
+  const review = before.sections.find(s => s.key === 'B').cross_profile_review;
+  assert.ok(review); assert.equal(review.paper_id, 90); assert.match(review.master_url, /cross-master-90.pdf/);
+  assert.match(bulk.choosePapers(bulk.itemFor(id), { B: 90 }), /acknowledgement/);
+  assert.match(bulk.choosePapers(bulk.itemFor(id), { B: 91 }, { B: review.token }), /acknowledgement/);
+  assert.equal(bulk.choosePapers(bulk.itemFor(id), { B: 90 }, { B: review.token }), null);
+  assert.equal(view(id).ready, true);
+  assert.deepEqual(db.prepare('SELECT * FROM teachers WHERE id=60').get(), owner);
+  assert.deepEqual(view(id).pages[0].match.questions, ['2A', '3B']); // No invented Q1 coverage.
+});
+
+test('cross-profile acknowledgement cannot waive real person or source-heading conflicts', async () => {
+  for (const options of [{ differentPerson: true }, { conflict: true }]) {
+    const { id } = await crossFixture(options);
+    const review = view(id).sections.find(s => s.key === 'B').cross_profile_review;
+    const denied = bulk.choosePapers(bulk.itemFor(id), { B: 90 }, { B: review?.token ?? 'forged' });
+    assert.ok(denied); assert.equal(view(id).ready, false);
+  }
+});
+
+for (const kind of ['source_bytes', 'master_bytes', 'profile', 'attempt']) test(`cross-profile approval invalidates on ${kind} change`, async () => {
+  const fixture = await crossFixture(); const { id, pages, owner, masters, result, sorted } = fixture;
+  const review = view(id).sections.find(s => s.key === 'B').cross_profile_review;
+  assert.equal(bulk.choosePapers(bulk.itemFor(id), { B: 90 }, { B: review.token }), null);
+  assert.equal(view(id).ready, true);
+  if (kind === 'source_bytes') await fs.appendFile(path.join(UPLOADS_DIR, pages[0].stored_name), 'changed');
+  if (kind === 'master_bytes') await fs.appendFile(path.join(UPLOADS_DIR, masters[0].stored_name), 'changed');
+  if (kind === 'profile') db.prepare("UPDATE teachers SET grade='Class 9' WHERE id=60").run();
+  if (kind === 'attempt') {
+    const next = structuredClone(result); next.matching_source_basis.attempt_id += '-new';
+    bulk.saveSort(id, owner, school, masters, pages, sorted, next);
+    assert.match(bulk.choosePapers(bulk.itemFor(id), { B: 90 }, { B: review.token }), /acknowledgement/);
+  }
+  assert.equal(view(id).ready, false);
+  if (kind === 'profile') db.prepare('UPDATE teachers SET grade=? WHERE id=60').run(owner.grade);
+});
+
+test('automatic finalization explicitly holds acknowledged cross-profile submissions without mutating status', async () => {
+  const { id } = await crossFixture();
+  const review = view(id).sections.find(s => s.key === 'B').cross_profile_review;
+  bulk.choosePapers(bulk.itemFor(id), { B: 90 }, { B: review.token });
+  assert.throws(() => bulk.queueFinalizations(1, 1, [id]), /automatic finalization does not support/);
+  await assert.rejects(bulk.finalizeBulkItem(id, { evaluate: false }), /automatic finalization does not support/);
+  assert.equal(bulk.itemFor(id).sort_status, 'done');
+});
+
+for (const kind of ['missing_source', 'missing_master', 'alternative', 'duplicate_summary', 'exact_title']) test(`cross-profile exception fails closed for ${kind}`, async () => {
+  const { id, pages, result, sorted, owner, masters } = await crossFixture();
+  if (kind === 'missing_source') await fs.unlink(path.join(UPLOADS_DIR, pages[0].stored_name));
+  if (kind === 'missing_master') await fs.unlink(path.join(UPLOADS_DIR, masters[0].stored_name));
+  if (kind === 'alternative') sorted.papers[0].alternatives = [91];
+  if (kind === 'duplicate_summary') sorted.papers.push(structuredClone(sorted.papers[0]));
+  if (kind === 'exact_title') result.identity.pages[0].paper_title_written = masters[1].title;
+  if (['alternative', 'duplicate_summary', 'exact_title'].includes(kind)) bulk.saveSort(id, owner, school, masters, pages, sorted, result);
+  assert.equal(view(id).sections.find(s => s.key === 'B').cross_profile_review, null);
+  assert.ok(bulk.choosePapers(bulk.itemFor(id), { B: 90 }, { B: 'forged' }));
+  assert.equal(view(id).ready, false);
+  assert.ok(bulk.itemFor(id)); // Confirmation never files or removes a submission.
+});

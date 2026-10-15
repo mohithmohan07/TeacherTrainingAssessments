@@ -3,7 +3,7 @@ import { after, test } from 'node:test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { BANK_COMPARISON_BATCH_SIZE, BANK_COMPARISON_FINALIST_LIMIT, compareQuestionBank } from '../server/bank-matching.js';
+import { BANK_COMPARISON_BATCH_SIZE, BANK_COMPARISON_FINALIST_LIMIT, compareQuestionBank, compareWithProfileFallback } from '../server/bank-matching.js';
 import { createMatchingBudget } from '../server/matching-budget.js';
 
 // Synthetic bytes and injected requests only: no credentials, provider calls,
@@ -469,4 +469,58 @@ test('writing seen by a recovery child cannot become a blank in the final compar
   assert.deepEqual(result.blank_conflict_pages, [1]);
   assert.equal(result.pages[0].has_answers, true);
   assert.equal(result.pages[0].paper_id, 0);
+});
+
+test('unresolved profile bank discovers cross-profile master with every full PDF and same budget', async () => {
+  const calls = [];
+  const transport = metered(async request => {
+    const ids = suppliedIds(request); calls.push(ids);
+    assert.ok(request.content.includes(answerInput));
+    for (const input of request.content.filter(value => value.type === 'input_file')) {
+      const id = Number(input.filename.match(/\d+/)[0]);
+      assert.deepEqual(Buffer.from(input.file_data.split(',')[1], 'base64'), fullPdf(id));
+    }
+    return ids.includes(2) ? matched(2) : unresolved();
+  });
+  const result = await compareWithProfileFallback({ ...options(1, transport.request, { requestPolicy: transport.requestPolicy }), fallbackCandidates: candidates.slice(0, 2) });
+  assert.deepEqual(calls, [[1], [1, 2]]);
+  assert.equal(result.pages[0].paper_id, 2);
+  assert.equal(result.bank_comparison.profile_fallback, true);
+  assert.equal(transport.requestPolicy.snapshot().attempts, 2);
+  assert.equal(transport.requestPolicy.snapshot().limits.maxProviderAttempts, 40);
+});
+
+test('empty profile bank discovers wider masters and clear initial result does not repeat', async () => {
+  for (const empty of [true, false]) {
+    let calls = 0;
+    const transport = metered(async () => { calls++; return matched(1); });
+    const result = await compareWithProfileFallback({ ...options(empty ? 0 : 1, transport.request, { requestPolicy: transport.requestPolicy }), fallbackCandidates: candidates.slice(0, 2) });
+    assert.equal(calls, 1); assert.equal(result.pages[0].paper_id, 1);
+  }
+});
+
+test('wider discovery consumes the existing attempt budget', async () => {
+  const transport = metered(async () => unresolved(), { maxProviderAttempts: 1 });
+  await assert.rejects(compareWithProfileFallback({ ...options(1, transport.request, { requestPolicy: transport.requestPolicy }), fallbackCandidates: candidates.slice(0, 2) }), /budget|attempt|limit/i);
+  assert.equal(transport.requestPolicy.snapshot().attempts, 1);
+});
+
+for (const kind of ['writing', 'conflict', 'different_master']) test(`wider pass cannot erase prior ${kind} evidence`, async () => {
+  let calls = 0;
+  const transport = metered(async () => {
+    calls++;
+    if (calls === 1) return kind === 'conflict' ? { ...matched(1), pages: [page(1, { header_evidence: { status: 'conflict', reason: 'Explicit version differs.' } })] } : matched(1);
+    return kind === 'writing' ? { pages: [page(0, { has_answers: false })], papers: [] } : matched(kind === 'different_master' ? 2 : 1);
+  });
+  const result = await compareWithProfileFallback({ ...options(1, transport.request, { requestPolicy: transport.requestPolicy }), fallbackCandidates: candidates.slice(0, 2), needsFallback: () => true });
+  assert.equal(result.pages[0].has_answers, true);
+  assert.equal(result.pages[0].paper_id, 0);
+  assert.equal(result.pages[0].header_evidence.status, 'unresolved');
+});
+
+test('caller acceptance check triggers wider discovery for high but ungrounded summary', async () => {
+  let calls = 0;
+  const transport = metered(async () => { calls++; return calls === 1 ? { pages: [page(1)], papers: [summary(1, [], { matched_question_labels: [] })] } : matched(1); });
+  await compareWithProfileFallback({ ...options(1, transport.request, { requestPolicy: transport.requestPolicy }), fallbackCandidates: candidates.slice(0, 2), needsFallback: result => !result.papers[0].matched_question_labels.length });
+  assert.equal(calls, 2);
 });
