@@ -138,3 +138,9 @@ test('failed final retains screening checkpoint for a new explicit attempt witho
   assert.equal(called,1,'final comparison must still execute');
   assert.equal(row(id).content_match.status,'complete');
 });
+test('failed content attempts replace stale legacy candidate counts before comparison',async()=>{
+ const id=await packet(1);
+ db.prepare('UPDATE bulk_items SET result=? WHERE id=?').run(JSON.stringify({candidate_paper_ids:Array.from({length:120},(_,i)=>i+1),bank_comparison:{candidate_count:120}}),id);
+ await assert.rejects(bulk.sortContentItem(id,{configured:()=>true,compare:async args=>{assert.equal(args.candidates.length,2);throw new Error('Synthetic malformed coverage');}}),/Synthetic/);
+ assert.equal(row(id).compared_candidates,2);assert.equal(row(id).bank_comparison,null);
+});

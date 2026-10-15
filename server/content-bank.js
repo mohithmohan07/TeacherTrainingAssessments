@@ -249,6 +249,32 @@ export const CONTENT_SCREEN_SCHEMA = freeze({ type: 'object', additionalProperti
   } } },
 } });
 
+export const CONTENT_VERIFY_SCHEMA = freeze({type:'object',additionalProperties:false,required:['candidates','pages'],properties:{
+  pages: structuredClone(CONTENT_SCREEN_SCHEMA.properties.pages),
+  candidates:{type:'array',items:{type:'object',additionalProperties:false,required:['paper_id','disposition','reason','support'],properties:{
+    paper_id:{type:'integer'},disposition:{type:'string',enum:['plausible','uncertain','excluded']},reason:{type:'string'},
+    support:{type:'array',items:{type:'object',additionalProperties:false,required:['section','answer_pages','master_pages','question_labels','correspondence'],properties:{
+      section:{type:'string',enum:['A','B','C']},answer_pages:{type:'array',items:{type:'integer',minimum:1}},
+      master_pages:{type:'array',items:{type:'integer',minimum:1}},question_labels:{type:'array',items:{type:'string'}},correspondence:{type:'string'}
+    }}}
+  }}}
+}});
+function validateVerification(result, masters, pageCount) {
+  validateScreen(result,new Set(masters.map(master=>master.id)),pageCount);
+  const fail=()=>{throw issue('Invalid full-PDF verification support or physical page anchors. No partial verification was accepted.','QUESTION_BANK_INVALID_EVIDENCE');};
+  const pageList=(values,maximum)=>Array.isArray(values)&&values.length&&new Set(values).size===values.length&&values.every(n=>Number.isSafeInteger(n)&&n>=1&&n<=maximum);
+  for(const finding of result.candidates){
+    const master=masters.find(master=>master.id===finding.paper_id);
+    if(!Array.isArray(finding.support)|| (finding.disposition==='plausible'&&!finding.support.length) || (finding.disposition==='excluded'&&finding.support.length))fail();
+    for(const support of finding.support){
+      if(!support||!['A','B','C'].includes(support.section)||!pageList(support.answer_pages,pageCount)||!pageList(support.master_pages,master.index.page_count)||
+        !Array.isArray(support.question_labels)||!support.question_labels.length||support.question_labels.some(label=>typeof label!=='string'||!label.trim())||
+        typeof support.correspondence!=='string'||!support.correspondence.trim()||support.answer_pages.some(page=>!result.pages.find(entry=>entry.page===page)?.has_answers))fail();
+    }
+  }
+  return result;
+}
+
 function validatePages(pages, pageCount, fail) {
   if (!Array.isArray(pages) || pages.length !== pageCount || new Set(pages.map(page => page?.page)).size !== pageCount ||
     pages.some(page => !page || !Number.isSafeInteger(page.page) || page.page < 1 || page.page > pageCount || typeof page.has_answers !== 'boolean')) fail('every original answer page must be accounted for exactly once');
@@ -309,10 +335,13 @@ export async function compareContentFirstQuestionBank({ candidates, request, ins
     assertSourcesUnchanged?.();
     assertBudget();
   };
-  const completed = [], findings = [], masters = [], batches = [];
-  let recoverySplitCount = 0;
+  const completed = [], findings = [], masters = [], batches = [], verifiedProgress = [];
+  let recoverySplitCount = 0, schemaRepairCount = 0;
   const progress = phase => onProgress?.({ complete: false, phase, candidate_count: ids.length, candidate_ids: [...ids],
-    completed_candidate_ids: [...completed], batch_count: batches.length, screening_concurrency: concurrency, coverage_mode: 'content_first' });
+    completed_candidate_ids: [...completed], batch_count: batches.length, screening_concurrency: concurrency, coverage_mode: 'content_first',
+    schema_repair_count: schemaRepairCount, full_pdf_verified_ids: [...verifiedProgress],
+    text_screened_ids: masters.filter(master=>completed.includes(master.id)&&master.mode==='complete_text').map(master=>master.id),
+    full_pdf_screened_ids: masters.filter(master=>completed.includes(master.id)&&master.mode==='full_pdf').map(master=>master.id) });
   const loadBytes = paperBytes ?? (async paper => {
     const directory = uploadsDir ?? (await import('./db.js')).UPLOADS_DIR;
     return fs.readFile(path.join(directory, paper.stored_name));
@@ -368,14 +397,17 @@ export async function compareContentFirstQuestionBank({ candidates, request, ins
       const inputs = await Promise.all(batch.masters.map(async master => batch.mode === 'complete_text' ? [master.textInput]
         : [{ type: 'input_text', text: `QUESTION PAPER ID ${master.id}. The following PDF is the complete original.` }, await masterPdfInput(master)]));
       unchanged();
+      for(let repair=0;repair<2;repair++){
       const result = await request({ ...requestOptions, requestPolicy, schema: CONTENT_SCREEN_SCHEMA,
         name: 'question_bank_content_screen',
-        instructions: `${instructions ?? ''}\n\nALL-BANK CONTENT SCREENING ${CONTENT_SCREENING_VERSION}. ${sourceRules}\nThis is screening batch ${batchIndex + 1} of ${batches.length}, not a final comparison. Inspect EVERY supplied master against EVERY original answer image. ${batch.mode === 'complete_text' ? 'All question text of every page of these conservatively indexed masters is supplied, without truncation. This is text screening, not full-PDF verification.' : 'These masters could not be safely screened as text. Inspect every supplied complete PDF, including all diagrams and scanned pages.'}\nReturn exactly one candidate decision for each supplied ID: plausible for any concrete compatibility, uncertain for any reading/coverage/matching doubt, or excluded only for a reason grounded in the actual question and response content. Retain ALL plausible or uncertain masters, including low-confidence alternatives; there is no top-K and a batch winner is not globally unique. Account for every original answer page. Mark has_answers false only for a genuinely blank image.${recoveryPart ? ` This is bounded timeout-recovery part ${recoveryPart} of 2; other parts remain necessary.` : ''}`,
+        instructions: `${instructions ?? ''}\n\nALL-BANK CONTENT SCREENING ${CONTENT_SCREENING_VERSION}. ${sourceRules}\nThis is screening batch ${batchIndex + 1} of ${batches.length}, not a final comparison. Inspect EVERY supplied master against EVERY original answer image. ${batch.mode === 'complete_text' ? 'All question text of every page of these conservatively indexed masters is supplied, without truncation. This is text screening, not full-PDF verification.' : 'These masters could not be safely screened as text. Inspect every supplied complete PDF, including all diagrams and scanned pages.'}\nReturn exactly one candidate decision for each supplied ID: plausible for any concrete compatibility, uncertain for any reading/coverage/matching doubt, or excluded only for a reason grounded in the actual question and response content. Retain ALL plausible or uncertain masters, including low-confidence alternatives; there is no top-K and a batch winner is not globally unique. Return exactly ${answerPageCount} page entries, one each for physical answer pages 1 through ${answerPageCount}, with no omissions or duplicates. ${repair ? 'SCHEMA REPAIR: the preceding response had invalid structure or coverage. Reinspect the same complete sources and return the full valid response; do not invent omitted page findings.' : ''} Mark has_answers false only for a genuinely blank image.${recoveryPart ? ` This is bounded timeout-recovery part ${recoveryPart} of 2; other parts remain necessary.` : ''}`,
         content: [{ type: 'input_text', text: `SUPPLIED QUESTION PAPER IDS: ${JSON.stringify(supplied)}. Full bank size: ${ids.length}.` },
           ...inputs.flat(), ...content],
       });
       unchanged();
-      return validateScreen(result, new Set(supplied), answerPageCount);
+      try { return validateScreen(result, new Set(supplied), answerPageCount); }
+      catch(error){ if(repair===0 && error.code==='QUESTION_BANK_INVALID_EVIDENCE'){schemaRepairCount++;continue;} throw error; }
+      }
     } catch (cause) {
       throw issue(`Question-bank screening batch ${batchIndex + 1} failed. The full bank comparison is incomplete; no match was accepted. ${cause.userMessage ?? cause.message}`, 'QUESTION_BANK_COMPARISON_FAILED', {
         considered_candidate_ids: [...completed], failed_candidate_ids: supplied,
@@ -476,7 +508,7 @@ export async function compareContentFirstQuestionBank({ candidates, request, ins
   do { expanded = false; for (const id of contenders) for (const peer of equivalent.get(id)) if (!contenders.has(peer)) { contenders.add(peer); expanded = true; } } while (expanded);
   const finalists = masters.filter(master => contenders.has(master.id));
   const coverage = { complete: true, coverage_mode: 'content_first', screening_version: CONTENT_SCREENING_VERSION,
-    engine_signature: CONTENT_ENGINE_SIGNATURE,
+    engine_signature: CONTENT_ENGINE_SIGNATURE, schema_repair_count: schemaRepairCount,
     reused_screening_ids: [...reusedIds], fresh_screening_ids: [...freshIds],
     parser_version: indexCache.parserVersion ?? CONTENT_INDEX_VERSION,
     source_manifest: masters.map(master => ({ paper_id: master.id, source_sha256: master.index.source_sha256,
@@ -493,17 +525,35 @@ export async function compareContentFirstQuestionBank({ candidates, request, ins
     return { pages: Array.from({ length: answerPageCount }, (_, i) => ({ page: i + 1, section: 'none', paper_id: 0, questions: [], has_answers: writingSeen(i + 1) })), papers: [],
       considered_candidate_ids: [...ids], bank_comparison: coverage };
   }
-  if (finalists.length > BANK_COMPARISON_FINALIST_LIMIT) throw issue(`All ${ids.length} question papers were screened, but ${finalists.length} remain plausible. At most ${BANK_COMPARISON_FINALIST_LIMIT} full PDFs can be verified together. No paper was selected and no contender was dropped.`, 'QUESTION_BANK_FINALIST_LIMIT', {
-    considered_candidate_ids: [...ids], finalist_ids: finalists.map(master => master.id), bank_comparison: { ...coverage, complete: false },
-  });
+  // Large contender sets are verified in complete bounded batches. No local
+  // winner or confidence ranking can prune another batch's supported evidence.
+  let verification = null;
+  const verificationBatches = [];
+  if(finalists.length > BANK_COMPARISON_FINALIST_LIMIT){
+    for(let start=0;start<finalists.length;start+=BANK_COMPARISON_FINALIST_LIMIT)verificationBatches.push(finalists.slice(start,start+BANK_COMPARISON_FINALIST_LIMIT));
+    verification=[];
+    for(const [index,batch] of verificationBatches.entries()){
+      progress('full_pdf_verification');
+      try {
+        const inputs=await Promise.all(batch.map(async master=>[{type:'input_text',text:`QUESTION PAPER ID ${master.id}. Complete original PDF.`},await masterPdfInput(master)]));
+        unchanged();
+        const evidence=await request({...requestOptions,requestPolicy,schema:CONTENT_VERIFY_SCHEMA,name:'question_bank_full_pdf_verification',
+          instructions:`${instructions??''}\nFULL-PDF CANDIDATE VERIFICATION batch ${index+1}/${verificationBatches.length}. ${sourceRules}\nInspect EVERY supplied PDF against EVERY original answer image. Record each candidate independently, not a batch winner. Return all supplied candidate IDs and exactly ${answerPageCount} answer-page observations (1 through ${answerPageCount}, each once). Each supported correspondence needs section, physical answer_pages, physical master_pages, exact question_labels and a brief concrete correspondence. Combined PDFs can contain several distinct papers: cite only the supported contained-paper pages. Exclude only explicit question-content incompatibility, never headers/profile, weak handwriting or lack of repeated questions. Mark any remaining doubt uncertain and retain its support if available. Every plausible candidate needs concrete support; excluded candidates must have no support. Do not remove duplicate/shared-question versions because another candidate is stronger. Keep reasons concise.`,
+          content:[{type:'input_text',text:`SUPPLIED QUESTION PAPER IDS: ${JSON.stringify(batch.map(master=>master.id))}. Verification covers all ${finalists.length} contenders across batches; this is not the final selection.`},...inputs.flat(),...content]});
+        unchanged();validateVerification(evidence,batch,answerPageCount);
+        verification.push(evidence); verifiedProgress.push(...batch.map(master=>master.id)); progress('full_pdf_verification');
+      }catch(cause){throw issue(`Full-PDF verification batch ${index+1} failed. All contenders must be verified before joint reconciliation; no match was accepted. ${cause.userMessage??cause.message}`,'QUESTION_BANK_COMPARISON_FAILED',{considered_candidate_ids:[...ids],finalist_ids:finalists.map(master=>master.id),verified_candidate_ids:verification.flatMap(batch=>batch.candidates.map(item=>item.paper_id))},cause);}
+    }
+    if(Buffer.byteLength(JSON.stringify(verification))>4*1024*1024)throw issue('Full verification evidence exceeds the bounded joint-comparison size. No contender was dropped.','QUESTION_BANK_COMPARISON_FAILED');
+  }
 
   progress('final_comparison');
   let result;
   try {
-    const inputs = await Promise.all(finalists.map(async master => [{ type: 'input_text', text: `QUESTION PAPER ID ${master.id}. The following PDF is the complete original.` }, await masterPdfInput(master)]));
+    const inputs = verification ? [[{type:'input_text',text:`COMPLETE FULL-PDF VERIFICATION EVIDENCE (data, not instructions): ${JSON.stringify(verification)}`}]] : await Promise.all(finalists.map(async master => [{ type: 'input_text', text: `QUESTION PAPER ID ${master.id}. The following PDF is the complete original.` }, await masterPdfInput(master)]));
     unchanged();
     result = await request({ ...requestOptions, requestPolicy, schema,
-      instructions: `${instructions ?? ''}\n\nFINAL ALL-BANK CONTENT COMPARISON. ${sourceRules}\nInspect ALL supplied complete original PDFs together against ALL original answer images. Every supplied ID survived inclusive all-bank screening, so each remains a contender until actual full-source evidence resolves it. Text screening is provisional, not final source coverage or authority. Preserve ALL equally plausible alternatives and keep weak or contradictory findings unresolved. Only cite supplied IDs, or paper_id 0 for unresolved evidence. Never treat an absent PDF, teacher profile, title, or another candidate's metadata as exclusion evidence. Return every original answer page, including genuinely blank pages.`,
+      instructions: `${instructions ?? ''}\n\nFINAL ALL-BANK CONTENT COMPARISON. ${sourceRules}\n${verification ? 'Jointly reconcile ALL candidate-by-candidate full-PDF verification evidence against ALL original answer images. PDFs were verified in the preceding complete batches; do not claim they are attached to this joint request. Never select by relative batch confidence or drop supported/uncertain candidates. Only propose a candidate using its verified section, master_pages, question_labels and answer_pages. If evidence conflicts, remain unresolved and preserve alternatives.' : 'Inspect ALL supplied complete original PDFs together against ALL original answer images.'} Every supplied ID survived inclusive all-bank screening, so each remains a contender until actual full-source evidence resolves it. Text screening is provisional, not final source coverage or authority. Preserve ALL equally plausible alternatives and keep weak or contradictory findings unresolved. Only cite supplied IDs, or paper_id 0 for unresolved evidence. Never treat an absent PDF, teacher profile, title, or another candidate's metadata as exclusion evidence. Return every original answer page, including genuinely blank pages.`,
       content: [{ type: 'input_text', text: `FINAL QUESTION PAPER IDS: ${JSON.stringify(finalists.map(master => master.id))}. All ${ids.length} bank candidates were screened; text screening is not full-PDF inspection.` },
         ...inputs.flat(), ...content],
     });
@@ -525,10 +575,27 @@ export async function compareContentFirstQuestionBank({ candidates, request, ins
   } catch (cause) { throw issue(`Question-bank final comparison failed. No match was accepted. ${cause.userMessage ?? cause.message}`, 'QUESTION_BANK_COMPARISON_FAILED', {
     considered_candidate_ids: [...ids], finalist_ids: finalists.map(master => master.id),
   }, cause); }
-  const blankConflicts = result.pages.filter(page => !page.has_answers && writingSeen(page.page)).map(page => page.page);
+  if(verification){
+    const byId=new Map(verification.flatMap(batch=>batch.candidates).map(candidate=>[candidate.paper_id,candidate]));
+    for(const page of result.pages){
+      const summaries=result.papers.filter(finding=>finding.paper_id===page.paper_id&&finding.section===page.section);
+      if(page.paper_id && !byId.get(page.paper_id)?.support.some(support=>support.section===page.section && support.answer_pages.includes(page.page) && page.questions.every(label=>support.question_labels.includes(label)) && summaries.some(summary=>Array.isArray(summary.master_pages)&&support.master_pages.every(masterPage=>summary.master_pages.includes(masterPage))&&page.questions.every(label=>summary.matched_question_labels.includes(label))&&support.question_labels.some(label=>summary.matched_question_labels.includes(label)))))throw issue('Joint result assigned an answer page without matching verified content support.','QUESTION_BANK_INVALID_EVIDENCE');
+    }
+    result={...result,papers:result.papers.map(finding=>{
+      if(!finding.paper_id)return finding;
+      const answerPages=result.pages.filter(page=>page.paper_id===finding.paper_id&&page.section===finding.section).map(page=>page.page);
+      const supports=byId.get(finding.paper_id)?.support.filter(support=>support.section===finding.section&&support.answer_pages.some(page=>answerPages.includes(page)))??[];
+      if(!supports.length || !Array.isArray(finding.master_pages) || finding.master_pages.some(page=>!supports.some(support=>support.master_pages.includes(page))) || finding.matched_question_labels.some(label=>!supports.some(support=>support.question_labels.includes(label)&&support.master_pages.some(page=>finding.master_pages.includes(page)))))throw issue('Joint result contains a master anchor or question label absent from verified evidence.','QUESTION_BANK_INVALID_EVIDENCE');
+      const retained=[...byId.values()].filter(candidate=>candidate.paper_id!==finding.paper_id && (candidate.disposition==='uncertain'||candidate.support.some(support=>support.answer_pages.some(page=>answerPages.includes(page))))).map(candidate=>candidate.paper_id);
+      if(finding.alternatives.some(id=>byId.get(id)?.disposition==='excluded'))throw issue('Joint result cites an excluded master without verified support.','QUESTION_BANK_INVALID_EVIDENCE');
+      const alternatives=[...new Set([...finding.alternatives,...retained])];
+      return alternatives.length || byId.get(finding.paper_id)?.disposition==='uncertain' ? {...finding,alternatives,confidence:'low',reason:`${finding.reason} All overlapping supported or uncertain candidates remain alternatives; separate batch confidence cannot establish uniqueness.`} : finding;
+    })};
+  }
+  const blankConflicts = result.pages.filter(page => !page.has_answers && (writingSeen(page.page)||verification?.some(batch=>batch.pages.some(observed=>observed.page===page.page&&observed.has_answers)))).map(page => page.page);
   const equivalentIds = new Set(finalists.filter(master => equivalent.get(master.id).size > 1).map(master => master.id));
   result = { ...result, pages: result.pages.map(page => blankConflicts.includes(page.page)
-    ? { ...page, section: 'none', paper_id: 0, questions: [], has_answers: page.has_answers || writingSeen(page.page),
+    ? { ...page, section: 'none', paper_id: 0, questions: [], has_answers: true,
       header_evidence: { status: 'unresolved', reason: 'Earlier source inspection found writing; the final blank claim needs reconciliation.' } }
     : (page.paper_id && equivalentIds.has(page.paper_id))
     ? { ...page, proposed_candidate_ids: [...equivalent.get(page.paper_id)],
@@ -539,5 +606,5 @@ export async function compareContentFirstQuestionBank({ candidates, request, ins
       : paper) };
   unchanged();
   return { ...result, considered_candidate_ids: [...ids], blank_conflict_pages: blankConflicts,
-    bank_comparison: { ...coverage, final_compared: true, full_pdf_verified_ids: finalists.map(master => master.id), ambiguous_equivalent_ids: [...equivalentIds] } };
+    bank_comparison: { ...coverage, final_compared: true, final_comparison_mode: verification ? 'batched_full_pdf_then_joint_evidence' : 'joint_full_pdf', verification_batch_count: verificationBatches.length, full_pdf_verification_evidence: verification, full_pdf_verified_ids: finalists.map(master => master.id), ambiguous_equivalent_ids: [...equivalentIds] } };
 }

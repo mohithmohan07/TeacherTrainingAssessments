@@ -389,3 +389,9 @@ test('confirmed bank UI displays source count, distinct PDFs, manifest hash and 
     assert.match(confirmedBankSummary(null).textContent,/No confirmed source folder selected/);
   } finally {restore();}
 });
+test('multi-batch verification UI distinguishes full-PDF evidence from joint evidence reconciliation',()=>{
+ const restore=installReportDom({});try{
+  const view=questionMatchEvidenceDrawer([],{complete:true,coverage_mode:'content_first',candidate_count:65,text_screened_ids:[],full_pdf_screened_ids:Array.from({length:65},(_,i)=>i+1),final_compared:true,full_pdf_verified_ids:Array.from({length:27},(_,i)=>i+1),final_comparison_mode:'batched_full_pdf_then_joint_evidence',verification_batch_count:2,schema_repair_count:1});
+  assert.match(view.textContent,/verified in 2 bounded full-PDF batches/);assert.match(view.textContent,/full PDFs were not jointly attached/);assert.match(view.textContent,/Bounded screening schema repairs: 1/);
+ }finally{restore();}
+});

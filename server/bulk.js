@@ -768,12 +768,14 @@ export async function sortContentItem(id, { request = requestJson, configured = 
   const pages = selectPages.all(id);
   let library;
   const previous = parse(item.result, {});
-  const result = { ...previous, profile_confirmations: {}, content_match: { status: 'running', sections: [], screening_checkpoint: previous.content_match?.screening_checkpoint } };
+  const result = { ...previous, candidate_paper_ids: [], bank_comparison: null, profile_confirmations: {}, content_match: { status: 'running', sections: [], screening_checkpoint: previous.content_match?.screening_checkpoint } };
   const policy = itemMatchingPolicy(id, previous.matching_metrics ?? null);
   const persist = () => { result.matching_metrics = policy.snapshot(); setResult.run(JSON.stringify(result), id); };
   persist();
   try {
     library = matchingBankPapers(item.school_id,item.test_id);
+    result.candidate_paper_ids = library.map(paper=>paper.id);
+    persist();
     if (!pages.length || pages.some(page => !OPENAI_IMAGE_TYPES.has(page.mime_type))) throw friendly('Original answer images are missing or unsupported. Content comparison remains unresolved.');
     if (!library.length) throw friendly('Import the supplied question-paper bank before matching contents.');
     const basis = contentSourceBasis(pages, library), key = digest(basis);

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import {
-  CONTENT_ENGINE_DESCRIPTOR, CONTENT_ENGINE_SIGNATURE, CONTENT_INDEX_VERSION, CONTENT_SCREEN_SCHEMA, CONTENT_SCREENING_MAX_CHARS, CONTENT_SCREENING_MAX_PAPERS,
+  CONTENT_ENGINE_DESCRIPTOR, CONTENT_ENGINE_SIGNATURE, CONTENT_INDEX_VERSION, CONTENT_SCREEN_SCHEMA, CONTENT_VERIFY_SCHEMA, CONTENT_SCREENING_MAX_CHARS, CONTENT_SCREENING_MAX_PAPERS,
   createContentBankIndex, extractCompletePdfText, compareContentFirstQuestionBank,
 } from '../server/content-bank.js';
 import { createMatchingBudget } from '../server/matching-budget.js';
@@ -316,7 +316,7 @@ for (const malformed of ['missing', 'duplicate', 'absent', 'unreasoned', 'pages'
     return result;
   });
   await assert.rejects(compareContentFirstQuestionBank(options), error => error.code === 'QUESTION_BANK_COMPARISON_FAILED' && error.cause.code === 'QUESTION_BANK_INVALID_EVIDENCE');
-  assert.equal(calls, 1);
+  assert.equal(calls, 2); // One bounded schema repair, then fail closed.
 });
 
 test('final invented IDs, invalid alternatives, and missing answer pages are rejected', async () => {
@@ -336,13 +336,25 @@ test('a failed screening or final request never returns a provisional winner', a
   }
 });
 
-test('over sixteen contenders produce a complete explicit list without dropping or accepting any', async () => {
-  const { options, requestPolicy } = fixture(30, async request => screened(supplied(request), supplied(request)));
-  await assert.rejects(compareContentFirstQuestionBank(options), error => {
-    assert.equal(error.code, 'QUESTION_BANK_FINALIST_LIMIT'); assert.equal(error.finalist_ids.length, 30);
-    assert.equal(error.considered_candidate_ids.length, 30); assert.equal(error.bank_comparison.complete, false); return true;
+const verified = (ids, { section='B', masterPages=[1], answerPages=[1], uncertain=[] }={}) => ({pages:[{page:1,has_answers:true}],candidates:ids.map(paper_id=>({paper_id,disposition:uncertain.includes(paper_id)?'uncertain':'plausible',reason:'Shared concrete question content.',support:[{section,answer_pages:answerPages,master_pages:masterPages,question_labels:['5A'],correspondence:'Response describes the same question scenario.'}]}))});
+const anchoredMatch = (id, alternatives=[]) => ({...matched(id,alternatives),papers:[{...matched(id,alternatives).papers[0],master_pages:[1]}]});
+
+test('over sixteen contenders all receive bounded full-PDF verification and ambiguity survives joint reconciliation', async () => {
+  const seen=[];
+  const { options, requestPolicy } = fixture(30, async request => {
+    const ids=supplied(request);seen.push({schema:request.schema,ids,pdfs:request.content.filter(input=>input.type==='input_file').length});
+    if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(ids,ids);
+    if(request.schema===CONTENT_VERIFY_SCHEMA)return verified(ids);
+    assert.equal(request.content.filter(input=>input.type==='input_file').length,0);
+    return anchoredMatch(30); // A joint model may not silently drop the other29.
   });
-  assert.equal(requestPolicy.snapshot().attempts, 2);
+  const result=await compareContentFirstQuestionBank(options);
+  assert.deepEqual(seen.filter(call=>call.schema===CONTENT_VERIFY_SCHEMA).map(call=>call.ids.length),[16,14]);
+  assert.ok(seen.every(call=>call.pdfs<=16));
+  assert.equal(result.bank_comparison.full_pdf_verified_ids.length,30);
+  assert.equal(result.bank_comparison.final_comparison_mode,'batched_full_pdf_then_joint_evidence');
+  assert.equal(result.papers[0].alternatives.length,29);assert.equal(result.papers[0].confidence,'low');
+  assert.equal(requestPolicy.snapshot().attempts,5);
 });
 
 test('no contenders leaves writing unresolved; blank only survives unanimous screening', async () => {
@@ -615,4 +627,83 @@ test('matched answer pages cannot bypass physical anchors by omitting their pape
    const {options}=fixture(1,async request=>request.schema===CONTENT_SCREEN_SCHEMA ? screened(supplied(request),[1]) : {...matched(1),papers},{schema:anchoredSchema});
    await assert.rejects(compareContentFirstQuestionBank(options),/anchored paper finding/);
  }
+});
+
+test('one schema repair reinspects identical complete sources and consumes the shared request budget',async()=>{
+ let screens=0,firstInputs;
+ const {options,requestPolicy}=fixture(2,async request=>{
+   if(request.schema===CONTENT_SCREEN_SCHEMA){screens++;if(screens===1){firstInputs=JSON.stringify(request.content);return {...screened(supplied(request),[1]),pages:[]};}
+     assert.equal(JSON.stringify(request.content),firstInputs);assert.match(request.instructions,/SCHEMA REPAIR/);return screened(supplied(request),[1]);}
+   return matched(1);
+ });
+ const result=await compareContentFirstQuestionBank(options);assert.equal(screens,2);assert.equal(requestPolicy.snapshot().attempts,3);assert.equal(result.bank_comparison.schema_repair_count,1);
+});
+test('schema repair cannot bypass the global provider-attempt limit',async()=>{
+ let calls=0;const requestPolicy=createMatchingBudget({maxProviderAttempts:1});
+ const {options}=fixture(2,async request=>{calls++;return {...screened(supplied(request),[1]),pages:[]};},{requestPolicy});
+ await assert.rejects(compareContentFirstQuestionBank(options),/request|budget|permitted|attempt/i);assert.equal(calls,1);assert.equal(requestPolicy.snapshot().attempts,1);
+});
+for(const mode of ['missing_candidate','missing_page','timeout','cancelled'])test(`incomplete multi-batch verification (${mode}) cannot reach joint reconciliation`,async()=>{
+ let batches=0,joint=0;const {options,requestPolicy}=fixture(30,async request=>{
+   if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request));
+   if(request.schema===CONTENT_VERIFY_SCHEMA){batches++;const result=verified(supplied(request));if(batches===2){
+     if(mode==='missing_candidate')result.candidates.pop();if(mode==='missing_page')result.pages=[];
+     if(mode==='timeout')throw Object.assign(new Error('bounded timeout'),{code:'OPENAI_REQUEST_TIMEOUT'});
+     if(mode==='cancelled')requestPolicy.cancel();
+   }return result;}joint++;return anchoredMatch(1);
+ });
+ await assert.rejects(compareContentFirstQuestionBank(options),/verification batch 2 failed/);assert.equal(joint,0);assert.equal(batches,2);assert.equal(requestPolicy.snapshot().activeAttempts,0);
+});
+for(const mode of ['master_page','question_label','answer_section'])test(`joint reconciliation rejects conflicting ${mode} support`,async()=>{
+ const {options}=fixture(30,async request=>{
+   if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request));
+   if(request.schema===CONTENT_VERIFY_SCHEMA)return verified(supplied(request));
+   const result=anchoredMatch(1);
+   if(mode==='master_page')result.papers[0].master_pages=[2];
+   if(mode==='question_label')result.papers[0].matched_question_labels=['5B'];
+   if(mode==='answer_section'){result.pages[0].section='A';result.papers[0].section='A';}
+   return result;
+ },{indexCache:createContentBankIndex({extractPdf:bytes=>extraction([`${bytes} first page`,`${bytes} second page`])})});
+ await assert.rejects(compareContentFirstQuestionBank(options),/verified|support/);
+});
+test('uncertain contenders without anchors remain alternatives rather than being silently excluded',async()=>{
+ const {options}=fixture(30,async request=>{
+   if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request));
+   if(request.schema===CONTENT_VERIFY_SCHEMA){const result=verified(supplied(request));for(const candidate of result.candidates)if(candidate.paper_id!==1){candidate.disposition='uncertain';candidate.support=[];}return result;}
+   return anchoredMatch(1);
+ });
+ const result=await compareContentFirstQuestionBank(options);assert.equal(result.papers[0].alternatives.length,29);assert.equal(result.papers[0].confidence,'low');
+});
+test('multi-batch verification and reconciliation retain the same global attempt cap',async()=>{
+ const requestPolicy=createMatchingBudget({maxProviderAttempts:4});let joint=0;
+ const {options}=fixture(30,async request=>{
+   if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request));
+   if(request.schema===CONTENT_VERIFY_SCHEMA)return verified(supplied(request));
+   joint++;return anchoredMatch(1);
+ },{requestPolicy});
+ await assert.rejects(compareContentFirstQuestionBank(options));assert.equal(joint,0);assert.equal(requestPolicy.snapshot().attempts,4);
+});
+test('verification-observed writing cannot become blank when screening and final disagree',async()=>{
+ const {options}=fixture(30,async request=>{
+   if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request),false);
+   if(request.schema===CONTENT_VERIFY_SCHEMA)return verified(supplied(request));
+   return {pages:[page(0,{has_answers:false})],papers:[]};
+ });
+ const result=await compareContentFirstQuestionBank(options);assert.equal(result.pages[0].has_answers,true);assert.equal(result.pages[0].paper_id,0);assert.deepEqual(result.blank_conflict_pages,[1]);
+});
+test('overlapping content support with conflicting section classifications remains ambiguous',async()=>{
+ const {options}=fixture(30,async request=>{
+   if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request));
+   if(request.schema===CONTENT_VERIFY_SCHEMA){const evidence=verified(supplied(request));for(const candidate of evidence.candidates)if(candidate.paper_id!==1)candidate.support[0].section='A';return evidence;}
+   return anchoredMatch(1);
+ });
+ const result=await compareContentFirstQuestionBank(options);assert.equal(result.papers[0].alternatives.length,29);assert.equal(result.papers[0].confidence,'low');
+});
+test('each answer page needs its own verified anchors and labels represented in the final finding',async()=>{
+ const {options}=fixture(30,async request=>{
+   if(request.schema===CONTENT_SCREEN_SCHEMA){const result=screened(supplied(request),supplied(request));result.pages.push({page:2,has_answers:true});return result;}
+   if(request.schema===CONTENT_VERIFY_SCHEMA){const evidence=verified(supplied(request));evidence.pages.push({page:2,has_answers:true});for(const candidate of evidence.candidates)candidate.support.push({section:'B',answer_pages:[2],master_pages:[2],question_labels:['5B'],correspondence:'A second answer matches a different contained question.'});return evidence;}
+   const result=anchoredMatch(1);result.pages.push({...page(1),page:2,questions:['5B']});return result;
+ },{content:[...content,{...original,image_url:'data:image/png;base64,c2Vjb25k'}],answerPageCount:2,indexCache:createContentBankIndex({extractPdf:bytes=>extraction([`${bytes} page1`,`${bytes} page2`])})});
+ await assert.rejects(compareContentFirstQuestionBank(options),/verified content support/);
 });

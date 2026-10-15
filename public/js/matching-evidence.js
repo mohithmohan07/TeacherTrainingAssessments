@@ -71,13 +71,16 @@ export function bankComparisonEvidence(summary) {
     batchCount: count(summary.batch_count),
     finalistIds: ids(summary.finalist_ids),
     finalCompared: flag(summary.final_compared),
-    phase: ['indexing', 'screening', 'final_comparison', 'profile_fallback'].includes(summary.phase) ? summary.phase : null,
+    phase: ['indexing', 'screening', 'final_comparison', 'full_pdf_verification', 'profile_fallback'].includes(summary.phase) ? summary.phase : null,
     completedCandidates: idCount(summary.completed_candidate_ids) ?? idCount(screenedIds),
     reusedCandidates: count(summary.reused_candidate_count),
     coverageMode: summary.coverage_mode === 'content_first' ? 'content_first' : null,
     textScreenedCandidates: idCount(summary.text_screened_ids),
     pdfScreenedCandidates: idCount(summary.full_pdf_screened_ids),
     fullPdfVerifiedIds: ids(summary.full_pdf_verified_ids),
+    finalComparisonMode: ['joint_full_pdf','batched_full_pdf_then_joint_evidence'].includes(summary.final_comparison_mode) ? summary.final_comparison_mode : null,
+    verificationBatchCount: count(summary.verification_batch_count),
+    schemaRepairCount: count(summary.schema_repair_count),
     ambiguousEquivalentIds: ids(summary.ambiguous_equivalent_ids),
   };
 }
@@ -154,6 +157,8 @@ function bankComparisonView(bank) {
     bank.coverageMode === 'content_first' ? [
       h('p', {}, `Papers screened using complete text: ${bank.textScreenedCandidates ?? NOT_RECORDED}. Papers screened as full PDFs: ${bank.pdfScreenedCandidates ?? NOT_RECORDED}. Text screening is not full-PDF inspection. Final contenders require a separate full-PDF comparison; this still does not clear ambiguity or identity review.`),
       listView('Full-PDF verified finalist master IDs', bank.fullPdfVerifiedIds),
+    bank.finalComparisonMode === 'batched_full_pdf_then_joint_evidence' ? h('p',{},`All contenders were verified in ${bank.verificationBatchCount} bounded full-PDF batches; the joint decision reconciled their evidence with original scans. The full PDFs were not jointly attached to that last request.`) : null,
+    bank.schemaRepairCount !== null ? h('p',{},`Bounded screening schema repairs: ${bank.schemaRepairCount}.`) : null,
       listView('Content-equivalent master IDs (ambiguity retained)', bank.ambiguousEquivalentIds),
     ] : null,
     bank.phase ? h('p', {}, `Last recorded phase: ${bank.phase}.`) : null,
