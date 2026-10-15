@@ -126,7 +126,7 @@ export async function answerLanguage({ paper, response }, requestOptions = {}) {
 // time, so the pages of such a batch are then sent one at a time: one page it
 // will not read no longer keeps it from reading the others. The pages it
 // still will not read are left for OpenAI to read from the scans.
-export async function readAnswers(files, languages, { includeDetails = false } = {}) {
+export async function readAnswers(files, languages, { includeDetails = false, requestPolicy } = {}) {
   const why = languages.length ? `The answers are in ${listed(languages)}, so` : 'The answers are not all in English, so';
   const needsGemini = files.some((file) => GEMINI_IMAGE_TYPES.has(file.mime_type));
   if (needsGemini && !geminiConfigured()) {
@@ -169,14 +169,14 @@ export async function readAnswers(files, languages, { includeDetails = false } =
   }
   for (const batch of batches) {
     try {
-      readInto(details, batch, await readBatch(batch, pages.length));
+      readInto(details, batch, await readBatch(batch, pages.length, requestPolicy));
     } catch (error) {
       if (!error.unusable) throw failed(error);
       if (batch.length === 1) continue;
       await Promise.all(
         batch.map(async (page) => {
           try {
-            readInto(details, [page], await readBatch([page], pages.length));
+            readInto(details, [page], await readBatch([page], pages.length, requestPolicy));
           } catch (pageError) {
             if (!pageError.unusable) throw failed(pageError);
           }
@@ -195,7 +195,7 @@ export async function readAnswers(files, languages, { includeDetails = false } =
   return includeDetails ? { texts, pages: details } : texts;
 }
 
-async function readBatch(batch, total) {
+async function readBatch(batch, total, requestPolicy) {
   const first = batch[0].number;
   return generateJson({
     prompt: `${READING_PROMPT}\n\n${batch.length === 1 ? `This is page ${first}` : `These are pages ${batch.map((page) => page.number).join(', ')}`} of ${pagesOf(total)}. Keep these exact page numbers, including any gaps.`,
@@ -203,6 +203,8 @@ async function readBatch(batch, total) {
     schema: READING_SCHEMA,
     timeoutMs: 90_000,
     maxRetries: 1,
+    requestPolicy,
+    task: 'read_answer_pages',
     nothing: (reason) => `Gemini did not read the answer pages (${reason}). Press Evaluate to try again.`,
     garbled: 'Gemini sent back a reading of the answers that was cut off or garbled. Press Evaluate to try again.',
   });

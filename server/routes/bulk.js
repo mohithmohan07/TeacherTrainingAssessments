@@ -1,12 +1,13 @@
 // Answer papers uploaded together as PDFs, matched, checked and filed (bulk.js).
 import express from 'express';
 import db from '../db.js';
-import { uploadPdfPages } from '../uploads.js';
+import { importMatchingBank, matchingBankInfo } from '../matching-bank.js';
+import { uploadPack, uploadPdfPages } from '../uploads.js';
 import { discardUploads } from '../scans.js';
 import { testFor } from '../results.js';
 import {
   addItem, evaluateSittings, evaluateUnmarked, markingState, matchAll, choosePageSections, choosePapers, chooseTeacher, fileReady, itemFor, presentItem, presentItems, queueSort, removeItem,
-  unmarkedSittings, queueFinalizations, finalizationState, finalizationOutcome,
+  unmarkedSittings, queueFinalizations, finalizationState, finalizationOutcome, matchingPlan,
 } from '../bulk.js';
 
 import { outcomeHtml, outcomeFilename } from '../outcome-artifacts.js';
@@ -24,7 +25,7 @@ function schoolAndTest(source) {
 router.get('/', (req, res) => {
   const { school, test } = schoolAndTest(req.query);
   if (!school) return res.status(400).json({ error: 'Pick a school.' });
-  res.json({ school: { id: school.id, name: school.name }, test: { id: test.id, name: test.name }, items: presentItems(school.id, test.id), finalizations: finalizationState(school.id, test.id) });
+  res.json({ school: { id: school.id, name: school.name }, test: { id: test.id, name: test.name }, items: presentItems(school.id, test.id), selected_bank: matchingBankInfo(school.id,test.id), finalizations: finalizationState(school.id, test.id) });
 });
 
 // One PDF's pages, as pictures, with the PDF's file name. Nothing is
@@ -41,6 +42,19 @@ router.post('/', uploadPdfPages.array('pages', 120), (req, res) => {
   res.status(201).json(presentItem(itemFor(id)));
 });
 
+// Additive source-confirmed bank import; activation is atomic with the import.
+router.get('/matching-bank', (req,res) => {
+  const {school,test}=schoolAndTest(req.query);
+  if(!school) return res.status(400).json({error:'Pick a school.'});
+  res.json({bank:matchingBankInfo(school.id,test.id)});
+});
+router.post('/matching-bank', uploadPack.single('file'), async (req,res,next) => {
+  const {school,test}=schoolAndTest(req.body);
+  if(!school || !req.file) return res.status(400).json({error:'Choose the school, test and confirmed bank ZIP.'});
+  try { res.json(await importMatchingBank(req.file.buffer,{schoolId:school.id,testId:test.id,expectedBankId:req.body.expected_bank_id || null})); }
+  catch(error) { if(error.status) return res.status(error.status).json({error:error.message}); next(error); }
+});
+
 // Changes made on the review screen: the teacher, the paper for a section, or
 // the section a page belongs to.
 router.put('/:id', (req, res) => {
@@ -52,7 +66,7 @@ router.put('/:id', (req, res) => {
     item = itemFor(item.id);
   }
   if (req.body.papers) {
-    const problem = choosePapers(item, req.body.papers);
+    const problem = choosePapers(item, req.body.papers, req.body.profile_confirmations ?? {});
     if (problem) return res.status(400).json({ error: problem });
   }
   if (Array.isArray(req.body.pages)) {
@@ -65,10 +79,21 @@ router.put('/:id', (req, res) => {
 
 // "Find the question papers": every PDF of the test not matched yet, or whose
 // matching failed, is matched at once.
+// Metadata-only cost/call preview; no matching, enqueueing or provider traffic.
+router.get('/match-plan', (req, res) => {
+  const { school, test } = schoolAndTest(req.query);
+  if (!school) return res.status(400).json({ error: 'Pick a school.' });
+  res.json(matchingPlan(school.id, test.id, null, { includeReady: req.query.scope === 'all_scans' }));
+});
+
 router.post('/match', (req, res) => {
   const { school, test } = schoolAndTest(req.body);
   if (!school) return res.status(400).json({ error: 'Pick a school.' });
-  const started = matchAll(school.id, test.id);
+  const includeReady = req.body.scope === 'all_scans';
+  if (includeReady && presentItems(school.id, test.id).some(item => ['waiting', 'running'].includes(item.sort_status))) return res.status(409).json({ error: 'Wait for the current queue to finish before comparing all scans.' });
+  const plan = matchingPlan(school.id, test.id, null, { includeReady });
+  if (plan.packet_count > 1 && req.body.plan_id !== plan.id) return res.status(409).json({ error: 'Review the current matching plan before starting this batch. Nothing was queued.', plan });
+  const started = matchAll(school.id, test.id, { includeReady });
   res.json({ started, items: presentItems(school.id, test.id) });
 });
 

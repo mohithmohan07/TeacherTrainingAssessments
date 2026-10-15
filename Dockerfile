@@ -14,6 +14,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --omit=optional
 
 COPY server ./server
+COPY scripts ./scripts
 COPY public ./public
 COPY scanner-helper ./scanner-helper
 
@@ -43,4 +44,4 @@ RUN mkdir -p /data
 
 EXPOSE 8080
 
-CMD ["node", "server/index.js"]
+CMD ["node", "scripts/safe-start.js"]

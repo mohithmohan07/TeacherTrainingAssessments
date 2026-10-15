@@ -53,7 +53,7 @@ test('production server starts with isolated data, reports its revision and prot
   const env = Object.fromEntries(['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'SystemRoot', 'SYSTEMROOT', 'WINDIR']
     .filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]));
   Object.assign(env, { NODE_ENV: 'production', DATA_DIR: dataDir, PORT: String(port), APP_PASSWORD: password,
-    APP_REVISION: revision, SESSION_SECRET: 'synthetic-startup-session-secret' });
+    APP_REVISION: revision, APP_BUILD_FINGERPRINT: 'synthetic-build-fingerprint', SESSION_SECRET: 'synthetic-startup-session-secret' });
   const child = spawn(process.execPath, ['server/index.js'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '', spawnError;
   const exited = new Promise((resolve) => { child.once('exit', resolve); child.once('error', (error) => { spawnError = error; resolve(); }); });
@@ -79,7 +79,7 @@ test('production server starts with isolated data, reports its revision and prot
     await delay(50);
   }
   assert.equal(health?.status, 200, `Server did not become healthy:\n${output}`);
-  assert.deepEqual(JSON.parse(health.text), { ok: true, revision });
+  assert.deepEqual(JSON.parse(health.text), { ok: true, revision, build_fingerprint: 'synthetic-build-fingerprint' });
   const denied = await localRequest(port, '/api/schools');
   assert.equal(denied.status, 401);
   const page = await localRequest(port, '/');

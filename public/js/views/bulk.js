@@ -10,6 +10,8 @@ import { api, bulkApi, papersApi, schoolsApi, teachersApi, testsApi } from '../a
 import { loadPdfjs, pagesOf } from '../evidence.js';
 import { paperFacts } from '../paper-picker.js';
 import { chooseMarking } from '../marking-choice.js';
+import { sourceIdentityEvidence } from '../identity-evidence.js';
+import { questionMatchEvidenceDrawer } from '../matching-evidence.js';
 
 // Where a page can go. A teacher who teaches two subjects may have sat a
 // Section B paper for each, so Section B can hold a second and third paper.
@@ -23,6 +25,32 @@ const PLACES = [
 ];
 const placesFor = (item) => PLACES.filter((p) => p.value !== 'B3' || item.pages.some((page) => page.section === 'B2' || page.section === 'B3'));
 const pageCount = (n) => `${n} page${n === 1 ? '' : 's'}`;
+
+// Isolated for interaction tests; only the explicit button invokes a write.
+export function profileReviewCard(item, section, sorting, change) {
+  const key = section.key;
+  return section.cross_profile_review ? h('div', { class: 'hint' },
+        h('p', {}, section.cross_profile_review.explanation),
+        h('a', { href: section.cross_profile_review.master_url, target: '_blank', rel: 'noopener' }, 'Review full proposed master'),
+        h('p', {}, 'This reviewed exception supports manual matching and filing only. Automatic Finalize assessments is held for submissions with this acknowledgement.'),
+        section.cross_profile_review.acknowledged
+          ? h('p', {}, 'Administered master confirmed after reviewing the profile difference. Original profile and source evidence are unchanged.')
+          : h('button', { class: 'btn btn-sm', type: 'button', disabled: sorting, onclick: async (event) => {
+              const button = event.currentTarget;
+              button.disabled = true;
+              try { await change(item, { papers: { [key]: section.cross_profile_review.paper_id },
+                profile_confirmations: { [key]: section.cross_profile_review.token } }); }
+              finally { if (button.isConnected) button.disabled = false; }
+            } }, 'Confirm administered master despite profile difference')) : null;
+}
+
+export function confirmedBankSummary(bank) {
+  return bank ? h('div', {class:'hint'},
+    h('p',{},`Confirmed bank: ${bank.source_file_count} source files · ${bank.canonical_pdf_count} distinct PDFs`),
+    h('a',{href:bank.source_root,target:'_blank',rel:'noopener'},'Open confirmed source folder'),
+    h('p',{style:'overflow-wrap:anywhere'},`Manifest SHA-256: ${bank.id}`))
+    : h('p',{class:'hint'},'Bank: current application library. No confirmed source folder selected.');
+}
 
 /* ------------------------------------------------------ PDFs to pictures */
 
@@ -80,7 +108,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
   const test = tests.find((t) => String(t.id) === query.get('test')) ?? tests[0];
   const [teachers, library] = await Promise.all([teachersApi.list({ school_id: school.id }), papersApi.list()]);
 
-  const state = { items: [], finalizations: [], uploads: [], filed: null, marks: null, busy: false };
+  const state = { selectedBank: null, items: [], finalizations: [], uploads: [], filed: null, marks: null, busy: false };
   const boardLink = `#/assessments?school=${school.id}&test=${test.id}`;
 
   const uploadBox = h('div', {});
@@ -202,6 +230,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
 
   async function refresh() {
     const data = await bulkApi.list(school.id, test.id);
+    state.selectedBank = data.selected_bank ?? null;
     state.items = data.items;
     state.finalizations = data.finalizations ?? [];
     drawReview();
@@ -294,28 +323,49 @@ export async function renderBulk(root, query = new URLSearchParams()) {
   }
 
   // "Find the question papers": every PDF not matched yet is matched at once.
-  async function matchAll() {
+  async function matchAll(includeReady = false) {
+    const scope = includeReady ? 'all_scans' : 'incomplete_content';
     state.busy = true;
     drawReview();
     try {
-      const result = await bulkApi.match(school.id, test.id);
+      const plan = await bulkApi.matchPlan(school.id, test.id, scope);
+      if (plan.packet_count > 1 && !confirmAction(`${includeReady ? 'Compare ALL scans, including currently Ready items. Existing identity and filing safeguards remain active. ' : ''}${plan.selected_bank ? `Confirmed bank: ${plan.selected_bank.source_file_count} source files, ${plan.selected_bank.canonical_pdf_count} distinct PDFs. Manifest SHA-256: ${plan.selected_bank.id}. ` : 'Bank: current application library (no confirmed folder selected). '}Match contents of ${plan.packet_count} PDFs (${plan.source_pages} pages)? About ${plan.nominal_model_calls} base model calls are estimated. Every supplied paper is considered using cached complete text or full PDFs, followed by full-master verification. Identity review stays separate; retries share the same cap. Each packet stops after ${Math.round(plan.limits.packetTimeoutMs / 60000)} minutes or ${plan.limits.maxProviderAttempts} provider attempts. ${plan.concurrency} packets run at once. Charges depend on actual tokens; no dollar estimate is available. This does not file or grade responses.`)) return;
+      const result = await bulkApi.match(school.id, test.id, plan.id, scope);
       state.items = result.items;
     } catch (error) {
       toast(error.message, 'error');
+    } finally {
+      state.busy = false;
+      drawReview();
+      schedulePoll();
     }
-    state.busy = false;
-    drawReview();
-    schedulePoll();
+  }
+
+  async function importConfirmedBank(file) {
+    if (!file) return;
+    state.busy=true; drawReview();
+    try {
+      const form=new FormData(); form.append('file',file); form.append('school_id',school.id); form.append('test_id',test.id);
+      if(state.selectedBank) form.append('expected_bank_id',state.selectedBank.id);
+      const bank=await bulkApi.importMatchingBank(form);
+      toast(`Confirmed bank activated: ${bank.source_file_count} sources, ${bank.canonical_pdf_count} distinct PDFs. Existing masters were not overwritten.`,'success');
+      await refresh();
+    } catch(error) {toast(error.message,'error');}
+    finally {state.busy=false; drawReview();}
   }
 
   function matchCard() {
-    const unmatched = state.items.filter((item) => ['new', 'failed'].includes(item.sort_status)).length;
+    const unmatched = state.items.filter(item => ['new', 'failed', 'needs_teacher', 'done'].includes(item.sort_status) && !item.ready && item.content_match?.status !== 'complete').length;
     const matching = state.items.filter((item) => ['waiting', 'running'].includes(item.sort_status)).length;
     const waitForUploads = uploading();
     return h(
       'div',
       { class: 'card' },
-      h('h2', {}, 'Optional: match papers manually'),
+      h('h2', {}, 'Match answer contents'),
+      confirmedBankSummary(state.selectedBank),
+      h('label',{class:'hint'},'Import verified bank ZIP ',h('input',{type:'file',accept:'.zip',disabled:waitForUploads || state.busy || matching > 0,onchange:event=>importConfirmedBank(event.target.files?.[0])})),
+      h('p', { class: 'hint' }, 'Compare answer content with every supplied question paper. Identity review remains separate.'),
+      h('button', { class: 'btn', type: 'button', disabled: waitForUploads || state.busy || matching > 0 || !state.items.length, onclick: () => matchAll(true) }, `Compare contents of all ${state.items.length} scans`),
       matching
         ? h('div', { class: 'marking-state' }, h('span', { class: 'spinner' }), `Matching ${matching} PDF${matching === 1 ? '' : 's'} at once. You can leave this page; matching carries on.`)
         : null,
@@ -323,20 +373,20 @@ export async function renderBulk(root, query = new URLSearchParams()) {
         ? [
             h('p', { class: 'hint' }, waitForUploads
               ? 'Wait until every PDF has uploaded, then match them all at once.'
-              : 'Every PDF is matched at the same time: its teacher, which pages answer which section, and the question paper for each section.'),
+              : 'Answer contents are compared in a bounded queue without using teacher profile fields to exclude papers.'),
             h(
               'button',
-              { class: 'btn btn-primary', type: 'button', disabled: waitForUploads || state.busy, onclick: matchAll },
+              { class: 'btn btn-primary', type: 'button', disabled: waitForUploads || state.busy, onclick: () => matchAll(false) },
               waitForUploads
                 ? 'Find the question papers'
                 : unmatched === state.items.length
                   ? `Find the question papers for all ${unmatched}`
-                  : `Find the question papers for the ${unmatched} not matched yet`
+                  : `Match contents for the ${unmatched} still needing comparison`
             ),
           ]
         : matching
           ? null
-          : h('p', { class: 'hint', style: 'margin:0' }, `All ${state.items.length} PDF${state.items.length === 1 ? ' is' : 's are'} matched. Check a few below, then file them.`)
+          : h('p', { class: 'hint', style: 'margin:0' }, 'No incomplete content comparisons remain in this selection. Review ambiguity and identity separately before filing.')
     );
   }
 
@@ -419,7 +469,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
                     `${state.items.length} PDF${state.items.length === 1 ? '' : 's'}`,
                     ready ? `${ready} ready` : '',
                     sorting ? `${sorting} being matched` : '',
-                    unmatched ? `${unmatched} not matched yet` : '',
+                    unmatched ? `${unmatched} still needing a match` : '',
                     need ? `${need} need${need === 1 ? 's' : ''} you` : '',
                   ].filter(Boolean).join(' · ')
                 : 'Answer papers you upload appear here.'
@@ -468,20 +518,22 @@ export async function renderBulk(root, query = new URLSearchParams()) {
       h(
         'div',
         { class: 'card-head-row' },
-        h('div', { class: 'bulk-file' }, h('strong', {}, item.file_name), h('span', { class: 'hint' }, pageCount(item.pages.length)), status),
+        h('div', { class: 'bulk-file' }, h('strong', {}, item.file_name), h('span', { class: 'hint' }, pageCount(item.pages.length)), status,
+          h('span', { class: 'badge' }, `Content Match: ${item.content_match?.status === 'complete' ? 'comparison complete' : item.content_match?.status === 'running' ? 'comparing' : item.content_match?.status === 'failed' ? 'incomplete' : item.content_match?.status === 'stale' ? 'sources changed' : 'not started'}`),
+          h('span', { class: 'badge' }, `Identity Review: ${item.identity_review?.status === 'verified' ? 'verified' : 'needed before filing'}`)),
         h(
           'div',
           { class: 'page-actions' },
           h('button', { class: 'btn btn-sm', type: 'button', disabled: !item.pages.some((p) => p.section), onclick: () => preview(item) }, 'Preview'),
           sorting
             ? null
-            : h('button', { class: 'btn btn-sm', type: 'button', title: 'Find this PDF’s teacher, sections and question papers', onclick: async () => {
+            : h('button', { class: 'btn btn-sm', type: 'button', title: 'Compare this PDF’s answer contents with every supplied question paper', onclick: async () => {
                 try {
                   replaceItem(await bulkApi.sort(item.id));
                 } catch (error) {
                   toast(error.message, 'error');
                 }
-              } }, unmatched ? 'Match' : 'Match again'),
+              } }, unmatched ? 'Match contents' : 'Compare contents again'),
           h('button', { class: 'btn btn-sm btn-danger', type: 'button', onclick: async () => {
             if (!confirmAction(`Remove ${item.file_name}? Its pages are deleted and nothing is filed.`)) return;
             try {
@@ -494,6 +546,24 @@ export async function renderBulk(root, query = new URLSearchParams()) {
         )
       ),
       item.sort_error ? h('p', { class: 'notice' }, item.sort_error) : null,
+      item.matching_metrics ? h('details', { class: 'hint' }, h('summary', {}, 'Matching usage'),
+        h('p', {}, `${item.matching_metrics.attempts} of ${item.matching_metrics.limits.maxProviderAttempts} permitted provider requests; ${Math.round(item.matching_metrics.elapsedMs / 1000)} seconds elapsed. ${item.matching_metrics.usage.totalTokens === null ? 'Token usage not reported yet.' : `${item.matching_metrics.usage.totalTokens} reported tokens (may exclude attempts without usage data).`} ${item.compared_candidates === null ? '' : `${item.compared_candidates} question papers available; comparison coverage is shown below.`}`)) : null,
+      item.pages.some(page => page.identity) ? h('details', { class: 'hint' },
+        h('summary', {}, 'Source identity evidence'),
+        h('p', {}, 'Read-only source observations for operator review. These details are not included in teacher reports.'),
+        item.pages.map(page => {
+          const evidence = sourceIdentityEvidence(page);
+          return h('details', { 'data-source-identity-page': page.position },
+            h('summary', {}, `Source page ${evidence.page}`), h('p', {}, evidence.summary),
+            evidence.guard ? h('p', { style: 'white-space:pre-line' }, evidence.guard) : null,
+            evidence.crop ? h('div', {}, h('p', {}, `Independent verification crop from this same source image: x=${evidence.crop.x}, y=${evidence.crop.y}, width=${evidence.crop.width}, height=${evidence.crop.height}.`),
+              h('div', { style: `position:relative;overflow:hidden;width:100%;max-width:900px;aspect-ratio:${evidence.crop.width}/${evidence.crop.height}` },
+                h('img', { src: page.src, alt: `Source page ${evidence.page} identity crop`, loading: 'lazy',
+                  style: `position:absolute;max-width:none;width:${100 * evidence.crop.sourceWidth / evidence.crop.width}%;left:${-100 * evidence.crop.x / evidence.crop.width}%;top:${-100 * evidence.crop.y / evidence.crop.height}%` }))) : null,
+            evidence.fields.map(field => h('div', {}, h('p', {}, `${field.label}: accepted ${field.accepted}; observed ${field.observed}; origin ${field.origin}. ${field.reason}`),
+              field.verification ? h('p', {}, `Independent visual check: ${field.verification.status}; field label ${field.verification.label}; adjacent text ${field.verification.adjacent}. ${field.verification.reason}`) : null)));
+        })) : null,
+      questionMatchEvidenceDrawer(item.pages, item.bank_comparison, { content_match: item.content_match, identity_review: item.identity_review }),
       h(
         'div',
         { class: 'bulk-teacher' },
@@ -546,6 +616,7 @@ export async function renderBulk(root, query = new URLSearchParams()) {
           : item.sort_status === 'new' ? 'Not matched yet' : sorting ? 'Matching…' : 'No pages: not sat'
       ),
       paperSelect,
+      profileReviewCard(item, section, sorting, change),
       section.requires_confirmation && section.paper && pages.length
         ? h('button', { class: 'btn btn-sm', type: 'button', disabled: sorting, onclick: async (event) => {
             const button = event.currentTarget;

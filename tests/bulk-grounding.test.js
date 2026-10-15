@@ -121,9 +121,10 @@ test('candidate filtering rejects wrong levels, sections, subjects and boards re
   assert.deepEqual(bulk.candidatePapers(teacher, school, library).map((p) => p.id).sort(), [1, 2, 4]);
 });
 
-test('named administered master remains a candidate below the ranking cap', () => {
+test('every compatible master remains a candidate regardless of ranking', () => {
   const variants = Array.from({ length: 9 }, (_, i) => paper(i + 30, { priority: 20 - i }));
-  assert.equal(bulk.candidatePapers(teacher, school, variants).some((p) => p.id === 38), false);
+  assert.equal(bulk.candidatePapers(teacher, school, variants).length, 9);
+  assert.equal(bulk.candidatePapers(teacher, school, variants).some((p) => p.id === 38), true);
   assert.equal(bulk.candidatePapers(teacher, school, variants, [38]).some((p) => p.id === 38), true);
   assert.equal(bulk.namedMaster(variants[8].title, variants).paper.id, 38);
   assert.equal(bulk.namedMaster('Mathematics', variants).ambiguous, true);
@@ -145,6 +146,43 @@ test('weak, ambiguous, incompatible and unseen paper choices are not auto-select
   assert.equal(view(id).ready, false);
 });
 
+test('unresolved master retains its explanation without claiming an unsupplied paper was selected', () => {
+  const reason = 'None of the supplied science masters contains these response questions.';
+  const { id } = seedReady({ sorted: {
+    pages: [sortPage(1, { paper_id: 0 }), sortPage(2, { paper_id: 0 })],
+    papers: [summary({ paper_id: 0, confidence: 'low', reason, alternatives: [1, 2] })],
+  } });
+  const shown = view(id);
+  for (const page of shown.pages) {
+    assert.equal(page.match.paper_id, null);
+    assert.equal(page.match.summary_count, 1);
+    assert.equal(page.match.reason, reason);
+    assert.equal(page.match.confidence, 'low');
+    assert.deepEqual(page.match.alternatives, [1, 2]);
+    assert.match(page.match.issues.join(' '), /master remains unresolved/);
+    assert.doesNotMatch(page.match.issues.join(' '), /selected paper was not supplied/);
+  }
+  assert.equal(shown.ready, false);
+  assert.equal(JSON.parse(bulk.itemFor(id).papers).B, null);
+  assert.equal(bulk.fileReady(1, 1, [id]).filed.length, 0);
+});
+
+test('unresolved master cannot become ready from a high-confidence sentinel summary', () => {
+  const { id } = seedReady({ sorted: {
+    pages: [sortPage(1, { paper_id: 0 }), sortPage(2, { paper_id: 0 })],
+    papers: [summary({ paper_id: 0 })],
+  } });
+  assert.equal(view(id).ready, false);
+  assert.equal(JSON.parse(bulk.itemFor(id).papers).B, null);
+  assert.equal(bulk.fileReady(1, 1, [id]).filed.length, 0);
+});
+
+test('positive unseen master still reports missing full comparison evidence', () => {
+  const { id } = seedReady({ extra: { candidate_paper_ids: [2] } });
+  assert.match(view(id).pages[0].match.issues.join(' '), /selected paper was not supplied in full/);
+  assert.equal(view(id).ready, false);
+});
+
 test('unknown Section B page is not inherited into the preceding paper', () => {
   const { id } = seedReady({ sorted: { pages: [sortPage(1), sortPage(2, { paper_id: 0 })], papers: [summary()] } });
   const shown = view(id);
@@ -159,7 +197,7 @@ test('source-named master rejects alternate papers even when manually selected',
   assert.equal(view(id).ready, false);
   bulk.choosePapers(bulk.itemFor(id), { B: 1 });
   assert.equal(view(id).ready, false);
-  assert.match(view(id).problems.join(' '), /exact, uniquely identified master/);
+  assert.match(view(id).problems.join(' '), /disagrees with the paper title/);
   bulk.choosePapers(bulk.itemFor(id), { B: 2 });
   assert.equal(view(id).ready, true);
 });
@@ -341,4 +379,300 @@ test('marking status includes parsed stage progress', () => {
   const id = addAssessment();
   db.prepare('UPDATE assessments SET evaluation_progress = ? WHERE id = ?').run(JSON.stringify({ stage: 'response', completed: ['paper'] }), id);
   assert.deepEqual(bulk.markingState([id])[0].progress, { stage: 'response', completed: ['paper'] });
+});
+
+
+test('screenshot descriptive headings accept verified semantic question matches', () => {
+  for (const title of ['Computer knowledge; Digital skills; Interpersonal & instructional communication skills', 'Knowledge, pedagogy, classroom management & child psychology']) {
+    const { id } = seedReady({ looks: [pageLook(1, teacher, { paper_title_written: title }), pageLook(2)],
+      sorted: { pages: [sortPage(1, { header_evidence: { status: 'descriptive', reason: 'This topic heading describes the question content; the distinctive scenario and question labels match the supplied master.' } }), sortPage(2)], papers: [summary()] } });
+    assert.equal(view(id).ready, true, view(id).problems.join(' '));
+    assert.equal(JSON.parse(bulk.itemFor(id).papers).B, 1);
+  }
+});
+
+test('an unresolved or contradictory source heading still requires evidence', () => {
+  for (const header_evidence of [undefined, { status: 'unresolved', reason: 'Version could not be read.' }, { status: 'conflict', reason: 'The source explicitly names a different version.' }, { status: 'descriptive', reason: '' }]) {
+    const { id } = seedReady({ looks: [pageLook(1, teacher, { paper_title_written: 'Unidentified version 2025' }), pageLook(2)],
+      sorted: { pages: [sortPage(1, { header_evidence }), sortPage(2)], papers: [summary()] } });
+    assert.equal(view(id).ready, false);
+  }
+});
+
+test('semantic heading evidence cannot override a different exact master or follow a manual paper change', () => {
+  const evidence = { status: 'descriptive', reason: 'Generic heading.' };
+  assert.match(bulk.headerMatchProblem(library[1].title, 1, library, evidence), /disagrees/);
+  const { id } = seedReady({ looks: [pageLook(1, teacher, { paper_title_written: 'Subject knowledge and pedagogy' }), pageLook(2)],
+    sorted: { pages: [sortPage(1, { header_evidence: evidence }), sortPage(2)], papers: [summary()] } });
+  assert.equal(view(id).ready, true);
+  bulk.choosePapers(bulk.itemFor(id), { B: 2 });
+  assert.equal(view(id).ready, false);
+});
+
+test('question-label typography and local digits do not invalidate a semantic match', () => {
+  for (const label of ['Q5 (a)', 'Question 5 A', '５Ａ', '೫A', '५(a)']) {
+    const { id } = seedReady({ sorted: { pages: [sortPage(1, { questions: [label] }), sortPage(2)], papers: [summary()] } });
+    assert.equal(view(id).ready, true, label);
+  }
+  assert.notEqual(bulk.normalizeQuestionLabel('5A'), bulk.normalizeQuestionLabel('5B'));
+  assert.notEqual(bulk.normalizeQuestionLabel('5A'), bulk.normalizeQuestionLabel('15A'));
+  for (const label of ['5(1)', '5.1', '5-1', '5 1']) assert.notEqual(bulk.normalizeQuestionLabel(label), bulk.normalizeQuestionLabel('51'));
+});
+
+test('unknown teacher metadata does not exclude compatible zero-score candidates', () => {
+  const unknown = { ...teacher, grade: '', subjects: '' };
+  assert.equal(bulk.candidatePapers(unknown, school, [paper(90)]).length, 1);
+});
+
+test('missing chosen paper is described accurately instead of claiming missing sections', () => {
+  assert.match(bulk.paperCompatibilityProblem(null, teacher, school, 'A'), /No question paper has been matched/);
+  assert.doesNotMatch(bulk.paperCompatibilityProblem(null, teacher, school, 'A'), /has no Section/);
+});
+
+
+test('one match-all action retries blocked matched uploads but excludes already-ready and retained outcomes', () => {
+  const blocked = seedReady({ looks: [pageLook(1, teacher, { paper_title_written: 'Generic section heading' }), pageLook(2)] });
+  const ready = seedReady();
+  const retained = seedReady();
+  db.prepare("UPDATE bulk_items SET sort_status = 'finalized' WHERE id = ?").run(retained.id);
+  const queued = [];
+  bulk.matchAll(1, 1, { queue: (id) => queued.push(id) });
+  assert.ok(queued.includes(blocked.id));
+  assert.ok(!queued.includes(ready.id));
+  assert.ok(!queued.includes(retained.id));
+});
+
+
+test('sorter header conflicts block even when initial OCR missed the header or its title matches exactly', () => {
+  for (const title of ['', library[0].title]) {
+    for (const status of ['conflict', 'unresolved']) {
+      const { id } = seedReady({ looks: [pageLook(1, teacher, { paper_title_written: title }), pageLook(2)],
+        sorted: { pages: [sortPage(1, { header_evidence: { status, reason: 'A distinguishing version identifier conflicts with the proposed master.' } }), sortPage(2)], papers: [summary()] } });
+      assert.equal(view(id).ready, false);
+      assert.match(JSON.parse(bulk.itemFor(id).result).source_pages[0].issues.join(' '), /conflicting or unresolved/);
+    }
+  }
+});
+
+
+test('earlier exact master evidence survives a later generic heading', () => {
+  const { id, pages, result } = seedReady();
+  result.identity.pages[0].paper_title_written = 'General subject knowledge';
+  result.identity.pages[0].previous_master_titles = [library[1].title];
+  bulk.saveSort(id, teacher, school, library, pages, { pages: [sortPage(1, { header_evidence: { status: 'descriptive', reason: 'Generic current heading.' } }), sortPage(2)], papers: [summary()] }, result);
+  assert.equal(view(id).ready, false);
+  assert.match(JSON.parse(bulk.itemFor(id).result).source_pages[0].issues.join(' '), /earlier source observation/);
+  bulk.choosePapers(bulk.itemFor(id), { B: 1 });
+  assert.equal(view(id).ready, false);
+  assert.match(view(id).problems.join(' '), /earlier source observation/);
+});
+
+test('24-page packet resolves descriptive headings against a combined A/C master and subject-specific B', () => {
+  const puTeacher = { ...teacher, grade: 'I & II PU', subjects: 'Electronics' };
+  const combined = paper(91, { title: 'PU Communication Skills and Computer Literacy', sections: 'A,C', levels: 'senior-secondary', subject: '' });
+  const specialist = paper(92, { title: 'PU Electronics Knowledge and Pedagogy', levels: 'senior-secondary', subject: 'Electronics' });
+  const bank = [combined, specialist];
+  const pages = Array.from({ length: 24 }, (_, i) => ({ id: 20000 + i, position: i + 1 }));
+  const looks = pages.map((_, i) => pageLook(i + 1, puTeacher, { paper_title_written: i === 0
+    ? 'Computer knowledge; Digital skills; Interpersonal & instructional communication skills'
+    : i === 6 ? 'Knowledge, pedagogy, classroom management & child psychology' : '' }));
+  const found = pages.map((_, i) => {
+    const section = i < 6 ? 'A' : i < 18 ? 'B' : 'C';
+    const question = section === 'A' ? '1A' : section === 'B' ? '5A' : '11C';
+    return sortPage(i + 1, { section, paper_id: section === 'B' ? 92 : 91, questions: [question],
+      header_evidence: { status: i === 0 || i === 6 ? 'descriptive' : 'not_present', reason: i === 0 || i === 6 ? 'The heading describes these sections, while the concrete answer scenarios match the supplied questions.' : '' } });
+  });
+  const result = resultFor({ file_name: 'Combined packet.pdf' }, pages, looks, { candidate_paper_ids: [91, 92] });
+  const plan = bulk.buildSortPlan(puTeacher, school, bank, pages, { pages: found, papers: [
+    summary({ section: 'A', paper_id: 91, matched_question_labels: ['1A'] }),
+    summary({ paper_id: 92 }), summary({ section: 'C', paper_id: 91, matched_question_labels: ['11C'] }),
+  ] }, result);
+  assert.equal(plan.complete, true);
+  assert.deepEqual(plan.papers, { A: 91, B: 92, C: 91 });
+  assert.equal(plan.sourcePages.length, 24);
+  assert.equal(plan.sourcePages.flatMap((p) => p.issues).length, 0);
+});
+
+
+test('a regular rematch cannot silently erase an earlier answer page as blank', () => {
+  const { id, pages, result } = seedReady();
+  bulk.saveSort(id, teacher, school, library, pages, { pages: [sortPage(1), sortPage(2, { section: 'none', paper_id: 0, questions: [], has_answers: false })], papers: [summary()] }, result);
+  assert.equal(view(id).ready, false);
+  assert.equal(JSON.parse(bulk.itemFor(id).result).source_pages[1].has_answers, true);
+  assert.match(view(id).problems.join(' '), /unresolved/);
+});
+
+const { digest, fileBasis } = await import('../server/provenance.js');
+const { UPLOADS_DIR } = await import('../server/db.js');
+db.prepare('INSERT INTO teachers (id, school_id, name, grade, subjects) VALUES (60,1,?,?,?)').run('Synthetic Science Teacher', 'Middle School', 'Science');
+for (const id of [90, 91]) db.prepare('INSERT INTO papers (id,title,sections,levels,subject,board,language,stored_name,original_name) VALUES (?,?,?,?,?,?,?,?,?)').run(id, `Synthetic Biology ${id}`, 'B', 'secondary', 'Biology', 'CBSE', 'English', `cross-master-${id}.pdf`, `cross-master-${id}.pdf`);
+async function crossFixture({ conflict = false, differentPerson = false } = {}) {
+  const owner = db.prepare('SELECT * FROM teachers WHERE id=60').get();
+  const masters = db.prepare('SELECT * FROM papers WHERE id IN (90,91)').all();
+  for (const master of masters) await fs.writeFile(path.join(UPLOADS_DIR, master.stored_name), `%PDF-1.7 synthetic full biology master ${master.id}`);
+  const id = bulk.addItem(school, { id: 1 }, `${owner.name}.pdf`, [1, 2].map(n => ({ filename: `cross-${Math.random()}-${n}.jpg`, mimetype: 'image/jpeg', size: 20 })));
+  db.prepare("UPDATE bulk_items SET teacher_id=60,sort_status='done',matched_by='file' WHERE id=?").run(id);
+  const pages = pagesFor(id);
+  for (const page of pages) await fs.writeFile(path.join(UPLOADS_DIR, page.stored_name), `synthetic biology response Q2A Q3B ${page.id}`);
+  const item = bulk.itemFor(id);
+  const observations = pages.map((_, i) => pageLook(i + 1, differentPerson ? other : owner));
+  const result = { identity: bulk.inspectIdentity(item, pages, { pages: observations }, [...teachers, owner]), candidate_paper_ids: [90,91], paper_confirmations: {}, notes: [], sections: {},
+    bank_comparison: { complete: true, final_compared: true, finalist_ids: [90], profile_fallback: true },
+    matching_source_basis: { attempt_id: `synthetic-${id}`, teacher: digest(owner), school: digest(db.prepare('SELECT * FROM schools WHERE id=1').get()),
+      pages: Object.fromEntries(pages.map(p => [p.id, fileBasis(p).sha256])),
+      papers: Object.fromEntries(masters.map(p => [p.id, { sha256: fileBasis(p).sha256, metadata: digest(p) }])) } };
+  const sorted = { pages: pages.map((_, i) => sortPage(i + 1, { paper_id: 90, questions: ['2A', '3B'], header_evidence: { status: conflict ? 'conflict' : 'not_present', reason: conflict ? 'Explicit source code differs.' : 'No paper heading.' } })),
+    papers: [summary({ paper_id: 90, reason: 'Food-chain prerequisite and biology learning responses match Q2A and Q3B.', matched_question_labels: ['2A','3B'] })] };
+  bulk.saveSort(id, owner, school, masters, pages, sorted, result);
+  return { id, pages, owner, masters, result, sorted };
+}
+
+test('Science middle-school response discovers Biology secondary master but needs explicit evidence-bound acknowledgement', async () => {
+  const { id, owner, masters } = await crossFixture();
+  assert.equal(bulk.candidatePapers(owner, school, masters).length, 0);
+  const before = view(id);
+  assert.equal(before.ready, false);
+  const review = before.sections.find(s => s.key === 'B').cross_profile_review;
+  assert.ok(review); assert.equal(review.paper_id, 90); assert.match(review.master_url, /cross-master-90.pdf/);
+  assert.match(bulk.choosePapers(bulk.itemFor(id), { B: 90 }), /acknowledgement/);
+  assert.match(bulk.choosePapers(bulk.itemFor(id), { B: 91 }, { B: review.token }), /acknowledgement/);
+  assert.equal(bulk.choosePapers(bulk.itemFor(id), { B: 90 }, { B: review.token }), null);
+  assert.equal(view(id).ready, true);
+  assert.deepEqual(db.prepare('SELECT * FROM teachers WHERE id=60').get(), owner);
+  assert.deepEqual(view(id).pages[0].match.questions, ['2A', '3B']); // No invented Q1 coverage.
+});
+
+test('cross-profile acknowledgement cannot waive real person or source-heading conflicts', async () => {
+  for (const options of [{ differentPerson: true }, { conflict: true }]) {
+    const { id } = await crossFixture(options);
+    const review = view(id).sections.find(s => s.key === 'B').cross_profile_review;
+    const denied = bulk.choosePapers(bulk.itemFor(id), { B: 90 }, { B: review?.token ?? 'forged' });
+    assert.ok(denied); assert.equal(view(id).ready, false);
+  }
+});
+
+for (const kind of ['source_bytes', 'master_bytes', 'profile', 'attempt']) test(`cross-profile approval invalidates on ${kind} change`, async () => {
+  const fixture = await crossFixture(); const { id, pages, owner, masters, result, sorted } = fixture;
+  const review = view(id).sections.find(s => s.key === 'B').cross_profile_review;
+  assert.equal(bulk.choosePapers(bulk.itemFor(id), { B: 90 }, { B: review.token }), null);
+  assert.equal(view(id).ready, true);
+  if (kind === 'source_bytes') await fs.appendFile(path.join(UPLOADS_DIR, pages[0].stored_name), 'changed');
+  if (kind === 'master_bytes') await fs.appendFile(path.join(UPLOADS_DIR, masters[0].stored_name), 'changed');
+  if (kind === 'profile') db.prepare("UPDATE teachers SET grade='Class 9' WHERE id=60").run();
+  if (kind === 'attempt') {
+    const next = structuredClone(result); next.matching_source_basis.attempt_id += '-new';
+    bulk.saveSort(id, owner, school, masters, pages, sorted, next);
+    assert.match(bulk.choosePapers(bulk.itemFor(id), { B: 90 }, { B: review.token }), /acknowledgement/);
+  }
+  assert.equal(view(id).ready, false);
+  if (kind === 'profile') db.prepare('UPDATE teachers SET grade=? WHERE id=60').run(owner.grade);
+});
+
+test('automatic finalization explicitly holds acknowledged cross-profile submissions without mutating status', async () => {
+  const { id } = await crossFixture();
+  const review = view(id).sections.find(s => s.key === 'B').cross_profile_review;
+  bulk.choosePapers(bulk.itemFor(id), { B: 90 }, { B: review.token });
+  assert.throws(() => bulk.queueFinalizations(1, 1, [id]), /automatic finalization does not support/);
+  await assert.rejects(bulk.finalizeBulkItem(id, { evaluate: false }), /automatic finalization does not support/);
+  assert.equal(bulk.itemFor(id).sort_status, 'done');
+});
+
+for (const kind of ['missing_source', 'missing_master', 'alternative', 'duplicate_summary', 'exact_title']) test(`cross-profile exception fails closed for ${kind}`, async () => {
+  const { id, pages, result, sorted, owner, masters } = await crossFixture();
+  if (kind === 'missing_source') await fs.unlink(path.join(UPLOADS_DIR, pages[0].stored_name));
+  if (kind === 'missing_master') await fs.unlink(path.join(UPLOADS_DIR, masters[0].stored_name));
+  if (kind === 'alternative') sorted.papers[0].alternatives = [91];
+  if (kind === 'duplicate_summary') sorted.papers.push(structuredClone(sorted.papers[0]));
+  if (kind === 'exact_title') result.identity.pages[0].paper_title_written = masters[1].title;
+  if (['alternative', 'duplicate_summary', 'exact_title'].includes(kind)) bulk.saveSort(id, owner, school, masters, pages, sorted, result);
+  assert.equal(view(id).sections.find(s => s.key === 'B').cross_profile_review, null);
+  assert.ok(bulk.choosePapers(bulk.itemFor(id), { B: 90 }, { B: 'forged' }));
+  assert.equal(view(id).ready, false);
+  assert.ok(bulk.itemFor(id)); // Confirmation never files or removes a submission.
+});
+
+test('incomplete wider comparison blocks filing even with prior manual confirmations', () => {
+  const { id } = seedReady({ extra: { paper_confirmations: { B: 1 }, bank_comparison: { profile_fallback: true, complete: false, candidate_count: 120, completed_candidate_ids: [1] } } });
+  assert.equal(view(id).ready, false);
+  assert.match(view(id).problems.join(' '), /wider question-bank comparison is incomplete/);
+  assert.match(bulk.choosePapers(bulk.itemFor(id), { B: 1 }), /partial coverage/);
+  assert.equal(bulk.fileReady(1, 1, [id]).filed.length, 0);
+  assert.ok(bulk.itemFor(id));
+});
+
+function semanticHeader(subject, owner, { confirmed = true, grade = '', remainder = {} } = {}) {
+  return pageLook(1, owner, { grade_written: grade, subjects_written: subject,
+    field_evidence: { subjects_written: { origin: 'identity_header', reason: 'Visible labelled Subject field.' } },
+    ...(confirmed ? { context_verification: { status: 'verified_unique_name', verified_teacher_id: owner.id,
+      fields: { subjects_written: { status: 'confirmed', value: subject, label_quote: 'SUBJECT', reason: 'Independent full-page and crop verification.' } } } } : {}), ...remainder });
+}
+function semanticProblems(owner, observation) {
+  const item = { teacher_id: owner.id, file_name: 'synthetic.pdf' }, pages = [{ id: 991, position: 1, section: null }];
+  const identity = bulk.inspectIdentity(item, pages, { pages: [observation] }, [owner]);
+  return { identity, problems: bulk.identityProblems(item, pages, { identity }, [owner]) };
+}
+const primaryOwner = { id: 900, name: 'Synthetic Primary Teacher', grade: 'Grades 2–3', subjects: 'Science, EVS, Mathematics' };
+for (const subject of ['Primary.', 'Primary; Science & E.V.S']) test(`verified level-in-subject preserves raw text and accepts compatible context: ${subject}`, () => {
+  const result = semanticProblems(primaryOwner, semanticHeader(subject, primaryOwner));
+  assert.deepEqual(result.problems, []);
+  assert.equal(result.identity.pages[0].subjects_written, subject);
+  assert.equal(result.identity.pages[0].field_observations.subjects_written, subject);
+  assert.deepEqual(result.identity.pages[0].context_components.levels, ['primary']);
+});
+for (const subject of ['Primary mysterious', 'Primary; Science; Astronomy', 'High School (ಕನ್ನಡ)', 'Pre-primary']) test(`semantic decomposition retains incompatible or unknown context: ${subject}`, () => {
+  const owner = subject.includes('ಕನ್ನಡ') ? { ...primaryOwner, grade: 'Grades 4–8', subjects: 'Kannada' } : primaryOwner;
+  assert.ok(semanticProblems(owner, semanticHeader(subject, owner)).problems.some(p => /conflicts/.test(p)));
+});
+test('unverified or uncertain level-in-subject cannot clear the conflict', () => {
+  assert.ok(semanticProblems(primaryOwner, semanticHeader('Primary', primaryOwner, { confirmed: false })).problems.length);
+  const seen = semanticHeader('Primary', primaryOwner);
+  seen.context_verification.fields.subjects_written.status = 'uncertain';
+  seen.context_verification.fields.subjects_written.value = '';
+  seen.field_evidence.subjects_written.origin = 'uncertain';
+  const result = semanticProblems(primaryOwner, seen);
+  assert.equal(result.identity.pages[0].context_components.interpreted, false);
+  assert.equal(result.identity.pages[0].subjects_written, 'Primary');
+  assert.equal(result.identity.pages[0].field_review_required, true);
+  assert.ok(result.problems.length);
+});
+test('compatible relocated level cannot mask a conflicting actual Class field', () => {
+  assert.ok(semanticProblems(primaryOwner, semanticHeader('Primary', primaryOwner, { grade: 'Class 10' })).problems.some(p => /conflicts/.test(p)));
+});
+test('Kannada script matches Kannada while a high-school mixed header still checks its level', async () => {
+  const { subjectKeys } = await import('../server/papers.js');
+  assert.deepEqual([...subjectKeys('ಕನ್ನಡ')], ['kannada']);
+  const owner = { ...primaryOwner, grade: 'Grades 4–8', subjects: 'Kannada' };
+  assert.deepEqual(semanticProblems(owner, semanticHeader('ಕನ್ನಡ', owner, { grade: 'Middle school' })).problems, []);
+  assert.ok(semanticProblems(owner, semanticHeader('High School (ಕನ್ನಡ)', owner, { grade: 'Middle school' })).problems.some(p => /conflicts/.test(p)));
+});
+test('verified semantic context does not override a different named teacher', () => {
+  const seen = semanticHeader('Primary', primaryOwner); seen.name_written = 'Another Teacher';
+  assert.ok(semanticProblems(primaryOwner, seen).problems.some(p => /not|different|identity|name/i.test(p)));
+});
+
+test('every relocated level must fit, and an absent profile level cannot establish compatibility', () => {
+  assert.ok(semanticProblems(primaryOwner, semanticHeader('Primary; High School', primaryOwner)).problems.some(p => /conflicts/.test(p)));
+  const owner = { ...primaryOwner, grade: '' };
+  assert.ok(semanticProblems(owner, semanticHeader('Primary', owner)).problems.some(p => /conflicts/.test(p)));
+});
+test('Unicode-adjacent level text is unknown rather than a new token boundary', async () => {
+  const { subjectHeaderComponents } = await import('../server/papers.js');
+  const parsed = subjectHeaderComponents('Primaryಕನ್ನಡ');
+  assert.deepEqual(parsed.levels, []);
+  assert.equal(parsed.complete, false);
+  assert.equal(parsed.remainder, 'primaryಕನ್ನಡ');
+});
+test('finalization owner uses the same verified-level conflict gate', () => {
+  for (const [subject, allowed] of [['Primary', true], ['Primary; High School', false]]) {
+    const item = { teacher_id: primaryOwner.id, matched_by: 'you', file_name: 'synthetic.pdf' };
+    const pages = [{ id: 991, position: 1, section: null }];
+    const identity = bulk.inspectIdentity(item, pages, { pages: [semanticHeader(subject, primaryOwner)] }, [primaryOwner]);
+    const owners = bulk.finalizationOwners(item, pages, identity, [primaryOwner]);
+    assert.equal(owners[0].teacher_id, allowed ? primaryOwner.id : null);
+  }
+});
+
+for (const subject of ['Secondary (ಕನ್ನಡ)', 'Highschool (ಕನ್ನಡ)', 'Higher Secondary (ಕನ್ನಡ)', 'ಕನ್ನಡ unknown']) test(`Kannada recognition cannot hide other level or unknown metadata: ${subject}`, () => {
+  const owner = { ...primaryOwner, grade: 'Grades 4–8', subjects: 'Kannada' };
+  assert.ok(semanticProblems(owner, semanticHeader(subject, owner)).problems.some(p => /conflicts/.test(p)));
 });

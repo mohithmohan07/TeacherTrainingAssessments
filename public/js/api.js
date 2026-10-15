@@ -100,10 +100,12 @@ export const assessmentsApi = {
 
 // Every teacher's answer paper uploaded at once as PDFs, matched, then filed.
 export const bulkApi = {
+  importMatchingBank: formData => api.postForm('/api/bulk/matching-bank',formData),
   list: (schoolId, testId) => api.get(`/api/bulk?${new URLSearchParams({ school_id: schoolId, test_id: testId })}`),
   add: (formData) => api.postForm('/api/bulk', formData),
   update: (id, body) => api.putJson(`/api/bulk/${id}`, body),
-  match: (schoolId, testId) => api.postJson('/api/bulk/match', { school_id: schoolId, test_id: testId }),
+  matchPlan: (schoolId, testId, scope = 'incomplete_content') => api.get(`/api/bulk/match-plan?${new URLSearchParams({ school_id: schoolId, test_id: testId, scope })}`),
+  match: (schoolId, testId, planId, scope = 'incomplete_content') => api.postJson('/api/bulk/match', { school_id: schoolId, test_id: testId, plan_id: planId, scope }),
   sort: (id) => api.postJson(`/api/bulk/${id}/sort`, {}),
   remove: (id) => api.del(`/api/bulk/${id}`),
   evaluate: (ids, marking) => api.postJson('/api/bulk/evaluate', { ids, marking }),

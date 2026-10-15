@@ -64,11 +64,11 @@ const SUBJECTS = [
   ['biology', 'biology', 'life science', 'botany', 'zoology'],
   ['english', 'english'],
   ['hindi', 'hindi'],
-  ['kannada', 'kannada'],
+  ['kannada', 'kannada', 'ಕನ್ನಡ'],
   ['sanskrit', 'sanskrit'],
   ['social science', 'social science', 'social sciences', 'social studies', 'social', 'sst', 'history', 'geography', 'civics', 'political science'],
   ['computer science', 'computer science', 'computer', 'computers', 'computer applications', 'computer application', 'cs', 'ict', 'it', 'information technology'],
-  ['evs', 'evs', 'environmental studies', 'environmental science', 'environment'],
+  ['evs', 'evs', 'e v s', 'environmental studies', 'environmental science', 'environment'],
   ['economics', 'economics'],
   ['accountancy', 'accountancy', 'accounts', 'accounting'],
   ['business studies', 'business studies', 'business', 'commerce'],
@@ -82,7 +82,7 @@ const SUBJECTS = [
 const SUBJECT_BY_NAME = new Map(SUBJECTS.flatMap(([key, ...names]) => names.map((name) => [name, key])));
 const SCIENCES = new Set(['physics', 'chemistry', 'biology']);
 
-const plain = (text) => String(text ?? '').toLowerCase().replace(/[^a-z0-9&+ ]+/g, ' ').replace(/\s+/g, ' ').trim();
+const plain = (text) => String(text ?? '').normalize('NFC').toLowerCase().replace(/[^\p{L}\p{M}0-9&+ ]+/gu, ' ').replace(/\s+/g, ' ').trim();
 
 // Names longest first, so "computer science" is read before "science".
 const SUBJECT_NAMES = [...SUBJECT_BY_NAME.keys()].sort((a, b) => b.length - a.length);
@@ -111,6 +111,24 @@ export function subjectKeys(text) {
     }
   }
   return keys;
+}
+
+// Conservative semantic decomposition of a verified Subject header. The caller
+// keeps the exact observed string; unknown words are never silently discarded.
+export function subjectHeaderComponents(text) {
+  let rest = plain(text);
+  const levelParts = [];
+  rest = rest.replace(/(^| )(senior secondary|higher secondary|pre primary|preprimary|middle school|high school|highschool|secondary|primary|middle|nursery|kindergarten|montessori|playgroup|play group|lkg|ukg|kg|pre university|preuniversity|junior college|puc|pu|isc)(?= |$)/g, (_value, _separator, value) => {
+    levelParts.push(value); return ' ';
+  });
+  const subjects = new Set();
+  for (const known of SUBJECT_NAMES) {
+    const pattern = new RegExp(`(^| )${escape(known)}(?= |$)`, 'g');
+    rest = rest.replace(pattern, () => { subjects.add(SUBJECT_BY_NAME.get(known)); return ' '; });
+  }
+  const remainder = rest.replace(/\band\b/g, ' ').replace(/[&+]/g, ' ').replace(/\s+/g, ' ').trim();
+  return { levels: [...levelsFromText(levelParts.join('; '))], level_text: levelParts.join('; '),
+    subjects: [...subjects], remainder, complete: remainder === '' };
 }
 
 // A subject as a short name. Some were saved with a question paper's whole
@@ -220,7 +238,8 @@ export function teacherProfile(teacher, school) {
 export function paperCompatibilityProblem(paper, teacher, school, section) {
   const split = (value) => String(value ?? '').split(',').map((v) => v.trim()).filter(Boolean);
   const overlap = (a, b) => [...a].some((v) => b.has(v));
-  if (!paper || !split(paper.sections).includes(section)) return `The selected paper has no Section ${section}.`;
+  if (!paper) return `No question paper has been matched for Section ${section} yet.`;
+  if (!split(paper.sections).includes(section)) return `The selected paper has no Section ${section}.`;
   const profile = teacherProfile(teacher, school);
   const levels = new Set(split(paper.levels));
   if (levels.size && profile.levels.size && !overlap(levels, profile.levels)) return 'The selected paper is for a different school level. Check the teacher’s class and the administered master.';
@@ -381,12 +400,15 @@ const selectByChecksum = db.prepare('SELECT * FROM papers WHERE checksum = ?');
 
 // Adds one paper, unless the same file is already in the library. Returns the
 // new row, or null with the existing one when it was already there.
-export function addPaper(labels, { pdf, originalName, preview }) {
+export function addPaper(labels, { pdf, originalName, preview, onStored }) {
   const checksum = checksumOf(pdf);
   const existing = selectByChecksum.get(checksum);
   if (existing) return { paper: existing, added: false };
 
   const storedName = randomName('.pdf');
+  // Register the attempted path before writing so an outer transaction can
+  // clean up a partial file if the disk write itself fails.
+  onStored?.(storedName);
   fs.writeFileSync(path.join(UPLOADS_DIR, storedName), pdf);
   let previewName = null;
   if (preview) {
