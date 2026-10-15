@@ -881,7 +881,9 @@ export function buildSortPlan(teacher, school, library, pages, sorted, result, {
       group = bGroups.get(key);
       if (!group) issues.push('More than three distinct Section B papers were reported. Split and review this PDF.');
     }
-    const said = (sorted.papers ?? []).filter((p) => p.section === section && Number(p.paper_id) === paperId);
+    // Zero is the provider's explicit unresolved sentinel. Keep its explanation
+    // even though stored page evidence represents no proposed master as null.
+    const said = (sorted.papers ?? []).filter((p) => p.section === section && Number(p.paper_id) === (paperId ?? 0));
     const summary = said.length === 1 ? said[0] : null;
     const identity = result.identity?.pages.find((p) => p.page_id === page.id);
     const paper = library.find((p) => p.id === paperId);
@@ -893,7 +895,8 @@ export function buildSortPlan(teacher, school, library, pages, sorted, result, {
       if (found.has_answers !== true && !suppliedBlank) issues.push('A section was assigned without confirmed answer content. Review this page.');
       const problem = paperCompatibilityProblem(paper, teacher, school, section);
       if (problem) issues.push(problem);
-      if (!(result.candidate_paper_ids ?? []).includes(paperId)) issues.push('The selected paper was not supplied in full for comparison.');
+      if (paperId === null) issues.push('No question paper was confidently matched for this source page. The administered master remains unresolved.');
+      else if (!(result.candidate_paper_ids ?? []).includes(paperId)) issues.push('The selected paper was not supplied in full for comparison.');
       const labels = (summary?.matched_question_labels ?? []).map(normalizeQuestionLabel).filter(Boolean);
       if (!summary || summary.confidence !== 'high' || !String(summary.reason ?? '').trim() || (!suppliedBlank && !labels.length) ||
           !Array.isArray(summary.alternatives) || summary.alternatives.length ||

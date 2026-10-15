@@ -141,7 +141,7 @@ export async function compareQuestionBank({
   const finish = (result, finalists, finalCompared) => ({
     ...result,
     considered_candidate_ids: [...ids],
-    bank_comparison: { complete: true, batch_count: batchCount, screening_leaf_count: findings.length,
+    bank_comparison: { complete: true, candidate_count: ids.length, batch_count: batchCount, screening_leaf_count: findings.length,
       recovery_split_count: recoverySplitCount, finalist_ids: finalists, final_compared: finalCompared },
   });
 

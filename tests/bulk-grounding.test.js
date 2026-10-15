@@ -146,6 +146,43 @@ test('weak, ambiguous, incompatible and unseen paper choices are not auto-select
   assert.equal(view(id).ready, false);
 });
 
+test('unresolved master retains its explanation without claiming an unsupplied paper was selected', () => {
+  const reason = 'None of the supplied science masters contains these response questions.';
+  const { id } = seedReady({ sorted: {
+    pages: [sortPage(1, { paper_id: 0 }), sortPage(2, { paper_id: 0 })],
+    papers: [summary({ paper_id: 0, confidence: 'low', reason, alternatives: [1, 2] })],
+  } });
+  const shown = view(id);
+  for (const page of shown.pages) {
+    assert.equal(page.match.paper_id, null);
+    assert.equal(page.match.summary_count, 1);
+    assert.equal(page.match.reason, reason);
+    assert.equal(page.match.confidence, 'low');
+    assert.deepEqual(page.match.alternatives, [1, 2]);
+    assert.match(page.match.issues.join(' '), /master remains unresolved/);
+    assert.doesNotMatch(page.match.issues.join(' '), /selected paper was not supplied/);
+  }
+  assert.equal(shown.ready, false);
+  assert.equal(JSON.parse(bulk.itemFor(id).papers).B, null);
+  assert.equal(bulk.fileReady(1, 1, [id]).filed.length, 0);
+});
+
+test('unresolved master cannot become ready from a high-confidence sentinel summary', () => {
+  const { id } = seedReady({ sorted: {
+    pages: [sortPage(1, { paper_id: 0 }), sortPage(2, { paper_id: 0 })],
+    papers: [summary({ paper_id: 0 })],
+  } });
+  assert.equal(view(id).ready, false);
+  assert.equal(JSON.parse(bulk.itemFor(id).papers).B, null);
+  assert.equal(bulk.fileReady(1, 1, [id]).filed.length, 0);
+});
+
+test('positive unseen master still reports missing full comparison evidence', () => {
+  const { id } = seedReady({ extra: { candidate_paper_ids: [2] } });
+  assert.match(view(id).pages[0].match.issues.join(' '), /selected paper was not supplied in full/);
+  assert.equal(view(id).ready, false);
+});
+
 test('unknown Section B page is not inherited into the preceding paper', () => {
   const { id } = seedReady({ sorted: { pages: [sortPage(1), sortPage(2, { paper_id: 0 })], papers: [summary()] } });
   const shown = view(id);

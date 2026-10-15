@@ -56,6 +56,7 @@ test('small banks use one call with every full PDF, including matches below the 
   assert.equal(result.pages[0].paper_id, 7);
   assert.deepEqual(result.considered_candidate_ids, [1, 2, 3, 4, 5, 6, 7]);
   assert.equal(result.bank_comparison.final_compared, true);
+  assert.equal(result.bank_comparison.candidate_count, 7);
   assert.equal(JSON.stringify(content), before);
   assert.deepEqual(await fs.readFile(sourcePath), sourceBytes);
   for (const paper of candidates.slice(0, 7)) assert.deepEqual(await fs.readFile(path.join(uploadsDir, paper.stored_name)), fullPdf(paper.id));
@@ -75,6 +76,7 @@ test('all batches are searched and a correct late-bank candidate gets a full fin
   assert.deepEqual(calls, [[1, 2, 3, 4, 5, 6, 7, 8], [9, 10, 11, 12, 13, 14, 15, 16], [17], [17]]);
   assert.equal(result.pages[0].paper_id, 17);
   assert.deepEqual(result.considered_candidate_ids, candidates.slice(0, 17).map((p) => p.id));
+  assert.equal(result.bank_comparison.candidate_count, 17);
 });
 
 test('cross-batch matches and ambiguous alternatives all survive into final disambiguation', async () => {
