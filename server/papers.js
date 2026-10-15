@@ -64,11 +64,11 @@ const SUBJECTS = [
   ['biology', 'biology', 'life science', 'botany', 'zoology'],
   ['english', 'english'],
   ['hindi', 'hindi'],
-  ['kannada', 'kannada'],
+  ['kannada', 'kannada', 'ಕನ್ನಡ'],
   ['sanskrit', 'sanskrit'],
   ['social science', 'social science', 'social sciences', 'social studies', 'social', 'sst', 'history', 'geography', 'civics', 'political science'],
   ['computer science', 'computer science', 'computer', 'computers', 'computer applications', 'computer application', 'cs', 'ict', 'it', 'information technology'],
-  ['evs', 'evs', 'environmental studies', 'environmental science', 'environment'],
+  ['evs', 'evs', 'e v s', 'environmental studies', 'environmental science', 'environment'],
   ['economics', 'economics'],
   ['accountancy', 'accountancy', 'accounts', 'accounting'],
   ['business studies', 'business studies', 'business', 'commerce'],
@@ -82,7 +82,7 @@ const SUBJECTS = [
 const SUBJECT_BY_NAME = new Map(SUBJECTS.flatMap(([key, ...names]) => names.map((name) => [name, key])));
 const SCIENCES = new Set(['physics', 'chemistry', 'biology']);
 
-const plain = (text) => String(text ?? '').toLowerCase().replace(/[^a-z0-9&+ ]+/g, ' ').replace(/\s+/g, ' ').trim();
+const plain = (text) => String(text ?? '').normalize('NFC').toLowerCase().replace(/[^\p{L}\p{M}0-9&+ ]+/gu, ' ').replace(/\s+/g, ' ').trim();
 
 // Names longest first, so "computer science" is read before "science".
 const SUBJECT_NAMES = [...SUBJECT_BY_NAME.keys()].sort((a, b) => b.length - a.length);
@@ -111,6 +111,24 @@ export function subjectKeys(text) {
     }
   }
   return keys;
+}
+
+// Conservative semantic decomposition of a verified Subject header. The caller
+// keeps the exact observed string; unknown words are never silently discarded.
+export function subjectHeaderComponents(text) {
+  let rest = plain(text);
+  const levelParts = [];
+  rest = rest.replace(/(^| )(senior secondary|higher secondary|pre primary|preprimary|middle school|high school|highschool|secondary|primary|middle|nursery|kindergarten|montessori|playgroup|play group|lkg|ukg|kg|pre university|preuniversity|junior college|puc|pu|isc)(?= |$)/g, (_value, _separator, value) => {
+    levelParts.push(value); return ' ';
+  });
+  const subjects = new Set();
+  for (const known of SUBJECT_NAMES) {
+    const pattern = new RegExp(`(^| )${escape(known)}(?= |$)`, 'g');
+    rest = rest.replace(pattern, () => { subjects.add(SUBJECT_BY_NAME.get(known)); return ' '; });
+  }
+  const remainder = rest.replace(/\band\b/g, ' ').replace(/[&+]/g, ' ').replace(/\s+/g, ' ').trim();
+  return { levels: [...levelsFromText(levelParts.join('; '))], level_text: levelParts.join('; '),
+    subjects: [...subjects], remainder, complete: remainder === '' };
 }
 
 // A subject as a short name. Some were saved with a question paper's whole

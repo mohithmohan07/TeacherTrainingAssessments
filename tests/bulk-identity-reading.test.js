@@ -331,3 +331,26 @@ test('board field clearance requires independent context evidence and cannot era
   const checked=bulk.inspectIdentity({file_name:'synthetic.pdf'},[{id:1,position:1}],{pages:[raw]},[owner]).pages[0];
   assert.equal(checked.subjects_written,'Chemistry');assert.equal(checked.name_written,owner.name);assert.equal(checked.teacher_id,null);
 });
+
+for (const subject of ['Higher Secondary; Electronics', 'Primary; Electronics']) test(`verified level-in-Subject flow retains source and gates bank requests: ${subject}`, async () => {
+  const id = await packet(); let verifies = 0, bankCalls = 0;
+  await bulk.sortItem(id, { configured: () => true, verificationConfigured: () => true,
+    verifyIdentity: async () => { verifies++; return { status: 'verified', name_verified: true, fields_verified: true,
+      evidence: { grade: { status: 'absent', value: '', reason: 'Blank Class.' },
+        subject: { status: 'confirmed', value: subject, label_quote: 'SUBJECT', reason: 'Exact visible text independently verified.' } }, audit: { provider: 'synthetic' } }; },
+    request: async request => {
+      if (request.name === 'answer_sheets_sorted') { bankCalls++; return matched(); }
+      return { pages: mapping(request).map(({ local, original }) => {
+        const seen = observation(local);
+        if (original === 15) { seen.subjects_written = subject; seen.field_evidence.subjects_written = origin('identity_header'); seen.identity_panel_bounds = { x: .45, y: .01, width: .4, height: .08 }; }
+        return seen;
+      }) };
+    } });
+  const result = bulk.presentItem(bulk.itemFor(id)), compatible = subject.startsWith('Higher');
+  assert.equal(verifies, 1);
+  assert.equal(bankCalls, compatible ? 1 : 0);
+  assert.equal(result.ready, compatible, JSON.stringify(result.problems));
+  assert.equal(result.pages[14].identity.subjects_written, subject);
+  assert.equal(result.pages.length, 24);
+  assert.equal(result.teacher.id, owner.id);
+});

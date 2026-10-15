@@ -599,3 +599,80 @@ test('incomplete wider comparison blocks filing even with prior manual confirmat
   assert.equal(bulk.fileReady(1, 1, [id]).filed.length, 0);
   assert.ok(bulk.itemFor(id));
 });
+
+function semanticHeader(subject, owner, { confirmed = true, grade = '', remainder = {} } = {}) {
+  return pageLook(1, owner, { grade_written: grade, subjects_written: subject,
+    field_evidence: { subjects_written: { origin: 'identity_header', reason: 'Visible labelled Subject field.' } },
+    ...(confirmed ? { context_verification: { status: 'verified_unique_name', verified_teacher_id: owner.id,
+      fields: { subjects_written: { status: 'confirmed', value: subject, label_quote: 'SUBJECT', reason: 'Independent full-page and crop verification.' } } } } : {}), ...remainder });
+}
+function semanticProblems(owner, observation) {
+  const item = { teacher_id: owner.id, file_name: 'synthetic.pdf' }, pages = [{ id: 991, position: 1, section: null }];
+  const identity = bulk.inspectIdentity(item, pages, { pages: [observation] }, [owner]);
+  return { identity, problems: bulk.identityProblems(item, pages, { identity }, [owner]) };
+}
+const primaryOwner = { id: 900, name: 'Synthetic Primary Teacher', grade: 'Grades 2–3', subjects: 'Science, EVS, Mathematics' };
+for (const subject of ['Primary.', 'Primary; Science & E.V.S']) test(`verified level-in-subject preserves raw text and accepts compatible context: ${subject}`, () => {
+  const result = semanticProblems(primaryOwner, semanticHeader(subject, primaryOwner));
+  assert.deepEqual(result.problems, []);
+  assert.equal(result.identity.pages[0].subjects_written, subject);
+  assert.equal(result.identity.pages[0].field_observations.subjects_written, subject);
+  assert.deepEqual(result.identity.pages[0].context_components.levels, ['primary']);
+});
+for (const subject of ['Primary mysterious', 'Primary; Science; Astronomy', 'High School (ಕನ್ನಡ)', 'Pre-primary']) test(`semantic decomposition retains incompatible or unknown context: ${subject}`, () => {
+  const owner = subject.includes('ಕನ್ನಡ') ? { ...primaryOwner, grade: 'Grades 4–8', subjects: 'Kannada' } : primaryOwner;
+  assert.ok(semanticProblems(owner, semanticHeader(subject, owner)).problems.some(p => /conflicts/.test(p)));
+});
+test('unverified or uncertain level-in-subject cannot clear the conflict', () => {
+  assert.ok(semanticProblems(primaryOwner, semanticHeader('Primary', primaryOwner, { confirmed: false })).problems.length);
+  const seen = semanticHeader('Primary', primaryOwner);
+  seen.context_verification.fields.subjects_written.status = 'uncertain';
+  seen.context_verification.fields.subjects_written.value = '';
+  seen.field_evidence.subjects_written.origin = 'uncertain';
+  const result = semanticProblems(primaryOwner, seen);
+  assert.equal(result.identity.pages[0].context_components.interpreted, false);
+  assert.equal(result.identity.pages[0].subjects_written, 'Primary');
+  assert.equal(result.identity.pages[0].field_review_required, true);
+  assert.ok(result.problems.length);
+});
+test('compatible relocated level cannot mask a conflicting actual Class field', () => {
+  assert.ok(semanticProblems(primaryOwner, semanticHeader('Primary', primaryOwner, { grade: 'Class 10' })).problems.some(p => /conflicts/.test(p)));
+});
+test('Kannada script matches Kannada while a high-school mixed header still checks its level', async () => {
+  const { subjectKeys } = await import('../server/papers.js');
+  assert.deepEqual([...subjectKeys('ಕನ್ನಡ')], ['kannada']);
+  const owner = { ...primaryOwner, grade: 'Grades 4–8', subjects: 'Kannada' };
+  assert.deepEqual(semanticProblems(owner, semanticHeader('ಕನ್ನಡ', owner, { grade: 'Middle school' })).problems, []);
+  assert.ok(semanticProblems(owner, semanticHeader('High School (ಕನ್ನಡ)', owner, { grade: 'Middle school' })).problems.some(p => /conflicts/.test(p)));
+});
+test('verified semantic context does not override a different named teacher', () => {
+  const seen = semanticHeader('Primary', primaryOwner); seen.name_written = 'Another Teacher';
+  assert.ok(semanticProblems(primaryOwner, seen).problems.some(p => /not|different|identity|name/i.test(p)));
+});
+
+test('every relocated level must fit, and an absent profile level cannot establish compatibility', () => {
+  assert.ok(semanticProblems(primaryOwner, semanticHeader('Primary; High School', primaryOwner)).problems.some(p => /conflicts/.test(p)));
+  const owner = { ...primaryOwner, grade: '' };
+  assert.ok(semanticProblems(owner, semanticHeader('Primary', owner)).problems.some(p => /conflicts/.test(p)));
+});
+test('Unicode-adjacent level text is unknown rather than a new token boundary', async () => {
+  const { subjectHeaderComponents } = await import('../server/papers.js');
+  const parsed = subjectHeaderComponents('Primaryಕನ್ನಡ');
+  assert.deepEqual(parsed.levels, []);
+  assert.equal(parsed.complete, false);
+  assert.equal(parsed.remainder, 'primaryಕನ್ನಡ');
+});
+test('finalization owner uses the same verified-level conflict gate', () => {
+  for (const [subject, allowed] of [['Primary', true], ['Primary; High School', false]]) {
+    const item = { teacher_id: primaryOwner.id, matched_by: 'you', file_name: 'synthetic.pdf' };
+    const pages = [{ id: 991, position: 1, section: null }];
+    const identity = bulk.inspectIdentity(item, pages, { pages: [semanticHeader(subject, primaryOwner)] }, [primaryOwner]);
+    const owners = bulk.finalizationOwners(item, pages, identity, [primaryOwner]);
+    assert.equal(owners[0].teacher_id, allowed ? primaryOwner.id : null);
+  }
+});
+
+for (const subject of ['Secondary (ಕನ್ನಡ)', 'Highschool (ಕನ್ನಡ)', 'Higher Secondary (ಕನ್ನಡ)', 'ಕನ್ನಡ unknown']) test(`Kannada recognition cannot hide other level or unknown metadata: ${subject}`, () => {
+  const owner = { ...primaryOwner, grade: 'Grades 4–8', subjects: 'Kannada' };
+  assert.ok(semanticProblems(owner, semanticHeader(subject, owner)).problems.some(p => /conflicts/.test(p)));
+});

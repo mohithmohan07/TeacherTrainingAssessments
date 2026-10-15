@@ -20,7 +20,7 @@ import { OPENAI_MODEL, friendly, openaiConfigured, requestJson } from './openai.
 import { GEMINI_MODEL, geminiConfigured } from './gemini.js';
 import { READING_VERSION, readAnswers } from './reading.js';
 import { OPENAI_IMAGE_TYPES, pageInputs } from './paper-inputs.js';
-import { PAPER_SECTIONS, allPapers, presentPaper, rankPapers, setSittingPapers, subjectKeys, levelsFromText, teacherProfile, paperCompatibilityProblem } from './papers.js';
+import { PAPER_SECTIONS, allPapers, presentPaper, rankPapers, setSittingPapers, subjectKeys, subjectHeaderComponents, levelsFromText, teacherProfile, paperCompatibilityProblem } from './papers.js';
 import { definiteNameConflict, nameRelationship } from './identity.js';
 export { paperCompatibilityProblem } from './papers.js';
 import { attachStoredPages, removeStoredFile } from './scans.js';
@@ -172,7 +172,8 @@ export function inspectIdentity(item, pages, look, teachers) {
       const field = (key) => {
         const origin = seen.field_evidence?.[key]?.origin;
         const independentlyUnknown = seen.context_verification?.status === 'verified_unique_name' &&
-          ['grade_written', 'subjects_written'].includes(key) && seen.context_verification.fields?.[key]?.status === 'uncertain';
+          ['grade_written', 'subjects_written'].includes(key) && seen.context_verification.fields?.[key]?.status === 'uncertain' &&
+          !(key === 'subjects_written' && subjectHeaderComponents(seen[key]).levels.length);
         const independentlyBoard = ['verified_unique_name', 'verified_unnamed_fields'].includes(seen.context_verification?.status) &&
           ['grade_written', 'subjects_written'].includes(key) && seen.context_verification.fields?.[key]?.status === 'board_metadata';
         return origin === 'answer_content' || origin === 'absent' || (origin === 'board_metadata' && independentlyBoard) || independentlyUnknown ? '' : String(seen[key] ?? '').trim();
@@ -180,10 +181,12 @@ export function inspectIdentity(item, pages, look, teachers) {
       const name = field('name_written');
       const grade = field('grade_written');
       const subjects = field('subjects_written');
-      const resolved = name && seen.name_confidence === 'certain' ? namedTeacher(name, grade, subjects, teachers) : null;
+      const context = identityContextComponents({ ...seen, grade_written: grade, subjects_written: subjects });
+      const resolved = name && seen.name_confidence === 'certain' && !context.unknown_remainder ? namedTeacher(name, context.grade, context.subjects, teachers.filter(teacher => !conflictingContext(teacher, { ...seen, grade_written: grade, subjects_written: subjects }))) : null;
       return {
         page_id: page.id, source_file: item.file_name, source_page: page.position,
         name_written: name, grade_written: grade, subjects_written: subjects,
+        context_components: context,
         name_confidence: seen.name_confidence ?? 'uncertain',
         reported_teacher_id: Number(seen.teacher_id) || null,
         teacher_id: resolved?.id ?? null,
@@ -194,7 +197,8 @@ export function inspectIdentity(item, pages, look, teachers) {
         field_observations: Object.fromEntries(['name_written', 'grade_written', 'subjects_written', 'paper_title_written'].map((key) => [key, String(seen[key] ?? '').trim()])),
         reread_disputes: seen.reread_disputes ?? [],
         field_review_required: hasBlockingIdentityDisputes(seen) || Object.entries(seen.field_evidence ?? {}).some(([key, e]) => e.origin === 'uncertain' &&
-          !(seen.context_verification?.status === 'verified_unique_name' && ['grade_written', 'subjects_written'].includes(key) && seen.context_verification.fields?.[key]?.status === 'uncertain')),
+          !(seen.context_verification?.status === 'verified_unique_name' && ['grade_written', 'subjects_written'].includes(key) && seen.context_verification.fields?.[key]?.status === 'uncertain' &&
+            !(key === 'subjects_written' && subjectHeaderComponents(seen[key]).levels.length))),
       };
     }),
   };
@@ -226,10 +230,29 @@ function contextDisputed(source) {
     (dispute.kind === 'context_change' || (dispute.kind === 'resolved_identity_changed' && dispute.context_only)));
 }
 
+// Reinterpret a misplaced level only after independent header confirmation.
+// Raw fields and their label/crop evidence remain unchanged for review.
+export function identityContextComponents(source) {
+  const raw = String(source.subjects_written ?? '');
+  const parsed = subjectHeaderComponents(raw);
+  const verification = source.context_verification;
+  const field = verification?.fields?.subjects_written;
+  const verified = ['verified_unique_name', 'verified_unnamed_fields'].includes(verification?.status) &&
+    field?.status === 'confirmed' && field.value === raw && source.field_evidence?.subjects_written?.origin === 'identity_header';
+  const interpreted = verified && parsed.levels.length > 0;
+  return { grade: interpreted ? [source.grade_written, parsed.level_text].filter(Boolean).join('; ') : source.grade_written,
+    subjects: interpreted && parsed.complete ? parsed.subjects.join('; ') : raw,
+    interpreted, levels: interpreted ? parsed.levels : [], level_text: interpreted ? parsed.level_text : '',
+    unknown_remainder: interpreted ? parsed.remainder : parsed.levels.length ? 'unverified school-level metadata' : /[\u0C80-\u0CFF]/u.test(raw) ? parsed.remainder : '',
+    source_subjects: raw };
+}
+
 function conflictingContext(teacher, source) {
-  return !contextFits(teacher, source.grade_written, source.subjects_written) ||
-    Boolean(source.subjects_written && !subjectKeys(source.subjects_written).size && teacher.subjects &&
-      !String(teacher.subjects).split(/[,;/|]/).some(subject => identityName(subject) === identityName(source.subjects_written)));
+  const context = identityContextComponents(source);
+  return Boolean(context.unknown_remainder) || !contextFits(teacher, source.grade_written, context.subjects) ||
+    (context.interpreted && context.levels.some(level => !levelsFromText(teacher.grade).has(level))) ||
+    Boolean(context.subjects && !subjectKeys(context.subjects).size && teacher.subjects &&
+      !String(teacher.subjects).split(/[,;/|]/).some(subject => identityName(subject) === identityName(context.subjects)));
 }
 
 export function identityProblems(item, pages, result, teachers) {
@@ -257,9 +280,7 @@ export function identityProblems(item, pages, result, teachers) {
     if (source.name_confidence === 'certain' && definiteNameConflict(selected.name, source.name_written)) {
       problems.push(`Source page ${source.source_page} clearly names “${source.name_written}”, not ${selected.name}. Correct the teacher or exclude that page; manual selection cannot override a conflicting name.`);
     }
-    const explicitUnknownSubject = source.subjects_written && !subjectKeys(source.subjects_written).size && selected.subjects &&
-      !String(selected.subjects).split(/[,;/|]/).some((subject) => identityName(subject) === identityName(source.subjects_written));
-    if (!contextFits(selected, source.grade_written, source.subjects_written) || explicitUnknownSubject) {
+    if (conflictingContext(selected, source)) {
       problems.push(`Source page ${source.source_page} has a class or subject that conflicts with ${selected.name}’s profile. Correct the profile/teacher or exclude that page before filing.`);
     }
   }
@@ -719,9 +740,7 @@ export async function sortItem(id, { request = requestJson, configured = openaiC
   const selected = item.teacher_id ? teachers.find((t) => t.id === item.teacher_id) : null;
   const focus = firstIdentity.pages.flatMap((source, index) => {
     const uncertainName = source.name_written && (!source.teacher_id || source.name_confidence !== 'certain');
-    const profileConflict = selected && (!contextFits(selected, source.grade_written, source.subjects_written) ||
-      (source.subjects_written && !subjectKeys(source.subjects_written).size && selected.subjects &&
-        !String(selected.subjects).split(/[,;/|]/).some((subject) => identityName(subject) === identityName(source.subjects_written))));
+    const profileConflict = selected && conflictingContext(selected, source);
     const differentTeacher = selected && source.teacher_id && source.teacher_id !== selected.id;
     return source.field_review_required || uncertainName || profileConflict || differentTeacher || source.paper_title_written ? [index + 1] : [];
   });
@@ -1489,10 +1508,7 @@ export function finalizationOwners(item, pages, identity, teachers, conflicts = 
     if (!teacher && item.matched_by === 'you') teacher = teachers.find((t) => t.id === item.teacher_id);
     if (!teacher && !seen.name_written && fromFile && (!namedIds.size || (namedIds.size === 1 && namedIds.has(fromFile.id)))) teacher = fromFile;
     if (!teacher || (seen.name_written && definiteNameConflict(teacher.name, seen.name_written)) ||
-        !contextFits(teacher, seen.grade_written, seen.subjects_written)) return { page_id: page.id, teacher_id: null, reason_code: 'identity_unresolved' };
-    const explicitUnknownSubject = seen.subjects_written && !subjectKeys(seen.subjects_written).size && teacher.subjects &&
-      !String(teacher.subjects).split(/[,;/|]/).some((subject) => identityName(subject) === identityName(seen.subjects_written));
-    if (explicitUnknownSubject) return { page_id: page.id, teacher_id: null, reason_code: 'identity_unresolved' };
+        conflictingContext(teacher, seen)) return { page_id: page.id, teacher_id: null, reason_code: 'identity_unresolved' };
     return { page_id: page.id, teacher_id: teacher.id, reason_code: null };
   });
 }
