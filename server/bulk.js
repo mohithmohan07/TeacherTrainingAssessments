@@ -1,3 +1,4 @@
+import { createMatchingDiagnosticStore } from './matching-diagnostics.js';
 import { matchingBankInfo, matchingBankPapers } from './matching-bank.js';
 // Matching and identity review are separate. The native matching queue compares
 // original answer contents against every supplied bank paper without a teacher,
@@ -30,6 +31,8 @@ import { createMatchingBudget, estimateMatchingCalls, MAX_INDEPENDENT_IDENTITY_V
 import { readIdentityPages, rereadIdentityPages, validateProviderIdentity } from './identity-reading.js';
 import { verifyIdentityHeader } from './identity-verification.js';
 import { mergeIdentityObservations, resolveContextDisputes, hasBlockingIdentityDisputes } from './identity-disputes.js';
+
+const saveMatchingDiagnostic = createMatchingDiagnosticStore(path.join(DATA_DIR, 'private-matching-diagnostics'));
 
 /* ------------------------------------------------------------- the rows */
 
@@ -800,6 +803,11 @@ export async function sortContentItem(id, { request = requestJson, configured = 
         content, schema: CONTENT_SORT_SCHEMA, uploadsDir: UPLOADS_DIR, indexCache,
         screeningCheckpoint: previous.content_match?.screening_checkpoint,
         checkpointContext: { provider: CONTENT_REQUEST_SETTINGS.provider, model: OPENAI_MODEL, settings: CONTENT_REQUEST_SETTINGS, source_key: key },
+        onInvalidEvidence: async record => {
+          const diagnostic=await saveMatchingDiagnostic(record);
+          result.content_match.diagnostics=[...(result.content_match.diagnostics??[]),diagnostic].slice(-8);
+          persist();
+        },
         onScreeningCheckpoint: checkpoint => {
           const serialized = JSON.stringify(checkpoint);
           if (Buffer.byteLength(serialized) > 8 * 1024 * 1024) throw friendly('Saved screening evidence exceeds the safe checkpoint limit. No partial match was accepted.');

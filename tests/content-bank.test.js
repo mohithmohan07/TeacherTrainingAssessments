@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import {
   CONTENT_ENGINE_DESCRIPTOR, CONTENT_ENGINE_SIGNATURE, CONTENT_INDEX_VERSION, CONTENT_SCREEN_SCHEMA, CONTENT_VERIFY_SCHEMA, CONTENT_SCREENING_MAX_CHARS, CONTENT_SCREENING_MAX_PAPERS,
-  createContentBankIndex, extractCompletePdfText, compareContentFirstQuestionBank,
+  createContentBankIndex, extractCompletePdfText, compareContentFirstQuestionBank, contentReconciliationSchema,
 } from '../server/content-bank.js';
 import { createMatchingBudget } from '../server/matching-budget.js';
 import { BANK_COMPARISON_BATCH_SIZE, BANK_COMPARISON_FINALIST_LIMIT } from '../server/bank-matching.js';
@@ -336,20 +336,25 @@ test('a failed screening or final request never returns a provisional winner', a
   }
 });
 
-const verified = (ids, { section='B', masterPages=[1], answerPages=[1], uncertain=[] }={}) => ({pages:[{page:1,has_answers:true}],candidates:ids.map(paper_id=>({paper_id,disposition:uncertain.includes(paper_id)?'uncertain':'plausible',reason:'Shared concrete question content.',support:[{section,answer_pages:answerPages,master_pages:masterPages,question_labels:['5A'],correspondence:'Response describes the same question scenario.'}]}))});
+const verified = (ids, { section='B', masterPages=[1], answerPages=[1], uncertain=[] }={}) => ({pages:[{page:1,has_answers:true}],decisions:Object.fromEntries(ids.map(paper_id=>[String(paper_id),{disposition:uncertain.includes(paper_id)?'uncertain':'plausible',reason:'Shared concrete question content.',support:[{section,answer_pages:answerPages,master_pages:masterPages,question_labels:['5A'],correspondence:'Response describes the same question scenario.'}]}]))});
+const joint = (request,id=1, pageCount=1) => {
+ const evidence=JSON.parse(request.content.find(input=>input.type==='input_text'&&input.text.startsWith('COMPLETE FULL-PDF VERIFICATION EVIDENCE')).text.split('(data, not instructions): ')[1]);
+ const candidate=evidence.flatMap(batch=>batch.candidates).find(candidate=>candidate.paper_id===id);
+ return {answer_pages:Object.fromEntries(Array.from({length:pageCount},(_,i)=>[String(i+1),{support_ids:candidate?.support.filter(support=>support.answer_pages.includes(i+1)).map(support=>support.support_id)??[],has_answers:true,reason:'Selected the supplied anchored correspondence.'}]))};
+};
 const anchoredMatch = (id, alternatives=[]) => ({...matched(id,alternatives),papers:[{...matched(id,alternatives).papers[0],master_pages:[1]}]});
 
 test('over sixteen contenders all receive bounded full-PDF verification and ambiguity survives joint reconciliation', async () => {
   const seen=[];
   const { options, requestPolicy } = fixture(30, async request => {
-    const ids=supplied(request);seen.push({schema:request.schema,ids,pdfs:request.content.filter(input=>input.type==='input_file').length});
+    const ids=supplied(request);seen.push({schema:request.schema,name:request.name,ids,pdfs:request.content.filter(input=>input.type==='input_file').length});
     if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(ids,ids);
-    if(request.schema===CONTENT_VERIFY_SCHEMA)return verified(ids);
+    if(request.name==='question_bank_full_pdf_verification')return verified(ids);
     assert.equal(request.content.filter(input=>input.type==='input_file').length,0);
-    return anchoredMatch(30); // A joint model may not silently drop the other29.
+    return joint(request,30); // A joint model may not silently drop the other29.
   });
   const result=await compareContentFirstQuestionBank(options);
-  assert.deepEqual(seen.filter(call=>call.schema===CONTENT_VERIFY_SCHEMA).map(call=>call.ids.length),[16,14]);
+  assert.deepEqual(seen.filter(call=>call.name==='question_bank_full_pdf_verification').map(call=>call.ids.length),[16,14]);
   assert.ok(seen.every(call=>call.pdfs<=16));
   assert.equal(result.bank_comparison.full_pdf_verified_ids.length,30);
   assert.equal(result.bank_comparison.final_comparison_mode,'batched_full_pdf_then_joint_evidence');
@@ -646,31 +651,31 @@ test('schema repair cannot bypass the global provider-attempt limit',async()=>{
 for(const mode of ['missing_candidate','missing_page','timeout','cancelled'])test(`incomplete multi-batch verification (${mode}) cannot reach joint reconciliation`,async()=>{
  let batches=0,joint=0;const {options,requestPolicy}=fixture(30,async request=>{
    if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request));
-   if(request.schema===CONTENT_VERIFY_SCHEMA){batches++;const result=verified(supplied(request));if(batches===2){
-     if(mode==='missing_candidate')result.candidates.pop();if(mode==='missing_page')result.pages=[];
+   if(request.name==='question_bank_full_pdf_verification'){batches++;const result=verified(supplied(request));if(batches>=2){
+     if(mode==='missing_candidate')delete result.decisions[String(supplied(request).at(-1))];if(mode==='missing_page')result.pages=[];
      if(mode==='timeout')throw Object.assign(new Error('bounded timeout'),{code:'OPENAI_REQUEST_TIMEOUT'});
      if(mode==='cancelled')requestPolicy.cancel();
-   }return result;}joint++;return anchoredMatch(1);
+   }return result;}joint++;return joint(request,1);
  });
- await assert.rejects(compareContentFirstQuestionBank(options),/verification batch 2 failed/);assert.equal(joint,0);assert.equal(batches,2);assert.equal(requestPolicy.snapshot().activeAttempts,0);
+ await assert.rejects(compareContentFirstQuestionBank(options),/verification batch 2 failed/);assert.equal(joint,0);assert.equal(batches,['missing_candidate','missing_page'].includes(mode)?3:2);assert.equal(requestPolicy.snapshot().activeAttempts,0);
 });
-for(const mode of ['master_page','question_label','answer_section'])test(`joint reconciliation rejects conflicting ${mode} support`,async()=>{
+for(const mode of ['unknown_support','extra_anchor','wrong_page'])test(`joint reconciliation rejects conflicting ${mode} support`,async()=>{
  const {options}=fixture(30,async request=>{
    if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request));
-   if(request.schema===CONTENT_VERIFY_SCHEMA)return verified(supplied(request));
-   const result=anchoredMatch(1);
-   if(mode==='master_page')result.papers[0].master_pages=[2];
-   if(mode==='question_label')result.papers[0].matched_question_labels=['5B'];
-   if(mode==='answer_section'){result.pages[0].section='A';result.papers[0].section='A';}
+   if(request.name==='question_bank_full_pdf_verification')return verified(supplied(request));
+   const result=joint(request,1);
+   if(mode==='unknown_support')result.answer_pages['1'].support_ids=['invented'];
+   if(mode==='extra_anchor')result.answer_pages['1'].master_pages=[2];
+   if(mode==='wrong_page'){result.answer_pages['2']=result.answer_pages['1'];delete result.answer_pages['1'];}
    return result;
  },{indexCache:createContentBankIndex({extractPdf:bytes=>extraction([`${bytes} first page`,`${bytes} second page`])})});
- await assert.rejects(compareContentFirstQuestionBank(options),/verified|support/);
+ await assert.rejects(compareContentFirstQuestionBank(options),/support|page/);
 });
 test('uncertain contenders without anchors remain alternatives rather than being silently excluded',async()=>{
  const {options}=fixture(30,async request=>{
    if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request));
-   if(request.schema===CONTENT_VERIFY_SCHEMA){const result=verified(supplied(request));for(const candidate of result.candidates)if(candidate.paper_id!==1){candidate.disposition='uncertain';candidate.support=[];}return result;}
-   return anchoredMatch(1);
+   if(request.name==='question_bank_full_pdf_verification'){const result=verified(supplied(request));for(const [id,candidate] of Object.entries(result.decisions))if(id!=='1'){candidate.disposition='uncertain';candidate.support=[];}return result;}
+   return joint(request,1);
  });
  const result=await compareContentFirstQuestionBank(options);assert.equal(result.papers[0].alternatives.length,29);assert.equal(result.papers[0].confidence,'low');
 });
@@ -678,32 +683,136 @@ test('multi-batch verification and reconciliation retain the same global attempt
  const requestPolicy=createMatchingBudget({maxProviderAttempts:4});let joint=0;
  const {options}=fixture(30,async request=>{
    if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request));
-   if(request.schema===CONTENT_VERIFY_SCHEMA)return verified(supplied(request));
-   joint++;return anchoredMatch(1);
+   if(request.name==='question_bank_full_pdf_verification')return verified(supplied(request));
+   joint++;return joint(request,1);
  },{requestPolicy});
  await assert.rejects(compareContentFirstQuestionBank(options));assert.equal(joint,0);assert.equal(requestPolicy.snapshot().attempts,4);
 });
 test('verification-observed writing cannot become blank when screening and final disagree',async()=>{
  const {options}=fixture(30,async request=>{
    if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request),false);
-   if(request.schema===CONTENT_VERIFY_SCHEMA)return verified(supplied(request));
-   return {pages:[page(0,{has_answers:false})],papers:[]};
+   if(request.name==='question_bank_full_pdf_verification')return verified(supplied(request));
+   return {answer_pages:{'1':{support_ids:[],has_answers:false,reason:'Appears blank.'}}};
  });
  const result=await compareContentFirstQuestionBank(options);assert.equal(result.pages[0].has_answers,true);assert.equal(result.pages[0].paper_id,0);assert.deepEqual(result.blank_conflict_pages,[1]);
 });
 test('overlapping content support with conflicting section classifications remains ambiguous',async()=>{
  const {options}=fixture(30,async request=>{
    if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request));
-   if(request.schema===CONTENT_VERIFY_SCHEMA){const evidence=verified(supplied(request));for(const candidate of evidence.candidates)if(candidate.paper_id!==1)candidate.support[0].section='A';return evidence;}
-   return anchoredMatch(1);
+   if(request.name==='question_bank_full_pdf_verification'){const evidence=verified(supplied(request));for(const [id,candidate] of Object.entries(evidence.decisions))if(id!=='1')candidate.support[0].section='A';return evidence;}
+   return joint(request,1);
  });
  const result=await compareContentFirstQuestionBank(options);assert.equal(result.papers[0].alternatives.length,29);assert.equal(result.papers[0].confidence,'low');
 });
-test('each answer page needs its own verified anchors and labels represented in the final finding',async()=>{
+test('each answer page gets its own verified anchors and labels by deterministic expansion',async()=>{
  const {options}=fixture(30,async request=>{
    if(request.schema===CONTENT_SCREEN_SCHEMA){const result=screened(supplied(request),supplied(request));result.pages.push({page:2,has_answers:true});return result;}
-   if(request.schema===CONTENT_VERIFY_SCHEMA){const evidence=verified(supplied(request));evidence.pages.push({page:2,has_answers:true});for(const candidate of evidence.candidates)candidate.support.push({section:'B',answer_pages:[2],master_pages:[2],question_labels:['5B'],correspondence:'A second answer matches a different contained question.'});return evidence;}
-   const result=anchoredMatch(1);result.pages.push({...page(1),page:2,questions:['5B']});return result;
+   if(request.name==='question_bank_full_pdf_verification'){const evidence=verified(supplied(request));evidence.pages.push({page:2,has_answers:true});for(const candidate of Object.values(evidence.decisions))candidate.support.push({section:'B',answer_pages:[2],master_pages:[2],question_labels:['5B'],correspondence:'A second answer matches a different contained question.'});return evidence;}
+   return joint(request,1,2);
  },{content:[...content,{...original,image_url:'data:image/png;base64,c2Vjb25k'}],answerPageCount:2,indexCache:createContentBankIndex({extractPdf:bytes=>extraction([`${bytes} page1`,`${bytes} page2`])})});
- await assert.rejects(compareContentFirstQuestionBank(options),/verified content support/);
+ const result=await compareContentFirstQuestionBank(options);assert.deepEqual(result.papers[0].master_pages,[1,2]);assert.deepEqual(result.pages[1].questions,['5B']);
+});
+
+// These fixtures reproduce validator failure classes, not recovered live model
+// payloads: live42/88 retained error paths but not the invalid response bodies.
+for(const mode of ['missing_id','unknown_id','empty_reason','invalid_support'])test(`keyed verification repairs ${mode} once using identical full inputs`,async()=>{
+ let attempts=0,first;const {options,requestPolicy}=fixture(30,async request=>{
+  if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request));
+  if(request.name==='question_bank_full_pdf_verification'){
+   const ids=supplied(request),result=verified(ids);
+   assert.deepEqual(request.schema.properties.decisions.required,ids.map(String));
+   assert.equal(request.schema.properties.decisions.additionalProperties,false);
+   if(ids[0]===1){attempts++;if(attempts===1){first=JSON.stringify(request.content);
+    if(mode==='missing_id')delete result.decisions['1'];
+    if(mode==='unknown_id')result.decisions['999']=result.decisions['1'];
+    if(mode==='empty_reason')result.decisions['1'].reason=' ';
+    if(mode==='invalid_support')result.decisions['1'].support[0].master_pages=[999];
+   }else{assert.equal(JSON.stringify(request.content),first);assert.match(request.instructions,/SCHEMA REPAIR/);assert.match(request.instructions,/1|999/);}}
+   return result;
+  }return joint(request,1);
+ });
+ const result=await compareContentFirstQuestionBank(options);assert.equal(attempts,2);assert.equal(result.bank_comparison.schema_repair_count,1);assert.equal(requestPolicy.snapshot().attempts,6);
+});
+for(const mode of ['unknown','duplicate','conflicting','blank_with_support','anchor_override','missing_page'])test(`joint support selection repairs ${mode} without retyping source anchors`,async()=>{
+ let attempts=0,first;const {options,requestPolicy}=fixture(30,async request=>{
+  if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request));
+  if(request.name==='question_bank_full_pdf_verification')return verified(supplied(request));
+  attempts++;const result=joint(request,1),decision=result.answer_pages['1'];
+  if(attempts===1){first=JSON.stringify(request.content);
+   if(mode==='unknown')decision.support_ids=['p999s1_unknown'];
+   if(mode==='duplicate')decision.support_ids.push(decision.support_ids[0]);
+   if(mode==='conflicting')decision.support_ids.push(...joint(request,2).answer_pages['1'].support_ids);
+   if(mode==='blank_with_support')decision.has_answers=false;
+   if(mode==='anchor_override')decision.master_pages=[99];
+   if(mode==='missing_page')delete result.answer_pages['1'];
+  }else{assert.equal(JSON.stringify(request.content),first);assert.match(request.instructions,/SCHEMA REPAIR/);}
+  return result;
+ });
+ const result=await compareContentFirstQuestionBank(options);assert.equal(attempts,2);assert.equal(result.bank_comparison.schema_repair_count,1);assert.equal(requestPolicy.snapshot().attempts,6);assert.deepEqual(result.papers[0].master_pages,[1]);
+});
+test('same PDF contained-paper alternatives survive selecting one verified support',async()=>{
+ const {options}=fixture(30,async request=>{
+  if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request));
+  if(request.name==='question_bank_full_pdf_verification'){const result=verified(supplied(request));if(result.decisions['1'])result.decisions['1'].support.push({...result.decisions['1'].support[0],master_pages:[2],question_labels:['9A']});return result;}
+  const result=joint(request,1);result.answer_pages['1'].support_ids.splice(1);return result;
+ },{indexCache:createContentBankIndex({extractPdf:bytes=>extraction([`${bytes} page1`,`${bytes} page2`])})});
+ const result=await compareContentFirstQuestionBank(options);assert.equal(result.papers[0].confidence,'low');assert.deepEqual(result.papers[0].master_pages,[1]);assert.deepEqual(result.papers[0].alternative_supports[0].master_pages,[2]);
+});
+test('multiple supported questions on one answer page expand without losing either label or anchor',async()=>{
+ const {options}=fixture(30,async request=>{
+  if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request));
+  if(request.name==='question_bank_full_pdf_verification'){const result=verified(supplied(request));for(const candidate of Object.values(result.decisions))candidate.support.push({...candidate.support[0],master_pages:[2],question_labels:['5B']});return result;}
+  return joint(request,1);
+ },{indexCache:createContentBankIndex({extractPdf:bytes=>extraction([`${bytes} page1`,`${bytes} page2`])})});
+ const result=await compareContentFirstQuestionBank(options);assert.deepEqual(result.pages[0].questions,['5A','5B']);assert.deepEqual(result.papers[0].master_pages,[1,2]);
+});
+test('verification repair cannot exceed the original shared request cap',async()=>{
+ const requestPolicy=createMatchingBudget({maxProviderAttempts:3});let verificationCalls=0;
+ const {options}=fixture(30,async request=>{
+  if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request));
+  verificationCalls++;return {decisions:{},pages:[{page:1,has_answers:true}]};
+ },{requestPolicy});
+ await assert.rejects(compareContentFirstQuestionBank(options));assert.equal(verificationCalls,1);assert.equal(requestPolicy.snapshot().attempts,3);
+});
+test('unresolved joint decisions do not fabricate matches or retry valid uncertainty',async()=>{
+ let joints=0;const {options}=fixture(30,async request=>{
+  if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request));
+  if(request.name==='question_bank_full_pdf_verification')return verified(supplied(request));
+  joints++;return {answer_pages:{'1':{support_ids:[],has_answers:true,reason:'The shared question evidence cannot resolve the administered source.'}}};
+ });
+ const result=await compareContentFirstQuestionBank(options);assert.equal(joints,1);assert.equal(result.pages[0].paper_id,0);assert.deepEqual(result.papers,[]);assert.equal(result.bank_comparison.full_pdf_verification_evidence.flatMap(batch=>batch.candidates).length,30);
+});
+test('invalid private response reaches diagnostic sink but unknown strings never enter public errors or repair prompts',async()=>{
+ const secret='PRIVATE_RESPONSE_TEXT';let diagnostics=0;
+ const {options}=fixture(30,async request=>{
+  assert.ok(!request.instructions.includes(secret));
+  if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request));
+  if(request.name==='question_bank_full_pdf_verification'){const result=verified(supplied(request));result.decisions[secret]=result.decisions['1'];return result;}
+  throw new Error('No joint request allowed');
+ },{onInvalidEvidence:record=>{diagnostics++;assert.ok(JSON.stringify(record.payload).includes(secret));assert.ok(!record.error_message.includes(secret));}});
+ await assert.rejects(compareContentFirstQuestionBank(options),error=>!error.message.includes(secret)&&/unknown key count/.test(error.message));assert.equal(diagnostics,2);
+});
+test('unexpected verification page fields cannot enter retained evidence',async()=>{
+ const {options}=fixture(30,async request=>{
+  if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request));
+  const result=verified(supplied(request));result.pages[0].unexpected='extra payload';return result;
+ });
+ await assert.rejects(compareContentFirstQuestionBank(options),/only page and has_answers/);
+});
+test('reconciliation schema only offers page-local support IDs and refuses oversized contracts',()=>{
+ const verification=[{candidates:[{support:[{support_id:'a',answer_pages:[1]},{support_id:'b',answer_pages:[2]}]}]}];
+ const schema=contentReconciliationSchema(verification,2);
+ assert.deepEqual(schema.properties.answer_pages.properties['1'].properties.support_ids.items.enum,['a']);
+ assert.deepEqual(schema.properties.answer_pages.properties['2'].properties.support_ids.items.enum,['b']);
+ const many=[{candidates:[{support:Array.from({length:501},(_,i)=>({support_id:`s${i}`,answer_pages:[1]}))}]}];
+ assert.throws(()=>contentReconciliationSchema(many,1),/bounded size/);
+});
+for(const mode of ['cancel','budget'])test(`joint structural repair obeys ${mode} before another provider call`,async()=>{
+ const requestPolicy=createMatchingBudget({maxProviderAttempts:5});let jointCalls=0;
+ const {options}=fixture(30,async request=>{
+  if(request.schema===CONTENT_SCREEN_SCHEMA)return screened(supplied(request),supplied(request));
+  if(request.name==='question_bank_full_pdf_verification')return verified(supplied(request));
+  jointCalls++;if(mode==='cancel')requestPolicy.cancel();return {answer_pages:{}};
+ },{requestPolicy});
+ await assert.rejects(compareContentFirstQuestionBank(options));assert.equal(jointCalls,1);assert.equal(requestPolicy.snapshot().attempts,5);
 });
